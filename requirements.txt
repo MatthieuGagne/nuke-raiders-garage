@@ -1,0 +1,5 @@
+# PySide6 is needed only by `make test-garage` (tests/garage/) and by
+# running the Garage application itself (garage.bat / python -m tools.garage).
+# The default test target (`make test`, tests/test_*.py) must pass with
+# PySide6 absent -- see .github/workflows/test.yml.
+PySide6

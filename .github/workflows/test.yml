@@ -1,0 +1,22 @@
+name: test
+
+# Default suite (tools/garage/core/ coverage). Runs on Windows and Linux
+# and installs no display library -- this is what proves AC15: the
+# default target succeeds with PySide6 absent.
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Run default test suite (no PySide6 installed)
+        run: python -m unittest discover -s tests -p 'test_*.py'
