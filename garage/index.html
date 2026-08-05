@@ -1,0 +1,1149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Interactive prototype of Garage — the Nuke Raider parameter-tuning and asset-management tool.">
+<meta property="og:title" content="Garage — Prototype">
+<meta property="og:description" content="Interactive prototype of Garage — the Nuke Raider parameter-tuning and asset-management tool.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%23A8482A'/%3E%3Crect x='3' y='7' width='10' height='2' fill='%23fff'/%3E%3C/svg%3E">
+<title>Garage — Prototype</title>
+<style>
+/* ─────────────────────────────────────────────────────────────
+   TOKENS
+   Neutrals are graphite with a green bias (DMG LCD, not neon).
+   Accent is oxide rust. Semantic colours are deliberately NOT
+   the accent, and are always paired with a stripe + mono label.
+   ───────────────────────────────────────────────────────────── */
+:root {
+  --bg:         #EDEFE9;
+  --surface:    #F8F9F5;
+  --surface-2:  #E4E7DE;
+  --surface-3:  #D8DDD1;
+  --line:       #C7CEBF;
+  --line-soft:  #DEE2D7;
+  --text:       #1A201C;
+  --text-2:     #4B554E;
+  --text-3:     #78827A;
+  --accent:     #A8482A;
+  --accent-ink: #FFFFFF;
+  --accent-soft:#F0E1DB;
+  --accent-line:#D8B3A4;
+  --pass:       #4E7A31;
+  --warn:       #A8791B;
+  --fail:       #B2314A;
+  --pass-soft:  #E3EDD8;
+  --warn-soft:  #F5E9CC;
+  --fail-soft:  #F6DDE2;
+  --shadow:     0 1px 2px rgba(26,32,28,.06), 0 8px 28px rgba(26,32,28,.08);
+  --gb0: #E8EDD8; --gb1: #A8B67C; --gb2: #5A7043; --gb3: #23301E;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg:         #0E120F;
+    --surface:    #171C18;
+    --surface-2:  #1E241F;
+    --surface-3:  #272E28;
+    --line:       #343C35;
+    --line-soft:  #242B25;
+    --text:       #E6EAE2;
+    --text-2:     #A6AFA5;
+    --text-3:     #79837A;
+    --accent:     #D2683F;
+    --accent-ink: #1A0E08;
+    --accent-soft:#2C1D15;
+    --accent-line:#573224;
+    --pass:       #86B45A;
+    --warn:       #D9AE3C;
+    --fail:       #E0647C;
+    --pass-soft:  #1D2717;
+    --warn-soft:  #2C2412;
+    --fail-soft:  #2E1720;
+    --shadow:     0 1px 2px rgba(0,0,0,.4), 0 10px 34px rgba(0,0,0,.36);
+  }
+}
+:root[data-theme="dark"] {
+  --bg:#0E120F; --surface:#171C18; --surface-2:#1E241F; --surface-3:#272E28;
+  --line:#343C35; --line-soft:#242B25;
+  --text:#E6EAE2; --text-2:#A6AFA5; --text-3:#79837A;
+  --accent:#D2683F; --accent-ink:#1A0E08; --accent-soft:#2C1D15; --accent-line:#573224;
+  --pass:#86B45A; --warn:#D9AE3C; --fail:#E0647C;
+  --pass-soft:#1D2717; --warn-soft:#2C2412; --fail-soft:#2E1720;
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 10px 34px rgba(0,0,0,.36);
+}
+:root[data-theme="light"] {
+  --bg:#EDEFE9; --surface:#F8F9F5; --surface-2:#E4E7DE; --surface-3:#D8DDD1;
+  --line:#C7CEBF; --line-soft:#DEE2D7;
+  --text:#1A201C; --text-2:#4B554E; --text-3:#78827A;
+  --accent:#A8482A; --accent-ink:#FFFFFF; --accent-soft:#F0E1DB; --accent-line:#D8B3A4;
+  --pass:#4E7A31; --warn:#A8791B; --fail:#B2314A;
+  --pass-soft:#E3EDD8; --warn-soft:#F5E9CC; --fail-soft:#F6DDE2;
+  --shadow:0 1px 2px rgba(26,32,28,.06), 0 8px 28px rgba(26,32,28,.08);
+}
+
+/* ── base ───────────────────────────────────────────────────── */
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+.mono, code {
+  font-family: "Cascadia Mono", "Cascadia Code", Consolas, ui-monospace, monospace;
+  font-variant-ligatures: none;
+}
+.tnum { font-variant-numeric: tabular-nums; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
+@media (prefers-reduced-motion: reduce) {
+  * { animation-duration: .001ms !important; transition-duration: .001ms !important; }
+}
+
+.wrap { max-width: 1240px; margin: 0 auto; padding: 40px 24px 72px; }
+
+/* ── page header ────────────────────────────────────────────── */
+.eyebrow {
+  font-family: "Cascadia Mono", Consolas, ui-monospace, monospace;
+  font-size: 11px; letter-spacing: .12em; text-transform: uppercase;
+  color: var(--accent); margin: 0 0 10px;
+}
+h1 {
+  font-size: clamp(28px, 4vw, 40px); line-height: 1.1; margin: 0 0 12px;
+  font-weight: 650; letter-spacing: -.02em; text-wrap: balance;
+}
+.lede { color: var(--text-2); max-width: 66ch; margin: 0 0 8px; font-size: 15px; }
+.meta-row {
+  display: flex; flex-wrap: wrap; gap: 8px; margin-top: 20px;
+}
+.meta-chip {
+  font-family: "Cascadia Mono", Consolas, monospace; font-size: 11px;
+  letter-spacing: .04em; padding: 4px 9px; border-radius: 3px;
+  border: 1px solid var(--line); color: var(--text-2); background: var(--surface);
+}
+
+/* ── screen switcher ────────────────────────────────────────── */
+.switcher {
+  display: flex; flex-wrap: wrap; gap: 4px; margin: 32px 0 14px;
+  border-bottom: 1px solid var(--line); padding-bottom: 0;
+}
+.tab {
+  appearance: none; background: none; border: 0; cursor: pointer;
+  font-family: inherit; font-size: 13px; color: var(--text-2);
+  padding: 9px 14px; border-bottom: 2px solid transparent;
+  display: flex; align-items: baseline; gap: 8px; transition: color .12s;
+}
+.tab:hover { color: var(--text); }
+.tab[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); font-weight: 600; }
+.tab .phase {
+  font-family: "Cascadia Mono", Consolas, monospace; font-size: 10px;
+  letter-spacing: .06em; padding: 1px 5px; border-radius: 2px;
+  background: var(--surface-2); color: var(--text-3); border: 1px solid var(--line-soft);
+}
+.tab[aria-selected="true"] .phase { background: var(--accent-soft); color: var(--accent); border-color: var(--accent-line); }
+
+.caption { color: var(--text-2); font-size: 13px; margin: 0 0 18px; max-width: 78ch; }
+.caption strong { color: var(--text); font-weight: 600; }
+
+/* ── the app window ─────────────────────────────────────────── */
+.app {
+  background: var(--surface); border: 1px solid var(--line);
+  border-radius: 6px; box-shadow: var(--shadow); overflow: hidden;
+  display: grid; grid-template-rows: auto 1fr auto; min-height: 560px;
+}
+
+/* title bar */
+.titlebar {
+  display: flex; align-items: center; gap: 12px;
+  padding: 0 12px; height: 40px;
+  background: var(--surface-2); border-bottom: 1px solid var(--line);
+}
+.appname {
+  font-weight: 650; letter-spacing: -.01em; font-size: 13px;
+  display: flex; align-items: center; gap: 7px;
+}
+.appname .mark {
+  width: 14px; height: 14px; border-radius: 2px; background: var(--accent);
+  display: inline-block; position: relative; flex: none;
+}
+.appname .mark::after {
+  content: ""; position: absolute; inset: 4px 3px; background: var(--accent-ink);
+  clip-path: polygon(0 40%, 100% 40%, 100% 60%, 0 60%);
+}
+.wt-select {
+  display: flex; align-items: center; gap: 8px; margin-left: 8px;
+  background: var(--surface); border: 1px solid var(--line);
+  border-radius: 4px; padding: 3px 8px 3px 10px; font-size: 12px;
+  cursor: pointer; color: var(--text);
+}
+.wt-select .label {
+  font-family: "Cascadia Mono", Consolas, monospace; font-size: 10px;
+  letter-spacing: .08em; text-transform: uppercase; color: var(--text-3);
+}
+.wt-select .caret { color: var(--text-3); font-size: 10px; }
+.branch-chip {
+  font-family: "Cascadia Mono", Consolas, monospace; font-size: 11px;
+  padding: 2px 8px; border-radius: 3px;
+  background: var(--accent-soft); color: var(--accent); border: 1px solid var(--accent-line);
+}
+.branch-chip.is-master { background: var(--warn-soft); color: var(--warn); border-color: color-mix(in srgb, var(--warn) 35%, transparent); }
+.titlebar .spacer { flex: 1; }
+.winbtns { display: flex; gap: 14px; color: var(--text-3); font-size: 11px; padding-right: 4px; }
+
+/* body */
+.appbody { display: grid; grid-template-columns: 176px 1fr; min-height: 0; }
+.rail {
+  background: var(--surface-2); border-right: 1px solid var(--line);
+  padding: 10px 8px; display: flex; flex-direction: column; gap: 2px;
+}
+.rail-label {
+  font-family: "Cascadia Mono", Consolas, monospace; font-size: 10px;
+  letter-spacing: .1em; text-transform: uppercase; color: var(--text-3);
+  padding: 8px 8px 6px;
+}
+.rail-item {
+  display: flex; align-items: center; gap: 9px; padding: 7px 9px;
+  border-radius: 4px; font-size: 13px; color: var(--text-2);
+  cursor: pointer; border: 1px solid transparent; text-align: left;
+  background: none; font-family: inherit; width: 100%;
+}
+.rail-item:hover { background: var(--surface-3); color: var(--text); }
+.rail-item[aria-current="true"] {
+  background: var(--surface); color: var(--text); font-weight: 600;
+  border-color: var(--line); box-shadow: inset 2px 0 0 var(--accent);
+}
+.rail-item .ico { width: 14px; height: 14px; flex: none; color: var(--text-3); }
+.rail-item[aria-current="true"] .ico { color: var(--accent); }
+.rail-badge {
+  margin-left: auto; font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 10px; padding: 1px 5px; border-radius: 8px;
+  background: var(--fail-soft); color: var(--fail);
+}
+
+.main { display: grid; grid-template-columns: 1fr 268px; min-width: 0; }
+.pane { padding: 18px 20px; min-width: 0; overflow: hidden; }
+.aside {
+  border-left: 1px solid var(--line); background: var(--surface-2);
+  padding: 16px 16px 20px; min-width: 0;
+}
+@media (max-width: 940px) {
+  .main { grid-template-columns: 1fr; }
+  .aside { border-left: 0; border-top: 1px solid var(--line); }
+  .appbody { grid-template-columns: 1fr; }
+  .rail { flex-direction: row; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--line); }
+  .rail-label { display: none; }
+  .rail-item { width: auto; white-space: nowrap; }
+}
+
+.pane-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 4px; }
+.pane-head h2 { font-size: 15px; margin: 0; font-weight: 650; letter-spacing: -.01em; }
+.pane-sub { color: var(--text-3); font-size: 12px; margin: 0 0 16px; }
+
+/* section label */
+.slabel {
+  font-family: "Cascadia Mono", Consolas, monospace; font-size: 10px;
+  letter-spacing: .1em; text-transform: uppercase; color: var(--text-3);
+  margin: 0 0 9px;
+}
+
+/* ── chips / filters ────────────────────────────────────────── */
+.chiprow { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 16px; }
+.chip {
+  appearance: none; font-family: inherit; font-size: 12px; cursor: pointer;
+  padding: 4px 10px; border-radius: 12px; border: 1px solid var(--line);
+  background: var(--surface); color: var(--text-2);
+}
+.chip:hover { border-color: var(--text-3); color: var(--text); }
+.chip[aria-pressed="true"] {
+  background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600;
+}
+
+/* ── param table ────────────────────────────────────────────── */
+.scroller { overflow-x: auto; }
+table.params { width: 100%; border-collapse: collapse; font-size: 13px; min-width: 560px; }
+table.params th {
+  text-align: left; font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 10px; letter-spacing: .09em; text-transform: uppercase;
+  color: var(--text-3); font-weight: 400; padding: 0 10px 7px 0;
+  border-bottom: 1px solid var(--line);
+}
+table.params td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line-soft); vertical-align: middle; }
+table.params tr:last-child td { border-bottom: 0; }
+.pname { font-family: "Cascadia Mono", Consolas, monospace; font-size: 12px; white-space: nowrap; }
+.prow.changed .pname { color: var(--accent); font-weight: 600; }
+.prow.changed { background: var(--accent-soft); }
+.prow.changed td:first-child { box-shadow: inset 2px 0 0 var(--accent); }
+td.pctl { width: 42%; }
+input[type="range"] { width: 100%; accent-color: var(--accent); cursor: pointer; }
+.pval {
+  font-family: "Cascadia Mono", Consolas, monospace; font-size: 13px;
+  font-variant-numeric: tabular-nums; text-align: right; width: 62px;
+  padding: 3px 7px; border: 1px solid var(--line); border-radius: 3px;
+  background: var(--surface); color: var(--text);
+}
+.prow.changed .pval { border-color: var(--accent-line); color: var(--accent); font-weight: 600; }
+.prange {
+  font-family: "Cascadia Mono", Consolas, monospace; font-size: 11px;
+  color: var(--text-3); font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.phead-val {
+  font-family: "Cascadia Mono", Consolas, monospace; font-size: 11px;
+  color: var(--text-3); white-space: nowrap;
+}
+.prow.changed .phead-val { color: var(--text-2); }
+.revert {
+  appearance: none; border: 1px solid var(--line); background: var(--surface);
+  color: var(--text-2); font-family: inherit; font-size: 11px; cursor: pointer;
+  padding: 2px 8px; border-radius: 3px; visibility: hidden;
+}
+.prow.changed .revert { visibility: visible; border-color: var(--accent-line); color: var(--accent); }
+.revert:hover { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+
+.schema-note {
+  margin-top: 16px; padding: 10px 12px; border-radius: 4px;
+  background: var(--surface-2); border: 1px solid var(--line-soft);
+  font-size: 12px; color: var(--text-2); display: flex; gap: 10px; align-items: flex-start;
+}
+.schema-note .k {
+  font-family: "Cascadia Mono", Consolas, monospace; font-size: 10px;
+  letter-spacing: .08em; text-transform: uppercase; color: var(--pass);
+  background: var(--pass-soft); padding: 2px 6px; border-radius: 2px; flex: none;
+}
+
+/* ── budget meters ──────────────────────────────────────────── */
+.budget { margin-bottom: 15px; }
+.budget-top {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 5px;
+}
+.budget-name { font-size: 12px; font-weight: 600; }
+.budget-num {
+  font-family: "Cascadia Mono", Consolas, monospace; font-size: 11px;
+  font-variant-numeric: tabular-nums; color: var(--text-2);
+}
+.meter { height: 6px; border-radius: 3px; background: var(--surface-3); overflow: hidden; }
+.meter > span { display: block; height: 100%; border-radius: 3px; }
+.meter.pass > span { background: var(--pass); }
+.meter.warn > span { background: var(--warn); }
+.meter.fail > span { background: var(--fail); }
+.budget-foot {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 8px; margin-top: 5px;
+}
+.verdict {
+  font-family: "Cascadia Mono", Consolas, monospace; font-size: 10px;
+  letter-spacing: .08em; padding: 1px 6px; border-radius: 2px;
+}
+.verdict.pass { background: var(--pass-soft); color: var(--pass); }
+.verdict.warn { background: var(--warn-soft); color: var(--warn); }
+.verdict.fail { background: var(--fail-soft); color: var(--fail); }
+.budget-hint { font-size: 11px; color: var(--text-3); }
+
+.scenelist { margin-top: 4px; border-top: 1px solid var(--line); padding-top: 12px; }
+.scenelist ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 3px; }
+.scenelist li {
+  display: flex; justify-content: space-between; gap: 10px;
+  font-family: "Cascadia Mono", Consolas, monospace; font-size: 11px;
+  color: var(--text-3); font-variant-numeric: tabular-nums;
+}
+.scenelist li.peak { color: var(--warn); font-weight: 600; }
+
+/* ── build bar ──────────────────────────────────────────────── */
+.buildbar {
+  border-top: 1px solid var(--line); background: var(--surface-2);
+}
+.buildbar-row {
+  display: flex; align-items: center; gap: 10px; padding: 9px 12px; flex-wrap: wrap;
+}
+.btn {
+  appearance: none; font-family: inherit; font-size: 12px; cursor: pointer;
+  padding: 5px 12px; border-radius: 4px; border: 1px solid var(--line);
+  background: var(--surface); color: var(--text); font-weight: 500;
+}
+.btn:hover:not(:disabled) { border-color: var(--text-3); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; }
+.btn.primary:hover:not(:disabled) { filter: brightness(1.08); }
+.btn.danger { color: var(--fail); border-color: color-mix(in srgb, var(--fail) 40%, transparent); }
+.btn.danger:hover:not(:disabled) { background: var(--fail); color: var(--surface); border-color: var(--fail); }
+.btn:disabled { opacity: .42; cursor: not-allowed; }
+.buildbar .spacer { flex: 1; }
+.status-line {
+  font-family: "Cascadia Mono", Consolas, monospace; font-size: 11px;
+  color: var(--text-2); display: flex; align-items: center; gap: 7px;
+}
+.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--pass); flex: none; }
+.dot.warn { background: var(--warn); }
+.dot.fail { background: var(--fail); }
+.dot.busy { background: var(--accent); animation: pulse 1s ease-in-out infinite; }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .25; } }
+
+.log {
+  border-top: 1px solid var(--line); background: var(--bg);
+  font-family: "Cascadia Mono", Consolas, monospace; font-size: 11px;
+  line-height: 1.65; padding: 10px 12px; max-height: 122px; overflow-y: auto;
+  color: var(--text-2); white-space: pre-wrap;
+}
+.log .ok { color: var(--pass); }
+.log .bad { color: var(--fail); }
+.log .warnc { color: var(--warn); }
+.log .dim { color: var(--text-3); }
+
+/* ── generic table (worktrees) ──────────────────────────────── */
+table.grid { width: 100%; border-collapse: collapse; font-size: 13px; min-width: 620px; }
+table.grid th {
+  text-align: left; font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 10px; letter-spacing: .09em; text-transform: uppercase;
+  color: var(--text-3); font-weight: 400; padding: 0 12px 7px 0;
+  border-bottom: 1px solid var(--line);
+}
+table.grid td { padding: 9px 12px 9px 0; border-bottom: 1px solid var(--line-soft); vertical-align: middle; }
+table.grid tr.active-wt { background: var(--accent-soft); }
+table.grid tr.active-wt td:first-child { box-shadow: inset 2px 0 0 var(--accent); padding-left: 8px; }
+.path { font-family: "Cascadia Mono", Consolas, monospace; font-size: 12px; }
+.path .dimpath { color: var(--text-3); }
+.tag {
+  font-family: "Cascadia Mono", Consolas, monospace; font-size: 10px;
+  letter-spacing: .06em; padding: 2px 7px; border-radius: 3px;
+  border: 1px solid var(--line); color: var(--text-2); background: var(--surface);
+  white-space: nowrap;
+}
+.tag.clean { background: var(--pass-soft); color: var(--pass); border-color: color-mix(in srgb, var(--pass) 30%, transparent); }
+.tag.dirty { background: var(--warn-soft); color: var(--warn); border-color: color-mix(in srgb, var(--warn) 30%, transparent); }
+.tag.blocked { background: var(--fail-soft); color: var(--fail); border-color: color-mix(in srgb, var(--fail) 30%, transparent); }
+
+/* ── callout ────────────────────────────────────────────────── */
+.callout {
+  display: flex; gap: 12px; padding: 12px 14px; border-radius: 5px;
+  border: 1px solid var(--line); background: var(--surface-2);
+  font-size: 12.5px; color: var(--text-2); margin: 16px 0 0;
+}
+.callout .stripe { width: 3px; border-radius: 2px; background: var(--text-3); flex: none; }
+.callout.fail { background: var(--fail-soft); border-color: color-mix(in srgb, var(--fail) 28%, transparent); }
+.callout.fail .stripe { background: var(--fail); }
+.callout.warn { background: var(--warn-soft); border-color: color-mix(in srgb, var(--warn) 28%, transparent); }
+.callout.warn .stripe { background: var(--warn); }
+.callout b { color: var(--text); font-weight: 650; }
+
+/* ── doctor list ────────────────────────────────────────────── */
+.checks { display: grid; gap: 1px; background: var(--line-soft); border: 1px solid var(--line); border-radius: 5px; overflow: hidden; }
+.check {
+  display: grid; grid-template-columns: 62px 1fr auto; gap: 12px; align-items: center;
+  background: var(--surface); padding: 10px 12px;
+}
+.check.is-fail { background: var(--fail-soft); }
+.check-name { font-size: 13px; font-weight: 600; }
+.check-detail { font-family: "Cascadia Mono", Consolas, monospace; font-size: 11px; color: var(--text-3); word-break: break-all; }
+.check.is-fail .check-detail { color: var(--fail); }
+
+/* ── asset grid ─────────────────────────────────────────────── */
+.assets { display: grid; grid-template-columns: repeat(auto-fill, minmax(168px, 1fr)); gap: 12px; }
+.acard {
+  border: 1px solid var(--line); border-radius: 5px; background: var(--surface);
+  overflow: hidden; display: flex; flex-direction: column;
+}
+.acard.is-fail { border-color: color-mix(in srgb, var(--fail) 45%, transparent); }
+.acard.is-stale { border-color: color-mix(in srgb, var(--warn) 45%, transparent); }
+.acard .thumb {
+  background: var(--gb0); border-bottom: 1px solid var(--line);
+  display: block; width: 100%; height: 96px; image-rendering: pixelated;
+}
+.acard .body { padding: 8px 10px 10px; display: flex; flex-direction: column; gap: 5px; }
+.acard .fname { font-family: "Cascadia Mono", Consolas, monospace; font-size: 11.5px; word-break: break-all; }
+.acard .arow { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+.acard .cost { font-family: "Cascadia Mono", Consolas, monospace; font-size: 10.5px; color: var(--text-3); }
+.acard .acts { display: flex; gap: 5px; margin-top: 3px; }
+.acard .acts .btn { padding: 3px 8px; font-size: 11px; flex: 1; }
+
+/* ── dialog editor ──────────────────────────────────────────── */
+.dlg { display: grid; grid-template-columns: 150px 1fr; gap: 16px; }
+@media (max-width: 720px) { .dlg { grid-template-columns: 1fr; } }
+.npclist { display: grid; gap: 2px; align-content: start; }
+.npc {
+  padding: 7px 10px; border-radius: 4px; font-size: 12.5px; cursor: pointer;
+  border: 1px solid transparent; color: var(--text-2); background: none;
+  font-family: inherit; text-align: left; display: flex; justify-content: space-between; gap: 6px;
+}
+.npc:hover { background: var(--surface-2); color: var(--text); }
+.npc[aria-current="true"] { background: var(--surface-2); border-color: var(--line); color: var(--text); font-weight: 600; box-shadow: inset 2px 0 0 var(--accent); }
+.npc .n { font-family: "Cascadia Mono", Consolas, monospace; font-size: 10px; color: var(--text-3); }
+
+.node {
+  border: 1px solid var(--line); border-radius: 5px; background: var(--surface);
+  padding: 11px 12px; margin-bottom: 9px;
+}
+.node.over { border-color: color-mix(in srgb, var(--fail) 50%, transparent); background: var(--fail-soft); }
+.node-head { display: flex; align-items: baseline; gap: 9px; margin-bottom: 7px; }
+.node-id { font-family: "Cascadia Mono", Consolas, monospace; font-size: 10px; letter-spacing: .06em; color: var(--text-3); }
+.node-text { font-size: 13px; flex: 1; min-width: 0; }
+.meter-chars {
+  font-family: "Cascadia Mono", Consolas, monospace; font-size: 10.5px;
+  font-variant-numeric: tabular-nums; color: var(--text-3); white-space: nowrap;
+}
+.node.over .meter-chars { color: var(--fail); font-weight: 700; }
+.gbbox {
+  display: inline-block; background: var(--gb0); color: var(--gb3);
+  border: 2px solid var(--gb2); border-radius: 2px; padding: 6px 7px;
+  font-family: "Cascadia Mono", Consolas, monospace; font-size: 11px; line-height: 1.35;
+  white-space: pre; margin: 4px 0 7px;
+}
+.node-links { display: flex; flex-wrap: wrap; gap: 5px; }
+.link-chip {
+  font-family: "Cascadia Mono", Consolas, monospace; font-size: 10.5px;
+  padding: 2px 7px; border-radius: 3px; border: 1px solid var(--line);
+  background: var(--surface-2); color: var(--text-2);
+}
+
+/* ── commit box ─────────────────────────────────────────────── */
+.commitbox {
+  border: 1px solid var(--line); border-radius: 5px; background: var(--surface-2);
+  padding: 12px; margin-top: 18px;
+}
+.commitbox input[type="text"] {
+  width: 100%; padding: 6px 9px; font-family: inherit; font-size: 13px;
+  border: 1px solid var(--line); border-radius: 4px;
+  background: var(--surface); color: var(--text);
+}
+.hookrun {
+  margin-top: 10px; border: 1px solid var(--line); border-radius: 4px;
+  background: var(--bg); padding: 9px 10px;
+  font-family: "Cascadia Mono", Consolas, monospace; font-size: 11px; color: var(--text-2);
+}
+.hookrun .bar { height: 4px; border-radius: 2px; background: var(--surface-3); margin-top: 7px; overflow: hidden; }
+.hookrun .bar > span { display: block; height: 100%; background: var(--accent); width: 46%; }
+
+[hidden] { display: none !important; }
+</style>
+
+<style>
+  /* Reset the Artifact host would otherwise provide */
+  img, canvas { max-width: 100%; }
+  /* Theme toggle — the host chrome supplies one; standalone must not */
+  .theme-toggle {
+    position: fixed; top: 14px; right: 14px; z-index: 50;
+    appearance: none; cursor: pointer;
+    font-family: "Cascadia Mono", Consolas, ui-monospace, monospace;
+    font-size: 10px; letter-spacing: .09em; text-transform: uppercase;
+    padding: 6px 11px; border-radius: 4px;
+    border: 1px solid var(--line); background: var(--surface); color: var(--text-2);
+  }
+  .theme-toggle:hover { color: var(--text); border-color: var(--text-3); }
+  @media print { .theme-toggle { display: none; } }
+</style>
+</head>
+<body>
+
+
+<div class="wrap">
+
+  <p class="eyebrow">Nuke Raider · developer tooling · prototype</p>
+  <h1>Garage</h1>
+  <p class="lede">
+    A repo-launched Windows GUI for tuning game parameters and managing assets — replacing the
+    three terminal tools the project carries today, two of which are POSIX-only and have never
+    run on the target machine.
+  </p>
+  <p class="lede">
+    Every value on these screens is real: parameters read from <code class="mono">src/config.h</code>,
+    worktrees from <code class="mono">git worktree list</code>, budgets from an actual
+    <code class="mono">tools/memory_check.py</code> run.
+  </p>
+
+  <div class="meta-row">
+    <span class="meta-chip">PySide6 · Python 3.13</span>
+    <span class="meta-chip">tools/garage/</span>
+    <span class="meta-chip">Emulicious handoff</span>
+    <span class="meta-chip">One active worktree</span>
+  </div>
+
+  <!-- ── screen switcher ───────────────────────────────────── -->
+  <div class="switcher" role="tablist" aria-label="Prototype screens">
+    <button class="tab" role="tab" aria-selected="true"  data-screen="tuner">Tuner <span class="phase">P1</span></button>
+    <button class="tab" role="tab" aria-selected="false" data-screen="worktrees">Worktrees <span class="phase">P1</span></button>
+    <button class="tab" role="tab" aria-selected="false" data-screen="doctor">Doctor <span class="phase">P1</span></button>
+    <button class="tab" role="tab" aria-selected="false" data-screen="assets">Assets <span class="phase">P2</span></button>
+    <button class="tab" role="tab" aria-selected="false" data-screen="dialog">Dialog <span class="phase">P3</span></button>
+  </div>
+
+  <p class="caption" id="caption"></p>
+
+  <!-- ── the window ────────────────────────────────────────── -->
+  <div class="app">
+
+    <div class="titlebar">
+      <span class="appname"><span class="mark"></span>Garage</span>
+      <button class="wt-select" type="button" aria-label="Change active worktree">
+        <span class="label">Worktree</span>
+        <span class="mono" id="tb-worktree">factory-issue-588</span>
+        <span class="caret">▾</span>
+      </button>
+      <span class="branch-chip" id="tb-branch">factory-issue-588</span>
+      <span class="spacer"></span>
+      <span class="winbtns" aria-hidden="true"><span>—</span><span>▢</span><span>✕</span></span>
+    </div>
+
+    <div class="appbody">
+
+      <nav class="rail" aria-label="Panels">
+        <span class="rail-label">Panels</span>
+        <button class="rail-item" data-screen="tuner" aria-current="true">
+          <svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M2 4h12M2 8h12M2 12h12"/><circle cx="6" cy="4" r="1.8" fill="currentColor" stroke="none"/><circle cx="10.5" cy="8" r="1.8" fill="currentColor" stroke="none"/><circle cx="4.5" cy="12" r="1.8" fill="currentColor" stroke="none"/></svg>
+          Tuner
+        </button>
+        <button class="rail-item" data-screen="assets">
+          <svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><rect x="2" y="2.5" width="11.5" height="11" rx="1.5"/><path d="M2 10.5l3-3 3 3 2.5-2.5 3 3"/></svg>
+          Assets
+        </button>
+        <button class="rail-item" data-screen="dialog">
+          <svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M2.5 3.5h11v7h-6l-3 2.5v-2.5h-2z"/></svg>
+          Dialog
+        </button>
+        <span class="rail-label">Project</span>
+        <button class="rail-item" data-screen="worktrees">
+          <svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><circle cx="4" cy="3.5" r="1.8"/><circle cx="4" cy="12.5" r="1.8"/><circle cx="12" cy="8" r="1.8"/><path d="M4 5.3v5.4M5.8 3.9c3 .6 4.2 2 4.4 3.7M5.8 12.1c3-.6 4.2-2 4.4-3.7"/></svg>
+          Worktrees
+        </button>
+        <button class="rail-item" data-screen="doctor">
+          <svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M8 2.2l5 2v4c0 3-2.2 5-5 5.6C5.2 13.2 3 11.2 3 8.2v-4z"/><path d="M6 8l1.5 1.6L10.2 6.6"/></svg>
+          Doctor
+          <span class="rail-badge">1</span>
+        </button>
+      </nav>
+
+      <div class="main">
+
+        <!-- ═══ TUNER ═══════════════════════════════════════ -->
+        <section class="pane" data-pane="tuner">
+          <div class="pane-head"><h2>Tuner</h2></div>
+          <p class="pane-sub">src/config.h · 3 values changed since HEAD</p>
+
+          <div class="chiprow" role="group" aria-label="Categories">
+            <button class="chip" aria-pressed="true">Car Physics</button>
+            <button class="chip" aria-pressed="false">Combat</button>
+            <button class="chip" aria-pressed="false">Racer AI</button>
+            <button class="chip" aria-pressed="false">Enemies</button>
+            <button class="chip" aria-pressed="false">Projectiles</button>
+            <button class="chip" aria-pressed="false">Terrain</button>
+            <button class="chip" aria-pressed="false">Economy</button>
+          </div>
+
+          <div class="scroller">
+            <table class="params">
+              <thead>
+                <tr>
+                  <th>Define</th><th>Value</th><th></th><th>Range</th><th>At HEAD</th><th></th>
+                </tr>
+              </thead>
+              <tbody id="param-body"></tbody>
+            </table>
+          </div>
+
+          <div class="schema-note">
+            <span class="k">Schema</span>
+            <span>
+              <b>34</b> tunable · <b>56</b> structural · <b>0</b> unclassified.
+              Structural defines — <code class="mono">MAX_SPRITES</code>,
+              <code class="mono">POWERUP_TILE_BASE</code>, the VRAM tile layout — are not editable
+              here. A new <code class="mono">#define</code> that is neither classification fails
+              <code class="mono">make test-tools</code>.
+            </span>
+          </div>
+        </section>
+
+        <!-- ═══ WORKTREES ═══════════════════════════════════ -->
+        <section class="pane" data-pane="worktrees" hidden>
+          <div class="pane-head"><h2>Worktrees</h2></div>
+          <p class="pane-sub">3 checkouts · active worktree drives every path in the app</p>
+
+          <div class="scroller">
+            <table class="grid">
+              <thead>
+                <tr><th>Path</th><th>Branch</th><th>Head</th><th>Status</th><th>Active</th></tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td class="path">C:/Code/<b>nuke-raider</b></td>
+                  <td><span class="tag">master</span></td>
+                  <td class="mono tnum" style="font-size:11px;color:var(--text-3)">8d95c2e</td>
+                  <td><span class="tag clean">clean</span></td>
+                  <td><input type="radio" name="wt" aria-label="Activate main tree"></td>
+                </tr>
+                <tr>
+                  <td class="path"><span class="dimpath">.claude/worktrees/</span><b>factory-issue-582</b></td>
+                  <td><span class="tag">factory-issue-582</span></td>
+                  <td class="mono tnum" style="font-size:11px;color:var(--text-3)">8140221</td>
+                  <td><span class="tag dirty">3 changed</span></td>
+                  <td><input type="radio" name="wt" aria-label="Activate factory-issue-582"></td>
+                </tr>
+                <tr class="active-wt">
+                  <td class="path"><span class="dimpath">.claude/worktrees/</span><b>factory-issue-588</b></td>
+                  <td><span class="tag">factory-issue-588</span></td>
+                  <td class="mono tnum" style="font-size:11px;color:var(--text-3)">7e9f7b8</td>
+                  <td><span class="tag clean">clean</span></td>
+                  <td><input type="radio" name="wt" checked aria-label="Active: factory-issue-588"></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="buildbar-row" style="padding-left:0;padding-right:0">
+            <button class="btn">New worktree…</button>
+            <button class="btn danger" id="del-btn">Delete…</button>
+            <span class="status-line" style="margin-left:4px">Delete refuses the active worktree, a dirty tree, and any branch.</span>
+          </div>
+
+          <div class="callout warn" id="del-confirm" hidden>
+            <span class="stripe"></span>
+            <span>
+              <b>Delete factory-issue-582?</b><br>
+              It has 3 uncommitted changes — deletion is blocked until the tree is clean.
+              The branch is never touched.
+            </span>
+          </div>
+
+          <div class="commitbox">
+            <p class="slabel">Commit to factory-issue-588</p>
+            <input type="text" value="tune: raise gear-3 top speed, soften downshift" aria-label="Commit message">
+            <div class="buildbar-row" style="padding:10px 0 0">
+              <button class="btn primary" id="commit-btn">Commit</button>
+              <span class="status-line"><span class="dot"></span>on a feature branch — allowed</span>
+            </div>
+            <div class="hookrun" id="hookrun" hidden>
+              <div>pre-commit → make test-tools</div>
+              <div class="dim" id="hooktext">running 509 tests · elapsed 41s of ~90s</div>
+              <div class="bar"><span id="hookbar"></span></div>
+            </div>
+          </div>
+
+          <div class="callout">
+            <span class="stripe"></span>
+            <span>Commit is blocked on <code class="mono">master</code>. Push and PR stay in
+            <code class="mono">gh</code> — the app never creates them.</span>
+          </div>
+        </section>
+
+        <!-- ═══ DOCTOR ══════════════════════════════════════ -->
+        <section class="pane" data-pane="doctor" hidden>
+          <div class="pane-head"><h2>Environment</h2></div>
+          <p class="pane-sub">7 of 8 checks passing · re-run on launch</p>
+
+          <div class="checks">
+            <div class="check"><span class="verdict pass">PASS</span><span><span class="check-name">make</span><br><span class="check-detail">C:\Program Files\Git\usr\bin\make.exe</span></span><span class="tag">4.4.1</span></div>
+            <div class="check"><span class="verdict pass">PASS</span><span><span class="check-name">gcc — host tests</span><br><span class="check-detail">C:\Users\mathd\Documents\mingw64\bin\gcc.exe</span></span><span class="tag">13.2.0</span></div>
+            <div class="check"><span class="verdict pass">PASS</span><span><span class="check-name">GBDK_HOME</span><br><span class="check-detail">C:/gbdk</span></span><span class="tag">4.3.0</span></div>
+            <div class="check is-fail"><span class="verdict fail">FAIL</span><span><span class="check-name">romusage — ROM bank budgets</span><br><span class="check-detail">not found on PATH — add C:\gbdk\bin</span></span><span class="tag blocked">blocked</span></div>
+            <div class="check"><span class="verdict pass">PASS</span><span><span class="check-name">Git bash + coreutils</span><br><span class="check-detail">C:\Program Files\Git\bin;C:\Program Files\Git\usr\bin</span></span><span class="tag">on PATH</span></div>
+            <div class="check"><span class="verdict pass">PASS</span><span><span class="check-name">java</span><br><span class="check-detail">java.exe — 21.0.4</span></span><span class="tag">ok</span></div>
+            <div class="check"><span class="verdict pass">PASS</span><span><span class="check-name">Emulicious</span><br><span class="check-detail">C:\Tools\Emulicious\Emulicious.jar</span></span><span class="tag">ok</span></div>
+            <div class="check"><span class="verdict pass">PASS</span><span><span class="check-name">PySide6</span><br><span class="check-detail">6.8.1</span></span><span class="tag">ok</span></div>
+          </div>
+
+          <div class="callout fail">
+            <span class="stripe"></span>
+            <span>
+              <b>ROM bank budgets cannot be checked.</b>
+              <code class="mono">make bank-post-build</code> will exit 2 rather than report a
+              failure — a gate that cannot run never fails. This is the condition that hid
+              issue&nbsp;#461 for months.
+            </span>
+          </div>
+        </section>
+
+        <!-- ═══ ASSETS ══════════════════════════════════════ -->
+        <section class="pane" data-pane="assets" hidden>
+          <div class="pane-head"><h2>Assets</h2></div>
+          <p class="pane-sub">assets/ · 1 needs attention · 1 changed on disk</p>
+
+          <div class="chiprow" role="group" aria-label="Asset types">
+            <button class="chip" aria-pressed="true">All</button>
+            <button class="chip" aria-pressed="false">Sprites</button>
+            <button class="chip" aria-pressed="false">Tiles</button>
+            <button class="chip" aria-pressed="false">Maps</button>
+            <button class="chip" aria-pressed="false">Music</button>
+          </div>
+
+          <div class="assets" id="asset-grid"></div>
+
+          <div class="callout">
+            <span class="stripe"></span>
+            <span>Double-click opens the file in the Windows default editor. On return, Garage
+            detects the change and offers to re-run the converter. Drawing stays in Aseprite
+            and Tiled; generated C files are never editable here.</span>
+          </div>
+        </section>
+
+        <!-- ═══ DIALOG ══════════════════════════════════════ -->
+        <section class="pane" data-pane="dialog" hidden>
+          <div class="pane-head"><h2>Dialog</h2></div>
+          <p class="pane-sub">assets/dialog/npcs.json · save blocked — 1 node over the 63-char limit</p>
+
+          <div class="dlg">
+            <div class="npclist">
+              <button class="npc" aria-current="true">MECHANIC <span class="n">4</span></button>
+              <button class="npc">TRADER <span class="n">6</span></button>
+              <button class="npc">DRIFTER <span class="n">3</span></button>
+            </div>
+
+            <div>
+              <div class="node">
+                <div class="node-head">
+                  <span class="node-id">[0]</span>
+                  <span class="node-text">Roads. Parts. Sharp. Racer. Grease. Caps.</span>
+                  <span class="meter-chars">41/63</span>
+                </div>
+                <div class="gbbox">Roads. Parts
+. Sharp. Rac
+er. Grease.
+Caps.</div>
+                <div class="node-links"><span class="link-chip">next → [1]</span></div>
+              </div>
+
+              <div class="node">
+                <div class="node-head">
+                  <span class="node-id">[1]</span>
+                  <span class="node-text">What's on your mind?</span>
+                  <span class="meter-chars">20/63</span>
+                </div>
+                <div class="node-links">
+                  <span class="link-chip">[The races] → [2]</span>
+                  <span class="link-chip">[Supplies] → [3]</span>
+                </div>
+              </div>
+
+              <div class="node over">
+                <div class="node-head">
+                  <span class="node-id">[2]</span>
+                  <span class="node-text">Track two eats axles. Bring spares, bring caps, and bring a shorter temper.</span>
+                  <span class="meter-chars">75/63</span>
+                </div>
+                <div class="node-links"><span class="link-chip">next → END</span></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="callout fail">
+            <span class="stripe"></span>
+            <span><b>Node [2] is 12 characters over.</b> Save and generate are disabled until it
+            fits. The GB dialog box wraps at 12 characters — the preview above is what the
+            hardware will actually draw.</span>
+          </div>
+        </section>
+
+        <!-- ═══ ASIDE — budgets ═════════════════════════════ -->
+        <aside class="aside">
+          <p class="slabel">Memory budgets</p>
+
+          <div class="budget">
+            <div class="budget-top"><span class="budget-name">WRAM</span><span class="budget-num">1,509 / 8,192 B</span></div>
+            <div class="meter pass"><span style="width:18%"></span></div>
+            <div class="budget-foot"><span class="verdict pass">PASS</span><span class="budget-hint">18%</span></div>
+          </div>
+
+          <div class="budget">
+            <div class="budget-top"><span class="budget-name">VRAM</span><span class="budget-num">76 / 384 tiles</span></div>
+            <div class="meter pass"><span style="width:19%"></span></div>
+            <div class="budget-foot"><span class="verdict pass">PASS</span><span class="budget-hint">19%</span></div>
+          </div>
+
+          <div class="budget">
+            <div class="budget-top"><span class="budget-name">OAM</span><span class="budget-num">32 / 40 sprites</span></div>
+            <div class="meter warn"><span style="width:80%"></span></div>
+            <div class="budget-foot"><span class="verdict warn">WARN</span><span class="budget-hint">busiest: Playing</span></div>
+          </div>
+
+          <div class="budget">
+            <div class="budget-top"><span class="budget-name">ROM banks</span><span class="budget-num">—</span></div>
+            <div class="meter"><span style="width:0"></span></div>
+            <div class="budget-foot"><span class="verdict fail">BLOCKED</span><span class="budget-hint">romusage missing</span></div>
+          </div>
+
+          <div class="scenelist">
+            <p class="slabel">Peak OAM per scene</p>
+            <ul>
+              <li><span>Title</span><span>0 / 40</span></li>
+              <li><span>Overmap</span><span>1 / 40</span></li>
+              <li><span>Hub</span><span>1 / 40</span></li>
+              <li><span>Prerace</span><span>0 / 40</span></li>
+              <li class="peak"><span>Playing</span><span>32 / 40</span></li>
+              <li><span>Results</span><span>0 / 40</span></li>
+              <li><span>GameOver</span><span>0 / 40</span></li>
+            </ul>
+          </div>
+        </aside>
+      </div>
+    </div>
+
+    <!-- ═══ BUILD BAR ═════════════════════════════════════ -->
+    <div class="buildbar">
+      <div class="buildbar-row">
+        <button class="btn primary" id="build-btn">Build</button>
+        <button class="btn" id="clean-btn">Clean build</button>
+        <button class="btn" id="launch-btn">Launch in Emulicious</button>
+        <span class="spacer"></span>
+        <span class="status-line"><span class="dot warn" id="build-dot"></span><span id="build-status">last build 2m ago · OAM WARN · launch allowed</span></span>
+      </div>
+      <div class="log" id="log" aria-live="polite"><span class="dim">$ make clean &amp;&amp; make</span>
+<span class="dim">…</span>
+Built build/nuke-raider.gb  <span class="dim">— 512 KB, MBC5</span>
+<span class="dim">$ make memory-check</span>
+WRAM 1,509/8,192 <span class="ok">PASS</span> · VRAM 76/384 <span class="ok">PASS</span> · OAM 32/40 <span class="warnc">WARN</span>
+<span class="dim">$ make bank-post-build</span>
+<span class="bad">romusage not found on PATH — bank budgets not verified</span></div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  /* ── screen switching ─────────────────────────────────── */
+  var CAPTIONS = {
+    tuner: "The tune-and-see loop. Only defines classified tunable are editable, each clamped to its declared range; changed rows show their value at HEAD and revert individually.",
+    worktrees: "Every path in the app resolves against the active worktree, so a build or launch can never target a stale tree. Delete is guarded three ways; commit is blocked on master.",
+    doctor: "Runs on launch. A missing tool is reported as a failure rather than degrading silently — the failure mode that hid a bank-budget regression for months.",
+    assets: "Browse, validate, convert. Problems surface before the converter runs, not mid-build. Drawing happens in the editor you already use.",
+    dialog: "Replaces the curses editor that cannot run on Windows. The 12-character wrap preview shows what the Game Boy will actually draw."
+  };
+
+  var tabs  = Array.prototype.slice.call(document.querySelectorAll(".tab"));
+  var rails = Array.prototype.slice.call(document.querySelectorAll(".rail-item"));
+  var panes = Array.prototype.slice.call(document.querySelectorAll("[data-pane]"));
+  var caption = document.getElementById("caption");
+
+  function show(name) {
+    panes.forEach(function (p) { p.hidden = p.getAttribute("data-pane") !== name; });
+    tabs.forEach(function (t) { t.setAttribute("aria-selected", String(t.getAttribute("data-screen") === name)); });
+    rails.forEach(function (r) {
+      if (r.getAttribute("data-screen") === name) { r.setAttribute("aria-current", "true"); }
+      else { r.removeAttribute("aria-current"); }
+    });
+    caption.textContent = CAPTIONS[name] || "";
+  }
+  tabs.concat(rails).forEach(function (el) {
+    el.addEventListener("click", function () { show(el.getAttribute("data-screen")); });
+  });
+  show("tuner");
+
+  /* ── tuner rows — real config.h values ─────────────────── */
+  var PARAMS = [
+    { n: "GEAR1_MAX_SPEED",       v: 2, head: 2, min: 1, max: 15, u: "px/frame" },
+    { n: "GEAR1_ACCEL",           v: 2, head: 2, min: 1, max: 15, u: "" },
+    { n: "GEAR2_MAX_SPEED",       v: 4, head: 4, min: 1, max: 15, u: "px/frame" },
+    { n: "GEAR2_ACCEL",           v: 1, head: 1, min: 1, max: 15, u: "" },
+    { n: "GEAR3_MAX_SPEED",       v: 7, head: 6, min: 1, max: 15, u: "px/frame" },
+    { n: "GEAR3_ACCEL",           v: 2, head: 1, min: 1, max: 15, u: "" },
+    { n: "GEAR_DOWNSHIFT_FRAMES", v: 12, head: 8, min: 1, max: 60, u: "frames" },
+    { n: "PLAYER_FRICTION",       v: 1, head: 1, min: 0, max: 8,  u: "" }
+  ];
+
+  var body = document.getElementById("param-body");
+  PARAMS.forEach(function (p, i) {
+    var tr = document.createElement("tr");
+    tr.className = "prow" + (p.v !== p.head ? " changed" : "");
+    tr.innerHTML =
+      '<td class="pname">' + p.n + '</td>' +
+      '<td><input class="pval tnum" type="text" value="' + p.v + '" readonly aria-label="' + p.n + ' value"></td>' +
+      '<td class="pctl"><input type="range" min="' + p.min + '" max="' + p.max + '" value="' + p.v + '" aria-label="' + p.n + '"></td>' +
+      '<td class="prange">' + p.min + '–' + p.max + (p.u ? " " + p.u : "") + '</td>' +
+      '<td class="phead-val">' + (p.v !== p.head ? p.head : "—") + '</td>' +
+      '<td><button class="revert" type="button">revert</button></td>';
+    body.appendChild(tr);
+
+    var range  = tr.querySelector('input[type="range"]');
+    var out    = tr.querySelector(".pval");
+    var headTd = tr.querySelector(".phead-val");
+    var rev    = tr.querySelector(".revert");
+
+    function sync(val) {
+      p.v = Number(val);
+      out.value = p.v;
+      range.value = p.v;
+      var changed = p.v !== p.head;
+      tr.className = "prow" + (changed ? " changed" : "");
+      headTd.textContent = changed ? p.head : "—";
+      countChanges();
+    }
+    range.addEventListener("input", function () { sync(range.value); });
+    rev.addEventListener("click", function () { sync(p.head); });
+  });
+
+  var subEl = document.querySelector('[data-pane="tuner"] .pane-sub');
+  function countChanges() {
+    var n = PARAMS.filter(function (p) { return p.v !== p.head; }).length;
+    subEl.textContent = "src/config.h · " + (n === 0 ? "no changes since HEAD" : n + " value" + (n === 1 ? "" : "s") + " changed since HEAD");
+  }
+  countChanges();
+
+  /* ── asset cards ──────────────────────────────────────── */
+  var ASSETS = [
+    { f: "player_car.png",     t: "Sprite", cost: "4 tiles",   state: "ok" },
+    { f: "npc_drifter.png",    t: "Sprite", cost: "4 tiles",   state: "ok" },
+    { f: "explosion.png",      t: "Sprite", cost: "3 frames",  state: "ok" },
+    { f: "bullet.png",         t: "Sprite", cost: "1 tile",    state: "ok" },
+    { f: "turret.png",         t: "Sprite", cost: "1 tile",    state: "stale" },
+    { f: "beam.png",           t: "Sprite", cost: "2 tiles",   state: "fail" },
+    { f: "tileset.png",        t: "Tiles",  cost: "48 tiles",  state: "ok" },
+    { f: "track2.tmx",         t: "Map",    cost: "64 × 32",   state: "ok" },
+    { f: "BeepBox-Song.uge",   t: "Music",  cost: "bank 4",    state: "ok" }
+  ];
+
+  var SHADES = ["#E8EDD8", "#A8B67C", "#5A7043", "#23301E"];
+
+  function seeded(str) {
+    var h = 2166136261;
+    for (var i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = (h * 16777619) >>> 0; }
+    return function () { h ^= h << 13; h >>>= 0; h ^= h >> 17; h ^= h << 5; h >>>= 0; return h / 4294967296; };
+  }
+
+  function drawThumb(canvas, name) {
+    var rnd = seeded(name);
+    var ctx = canvas.getContext("2d");
+    var cells = 16, px = 8;
+    canvas.width = cells * px; canvas.height = cells * px;
+    ctx.fillStyle = SHADES[0];
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    for (var y = 0; y < cells; y++) {
+      for (var x = 0; x < cells / 2; x++) {
+        var r = rnd();
+        var s = r > 0.72 ? 3 : r > 0.5 ? 2 : r > 0.3 ? 1 : 0;
+        if (s === 0) { continue; }
+        ctx.fillStyle = SHADES[s];
+        ctx.fillRect(x * px, y * px, px, px);
+        ctx.fillRect((cells - 1 - x) * px, y * px, px, px);   /* mirror — reads as sprite art */
+      }
+    }
+    ctx.strokeStyle = "rgba(35,48,30,.22)";                    /* 8×8 tile grid */
+    ctx.lineWidth = 1;
+    for (var g = 0; g <= cells; g += 8) {
+      ctx.beginPath(); ctx.moveTo(g * px + .5, 0); ctx.lineTo(g * px + .5, canvas.height); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(0, g * px + .5); ctx.lineTo(canvas.width, g * px + .5); ctx.stroke();
+    }
+  }
+
+  var grid = document.getElementById("asset-grid");
+  ASSETS.forEach(function (a) {
+    var card = document.createElement("div");
+    card.className = "acard" + (a.state === "fail" ? " is-fail" : a.state === "stale" ? " is-stale" : "");
+    var badge =
+      a.state === "fail"  ? '<span class="verdict fail">5 COLOURS</span>' :
+      a.state === "stale" ? '<span class="verdict warn">CHANGED</span>'   :
+                            '<span class="verdict pass">OK</span>';
+    card.innerHTML =
+      '<canvas class="thumb" aria-hidden="true"></canvas>' +
+      '<div class="body">' +
+        '<span class="fname">' + a.f + '</span>' +
+        '<div class="arow"><span class="tag">' + a.t + '</span>' + badge + '</div>' +
+        '<span class="cost">' + a.cost + '</span>' +
+        '<div class="acts">' +
+          '<button class="btn" type="button">Open</button>' +
+          '<button class="btn' + (a.state === "stale" ? " primary" : "") + '" type="button"' +
+            (a.state === "fail" ? " disabled" : "") + '>' + (a.state === "stale" ? "Reconvert" : "Convert") + '</button>' +
+        '</div>' +
+      '</div>';
+    grid.appendChild(card);
+    drawThumb(card.querySelector("canvas"), a.f);
+  });
+
+  /* ── build bar ────────────────────────────────────────── */
+  var logEl    = document.getElementById("log");
+  var dotEl    = document.getElementById("build-dot");
+  var statusEl = document.getElementById("build-status");
+  var buildBtn = document.getElementById("build-btn");
+  var cleanBtn = document.getElementById("clean-btn");
+  var timer    = null;
+
+  var SEQ = [
+    { t: '<span class="dim">$ make</span>' },
+    { t: 'Writing src/config.h  <span class="dim">— 3 values</span>' },
+    { t: '<span class="dim">sdcc … 51 modules</span>' },
+    { t: 'Built build/nuke-raider.gb  <span class="dim">— 512 KB, MBC5</span>' },
+    { t: '<span class="dim">$ make memory-check</span>' },
+    { t: 'WRAM 1,509/8,192 <span class="ok">PASS</span> · VRAM 76/384 <span class="ok">PASS</span> · OAM 32/40 <span class="warnc">WARN</span>' },
+    { t: '<span class="dim">$ make bank-post-build</span>' },
+    { t: '<span class="bad">romusage not found on PATH — bank budgets not verified</span>', done: true }
+  ];
+
+  function runBuild(clean) {
+    if (timer) { return; }
+    logEl.innerHTML = "";
+    dotEl.className = "dot busy";
+    statusEl.textContent = clean ? "make clean && make — running…" : "make — running…";
+    buildBtn.disabled = cleanBtn.disabled = true;
+    var i = 0;
+    timer = setInterval(function () {
+      if (i >= SEQ.length) {
+        clearInterval(timer); timer = null;
+        dotEl.className = "dot warn";
+        statusEl.textContent = "build ok · OAM WARN · launch allowed";
+        buildBtn.disabled = cleanBtn.disabled = false;
+        return;
+      }
+      var line = document.createElement("div");
+      line.innerHTML = SEQ[i].t;
+      logEl.appendChild(line);
+      logEl.scrollTop = logEl.scrollHeight;
+      i++;
+    }, 340);
+  }
+  buildBtn.addEventListener("click", function () { runBuild(false); });
+  cleanBtn.addEventListener("click", function () { runBuild(true); });
+
+  document.getElementById("launch-btn").addEventListener("click", function () {
+    var line = document.createElement("div");
+    line.innerHTML = '<span class="dim">$ java -jar C:\\Tools\\Emulicious\\Emulicious.jar build/nuke-raider.gb</span>';
+    logEl.appendChild(line);
+    logEl.scrollTop = logEl.scrollHeight;
+  });
+
+  /* ── worktree delete guard + commit hook ──────────────── */
+  document.getElementById("del-btn").addEventListener("click", function () {
+    var c = document.getElementById("del-confirm");
+    c.hidden = !c.hidden;
+  });
+
+  var commitBtn = document.getElementById("commit-btn");
+  commitBtn.addEventListener("click", function () {
+    var box = document.getElementById("hookrun");
+    var bar = document.getElementById("hookbar");
+    var txt = document.getElementById("hooktext");
+    box.hidden = false;
+    commitBtn.disabled = true;
+    var s = 0;
+    var t = setInterval(function () {
+      s += 6;
+      if (s >= 90) {
+        clearInterval(t);
+        bar.style.width = "100%";
+        txt.innerHTML = '<span class="ok">509 tests passed · committed 1f4c9e2</span>';
+        commitBtn.disabled = false;
+        return;
+      }
+      bar.style.width = Math.round((s / 90) * 100) + "%";
+      txt.textContent = "running 509 tests · elapsed " + s + "s of ~90s";
+    }, 260);
+  });
+})();
+</script>
+
+<button class="theme-toggle" type="button" id="theme-toggle" aria-label="Switch colour theme">Theme</button>
+<script>
+(function () {
+  var root = document.documentElement;
+  var saved = null;
+  try { saved = localStorage.getItem("garage-theme"); } catch (e) { saved = null; }
+  if (saved) { root.setAttribute("data-theme", saved); }
+  document.getElementById("theme-toggle").addEventListener("click", function () {
+    var dark = root.getAttribute("data-theme") === "dark" ||
+      (!root.getAttribute("data-theme") &&
+        window.matchMedia("(prefers-color-scheme: dark)").matches);
+    var next = dark ? "light" : "dark";
+    root.setAttribute("data-theme", next);
+    try { localStorage.setItem("garage-theme", next); } catch (e) { /* private mode */ }
+  });
+})();
+</script>
+
+</body>
+</html>

@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nuke Raider — Prototypes</title>
+<meta name="description" content="Interactive UI prototypes for Nuke Raider developer tooling.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%23A8482A'/%3E%3Crect x='3' y='7' width='10' height='2' fill='%23fff'/%3E%3C/svg%3E">
+<style>
+:root {
+  --bg:#EDEFE9; --surface:#F8F9F5; --surface-2:#E4E7DE;
+  --line:#C7CEBF; --text:#1A201C; --text-2:#4B554E; --text-3:#78827A;
+  --accent:#A8482A; --accent-soft:#F0E1DB; --accent-line:#D8B3A4;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg:#0E120F; --surface:#171C18; --surface-2:#1E241F;
+    --line:#343C35; --text:#E6EAE2; --text-2:#A6AFA5; --text-3:#79837A;
+    --accent:#D2683F; --accent-soft:#2C1D15; --accent-line:#573224;
+  }
+}
+:root[data-theme="dark"] {
+  --bg:#0E120F; --surface:#171C18; --surface-2:#1E241F;
+  --line:#343C35; --text:#E6EAE2; --text-2:#A6AFA5; --text-3:#79837A;
+  --accent:#D2683F; --accent-soft:#2C1D15; --accent-line:#573224;
+}
+:root[data-theme="light"] {
+  --bg:#EDEFE9; --surface:#F8F9F5; --surface-2:#E4E7DE;
+  --line:#C7CEBF; --text:#1A201C; --text-2:#4B554E; --text-3:#78827A;
+  --accent:#A8482A; --accent-soft:#F0E1DB; --accent-line:#D8B3A4;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--text);
+  font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
+  font-size: 15px; line-height: 1.55; -webkit-font-smoothing: antialiased;
+}
+.mono, code { font-family: "Cascadia Mono", "Cascadia Code", Consolas, ui-monospace, monospace; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
+.wrap { max-width: 760px; margin: 0 auto; padding: 72px 24px 80px; }
+.eyebrow {
+  font-family: "Cascadia Mono", Consolas, monospace; font-size: 11px;
+  letter-spacing: .12em; text-transform: uppercase; color: var(--accent); margin: 0 0 12px;
+}
+h1 { font-size: clamp(30px, 5vw, 42px); line-height: 1.08; margin: 0 0 14px; font-weight: 650; letter-spacing: -.022em; }
+.lede { color: var(--text-2); margin: 0 0 40px; max-width: 62ch; }
+.card {
+  display: block; text-decoration: none; color: inherit;
+  border: 1px solid var(--line); border-radius: 6px; background: var(--surface);
+  padding: 20px 22px; margin-bottom: 12px; transition: border-color .14s, transform .14s;
+}
+.card:hover { border-color: var(--accent); transform: translateY(-1px); }
+.card-top { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
+.card h2 { font-size: 17px; margin: 0; font-weight: 650; letter-spacing: -.01em; }
+.card p { margin: 0; color: var(--text-2); font-size: 13.5px; }
+.tag {
+  font-family: "Cascadia Mono", Consolas, monospace; font-size: 10px;
+  letter-spacing: .07em; padding: 2px 7px; border-radius: 3px;
+  background: var(--accent-soft); color: var(--accent); border: 1px solid var(--accent-line);
+}
+.foot {
+  margin-top: 44px; padding-top: 20px; border-top: 1px solid var(--line);
+  color: var(--text-3); font-size: 12.5px;
+}
+.foot a { color: var(--accent); }
+.theme-toggle {
+  position: fixed; top: 14px; right: 14px; appearance: none; cursor: pointer;
+  font-family: "Cascadia Mono", Consolas, monospace; font-size: 10px;
+  letter-spacing: .09em; text-transform: uppercase; padding: 6px 11px;
+  border-radius: 4px; border: 1px solid var(--line); background: var(--surface); color: var(--text-2);
+}
+.theme-toggle:hover { color: var(--text); }
+@media (prefers-reduced-motion: reduce) { * { transition-duration: .001ms !important; } }
+</style>
+</head>
+<body>
+<button class="theme-toggle" type="button" id="theme-toggle" aria-label="Switch colour theme">Theme</button>
+
+<div class="wrap">
+  <p class="eyebrow">Nuke Raider</p>
+  <h1>Prototypes</h1>
+  <p class="lede">
+    Interactive UI prototypes for Nuke Raider developer tooling. Each one is a static mockup
+    published alongside the PRD issue it belongs to — clickable, but wired to nothing.
+  </p>
+
+  <a class="card" href="garage/">
+    <div class="card-top">
+      <h2>Garage</h2>
+      <span class="tag">P1 · P2 · P3</span>
+    </div>
+    <p>
+      Parameter tuning and asset management for the Game Boy build. Five screens — tuner,
+      worktrees, environment doctor, assets, dialog. Every value is real, read from
+      <code class="mono">config.h</code>, <code class="mono">git worktree list</code> and an
+      actual memory-check run.
+    </p>
+  </a>
+
+  <p class="foot">
+    Source: <a href="https://github.com/MatthieuGagne/nuke-raider-prototypes">nuke-raider-prototypes</a> ·
+    Game: <a href="https://github.com/MatthieuGagne/gmb-nuke-raider">gmb-nuke-raider</a>
+  </p>
+</div>
+
+<script>
+(function () {
+  var root = document.documentElement;
+  var saved = null;
+  try { saved = localStorage.getItem("garage-theme"); } catch (e) { saved = null; }
+  if (saved) { root.setAttribute("data-theme", saved); }
+  document.getElementById("theme-toggle").addEventListener("click", function () {
+    var dark = root.getAttribute("data-theme") === "dark" ||
+      (!root.getAttribute("data-theme") && window.matchMedia("(prefers-color-scheme: dark)").matches);
+    var next = dark ? "light" : "dark";
+    root.setAttribute("data-theme", next);
+    try { localStorage.setItem("garage-theme", next); } catch (e) { /* private mode */ }
+  });
+})();
+</script>
+</body>
+</html>
