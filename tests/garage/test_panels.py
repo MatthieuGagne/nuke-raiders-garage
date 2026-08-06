@@ -3,6 +3,7 @@
 so default discovery never descends into it). Run via `make test-garage`.
 """
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -15,10 +16,18 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QFocusEvent, QImage
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QLabel
+from PySide6.QtWidgets import (
+    QApplication,
+    QLabel,
+    QSpinBox,
+    QStyle,
+    QStyleOptionSpinBox,
+)
 
-from tools.garage.app import GarageWindow, format_header
+from tools.garage import theme
+from tools.garage.app import GarageWindow, format_header, format_header_html
 from tools.garage.core import config_io, diff as diff_core, project
 from tools.garage.core.schema import Schema
 from tools.garage.panels.diff_view import DiffPanel
@@ -1024,6 +1033,504 @@ class TestGarageWindowDiffIntegration(unittest.TestCase):
             row.spin.editingFinished.emit()
 
             self.assertIn("src/config.h", window.diff_panel.file_paths())
+
+
+# -- R18/AC18: the dark stylesheet -------------------------------------------
+
+
+PANEL_SOURCE_FILES = [
+    *sorted((REPO_ROOT / "tools" / "garage" / "panels").glob("*.py")),
+    REPO_ROOT / "tools" / "garage" / "app.py",
+]
+
+# A bare 6-digit hex literal, the way a colour is written in QSS/Python
+# ("#RRGGBB"). Word-bounded so it doesn't false-positive on a longer hash
+# (e.g. a commit SHA) that happens to start with 6 hex digits.
+_HEX_COLOUR_RE = re.compile(r"#[0-9A-Fa-f]{6}\b")
+_QT_COLOUR_CONSTANT_RE = re.compile(
+    r"\bQt\.(?:GlobalColor\.)?(?:black|white|red|green|blue|yellow|cyan|magenta|"
+    r"gray|grey|darkGray|darkGrey|lightGray|lightGrey)\b"
+)
+
+
+class TestNoColourLiteralInPanelSource(unittest.TestCase):
+    """AC18: "no panel holds one [a colour literal]". A real grep over the
+    source files, not a one-time claim -- this keeps holding as the panels
+    change. tools/garage/theme/ is the one place a literal is allowed to
+    live and is deliberately not in PANEL_SOURCE_FILES.
+    """
+
+    def test_no_hex_colour_literal(self):
+        for path in PANEL_SOURCE_FILES:
+            text = path.read_text(encoding="utf-8")
+            match = _HEX_COLOUR_RE.search(text)
+            self.assertIsNone(
+                match,
+                f"{path} holds a colour literal ({match.group(0) if match else ''}); "
+                "move it into tools/garage/theme/tokens.py",
+            )
+
+    def test_no_qcolor_construction(self):
+        for path in PANEL_SOURCE_FILES:
+            text = path.read_text(encoding="utf-8")
+            self.assertNotIn("QColor(", text, f"{path} constructs a QColor directly")
+
+    def test_no_qt_colour_constant(self):
+        for path in PANEL_SOURCE_FILES:
+            text = path.read_text(encoding="utf-8")
+            match = _QT_COLOUR_CONSTANT_RE.search(text)
+            self.assertIsNone(
+                match, f"{path} uses a Qt colour constant ({match.group(0) if match else ''})"
+            )
+
+    def test_no_direct_setstylesheet_call(self):
+        # Every panel takes its appearance from the one stylesheet applied
+        # at startup (tools.garage.theme.apply); a panel calling
+        # setStyleSheet itself would be a second, untracked source of
+        # appearance.
+        for path in PANEL_SOURCE_FILES:
+            text = path.read_text(encoding="utf-8")
+            self.assertNotIn(
+                "setStyleSheet(", text, f"{path} sets a stylesheet directly"
+            )
+
+
+class TestThemeAppliesAtStartup(unittest.TestCase):
+    def test_apply_installs_a_nonempty_stylesheet_built_from_the_tokens(self):
+        theme.apply(_app)
+
+        sheet = _app.styleSheet()
+
+        self.assertTrue(sheet.strip())
+        # Spot-check that the installed sheet really is theme.build_stylesheet()
+        # -- i.e. that apply() didn't silently no-op -- by looking for a
+        # couple of tokens that must be in it.
+        self.assertIn(theme.TOKENS["bg"], sheet)
+        self.assertIn(theme.TOKENS["accent"], sheet)
+
+    def test_dark_tokens_match_the_prototypes_dark_set(self):
+        # The spec's source of truth: garage/index.html's
+        # :root[data-theme="dark"] block. Pinning these here means a future
+        # edit to tokens.py that drifts from the prototype fails loudly.
+        expected = {
+            "bg": "#0E120F", "surface": "#171C18", "surface-2": "#1E241F",
+            "surface-3": "#272E28", "line": "#343C35", "line-soft": "#242B25",
+            "text": "#E6EAE2", "text-2": "#A6AFA5", "text-3": "#79837A",
+            "accent": "#D2683F", "accent-ink": "#1A0E08", "accent-soft": "#2C1D15",
+            "accent-line": "#573224", "pass": "#86B45A", "warn": "#D9AE3C",
+            "fail": "#E0647C", "pass-soft": "#1D2717", "warn-soft": "#2C2412",
+            "fail-soft": "#2E1720",
+        }
+        self.assertEqual(theme.TOKENS, expected)
+
+
+class TestTunerChangedRowStyling(unittest.TestCase):
+    """AC18: "A row differing from HEAD must be visibly distinct". The
+    theme applies a left accent stripe (garage/index.html's `.prow.changed`)
+    via the "changed" dynamic property tuner.py sets; this checks the
+    property lands on a differing row and not on an equal one.
+    """
+
+    def test_changed_property_set_on_differing_row_and_not_on_equal_row(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            binding, schema = make_panel_binding(tmp_path)
+            panel = TunerPanel(binding, schema=schema)
+            row = panel._rows["GEAR1_MAX_SPEED"]
+            other = panel._rows["PLAYER_ARMOR"]
+
+            self.assertFalse(row.name_label.property("changed"))
+            self.assertFalse(row.field_container.property("changed"))
+
+            row.spin.setValue(9)
+            row.spin.editingFinished.emit()
+
+            self.assertTrue(row.differs_from_head())
+            self.assertTrue(row.name_label.property("changed"))
+            self.assertTrue(row.field_container.property("changed"))
+            # A row that was never touched stays untouched.
+            self.assertFalse(other.differs_from_head())
+            self.assertFalse(other.name_label.property("changed"))
+            self.assertFalse(other.field_container.property("changed"))
+
+    def test_reverting_clears_the_changed_property(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            binding, schema = make_panel_binding(tmp_path)
+            panel = TunerPanel(binding, schema=schema)
+            row = panel._rows["GEAR1_MAX_SPEED"]
+            row.spin.setValue(9)
+            row.spin.editingFinished.emit()
+            self.assertTrue(row.name_label.property("changed"))
+
+            panel.revert_row("GEAR1_MAX_SPEED")
+
+            self.assertFalse(row.differs_from_head())
+            self.assertFalse(row.name_label.property("changed"))
+            self.assertFalse(row.field_container.property("changed"))
+
+
+class TestDiffLineDistinctRoles(unittest.TestCase):
+    """AC18/R19: "must mark an added line and a removed line distinctly".
+    Iteration 4 left this to a "+ "/"- " prefix and bold weight (the
+    non-colour cue, kept); iteration 5 adds colour on top, via the
+    `diffKind` property diff_view.py already sets on every line label.
+    """
+
+    def test_added_and_removed_lines_carry_different_diffkind_and_colour(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            binding, _schema = make_panel_binding(tmp_path)
+            binding.config_h.write_text(
+                PANEL_CONFIG_TEXT.replace(
+                    "#define GEAR1_MAX_SPEED        2u",
+                    "#define GEAR1_MAX_SPEED        9u",
+                ),
+                encoding="utf-8",
+            )
+
+            panel = DiffPanel(binding)
+            line_labels = panel.findChildren(QLabel, "diff-line")
+            by_kind = {
+                l.property("diffKind"): l
+                for l in line_labels
+                if l.property("diffKind") in ("add", "remove")
+            }
+
+            self.assertIn("add", by_kind)
+            self.assertIn("remove", by_kind)
+            # The non-colour cue survives: prefix and bold weight.
+            self.assertTrue(by_kind["add"].text().startswith("+ "))
+            self.assertTrue(by_kind["remove"].text().startswith("- "))
+            self.assertTrue(by_kind["add"].font().bold())
+            self.assertTrue(by_kind["remove"].font().bold())
+
+        # The colour cue: the stylesheet gives "add" and "remove" distinct,
+        # non-empty roles built from the pass/fail tokens respectively.
+        sheet = theme.build_stylesheet()
+        add_rule = re.search(r'QLabel\[diffKind="add"\]\s*\{([^}]*)\}', sheet)
+        remove_rule = re.search(r'QLabel\[diffKind="remove"\]\s*\{([^}]*)\}', sheet)
+        self.assertIsNotNone(add_rule)
+        self.assertIsNotNone(remove_rule)
+        self.assertIn(theme.TOKENS["pass"], add_rule.group(1))
+        self.assertIn(theme.TOKENS["fail"], remove_rule.group(1))
+        self.assertNotEqual(add_rule.group(1).strip(), remove_rule.group(1).strip())
+
+
+class TestHeaderRichText(unittest.TestCase):
+    """R18: "the monospace face belongs on the values, and 'commit blocked
+    on master' is a warning and should read as one using the warn token."
+    """
+
+    def test_header_html_carries_the_same_words_as_the_plain_header(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            game_repo = make_game_repo(tmp_path / "nuke-raider")
+            garage_root = tmp_path / "nuke-raider-garage"
+            garage_root.mkdir()
+            binding = project.bind(garage_root)
+            summary = diff_core.ChangeSummary(
+                changed_file_count=1, untracked_count=0, added_lines=2, removed_lines=1
+            )
+
+            plain = format_header(binding, None, summary)
+            rich = format_header_html(binding, None, summary)
+
+            self.assertIn(str(game_repo), rich)
+            self.assertIn("master", rich)
+            self.assertIn("1 file +2 −1", rich)
+            self.assertIn("commit blocked on master", rich)
+            # Presentation only: stripping the markup leaves the same words.
+            self.assertEqual(re.sub(r"<[^>]+>", "", rich), plain)
+
+    def test_master_warning_uses_the_warn_token(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            make_game_repo(tmp_path / "nuke-raider")
+            garage_root = tmp_path / "nuke-raider-garage"
+            garage_root.mkdir()
+            binding = project.bind(garage_root)
+
+            rich = format_header_html(binding, None, None)
+
+            self.assertIn(theme.TOKENS["warn"], rich)
+
+    def test_binding_error_is_escaped_and_readable(self):
+        error = project.BindingError("game_repo", "No sibling 'nuke-raider' <found>.")
+
+        rich = format_header_html(None, error, None)
+
+        self.assertIn("game_repo", rich)
+        self.assertNotIn("<found>", rich)  # escaped, not parsed as a tag
+        self.assertIn("&lt;found&gt;", rich)
+
+
+# -- Iteration 6 regression: stepping (arrows/arrow-keys) must write -------
+#
+# tools/garage/panels/tuner.py's STEP_DEBOUNCE_MS-based debounce is driven
+# deterministically below by emitting the row's QTimer.timeout signal
+# directly, rather than sleeping for real time: emit() invokes connected
+# slots synchronously exactly as a real firing would, without waiting out
+# the interval or pumping the event loop.
+
+
+class TestTunerPanelStepping(unittest.TestCase):
+    def test_stepup_writes_after_the_debounce_with_the_stepped_value(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            binding, schema = make_panel_binding(tmp_path)
+            panel = TunerPanel(binding, schema=schema)
+            row = panel._rows["GEAR1_MAX_SPEED"]
+            self.assertEqual(row.spin.value(), 2)
+
+            with mock.patch(
+                "tools.garage.panels.tuner.config_io.write", wraps=config_io.write
+            ) as write_spy:
+                row.spin.stepUp()
+                self.assertEqual(row.spin.value(), 3)
+                # Debouncing -- nothing written yet.
+                write_spy.assert_not_called()
+                self.assertTrue(row.step_timer.isActive())
+                self.assertEqual(
+                    binding.config_h.read_text(encoding="utf-8"), PANEL_CONFIG_TEXT
+                )
+
+                row.step_timer.timeout.emit()  # the debounce settles
+
+            write_spy.assert_called_once()
+            self.assertEqual(row.persisted_value, 3)
+            self.assertIn(
+                "#define GEAR1_MAX_SPEED        3u",
+                binding.config_h.read_text(encoding="utf-8"),
+            )
+
+    def test_rapid_steps_produce_one_write_carrying_the_final_value(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            binding, schema = make_panel_binding(tmp_path)
+            panel = TunerPanel(binding, schema=schema)
+            row = panel._rows["GEAR1_MAX_SPEED"]
+
+            with mock.patch(
+                "tools.garage.panels.tuner.config_io.write", wraps=config_io.write
+            ) as write_spy:
+                # Five rapid ticks -- e.g. a held key or a burst of clicks --
+                # each one restarts the debounce instead of writing.
+                for _ in range(5):
+                    row.spin.stepUp()
+                self.assertEqual(row.spin.value(), 7)
+                write_spy.assert_not_called()
+
+                row.step_timer.timeout.emit()  # settles once, after the last tick
+
+            write_spy.assert_called_once()
+            self.assertEqual(write_spy.call_args[0][2], {"GEAR1_MAX_SPEED": 7})
+            self.assertIn(
+                "#define GEAR1_MAX_SPEED        7u",
+                binding.config_h.read_text(encoding="utf-8"),
+            )
+
+    def test_typing_still_does_not_start_the_step_debounce_or_write(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            binding, schema = make_wide_panel_binding(tmp_path)
+            panel = TunerPanel(binding, schema=schema)
+            row = panel._rows["SPEED"]
+            row.spin.show()
+            row.spin.setFocus()
+            row.spin.selectAll()
+
+            with mock.patch(
+                "tools.garage.panels.tuner.config_io.write"
+            ) as write_spy:
+                QTest.keyClicks(row.spin, "100")
+                self.assertEqual(row.spin.value(), 100)
+                # stepBy() is never called while typing, so the debounce
+                # never starts and nothing is written.
+                self.assertFalse(row.step_timer.isActive())
+                write_spy.assert_not_called()
+
+                QTest.keyClick(row.spin, Qt.Key_Return)
+
+            write_spy.assert_called_once()
+
+    def test_pending_step_write_flushed_by_editing_finished(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            binding, schema = make_panel_binding(tmp_path)
+            panel = TunerPanel(binding, schema=schema)
+            row = panel._rows["GEAR1_MAX_SPEED"]
+
+            with mock.patch(
+                "tools.garage.panels.tuner.config_io.write", wraps=config_io.write
+            ) as write_spy:
+                row.spin.stepUp()
+                write_spy.assert_not_called()
+                self.assertTrue(row.step_timer.isActive())
+
+                row.spin.editingFinished.emit()  # e.g. Return, ahead of the debounce
+
+            write_spy.assert_called_once()
+            self.assertFalse(row.step_timer.isActive())
+            self.assertEqual(row.persisted_value, 3)
+
+            # The debounce, were it still armed, must not fire a second,
+            # redundant write for the same value.
+            row.step_timer.timeout.emit()
+            write_spy.assert_called_once()
+
+    def test_pending_step_write_flushed_by_focus_out(self):
+        # Real OS-level focus transfer needs an active top-level window,
+        # which an offscreen-platform test has none of (setFocus() between
+        # two shown-but-not-activated widgets silently no-ops here) -- so
+        # focus leaving the field is driven the same way Qt itself would
+        # deliver it, by dispatching a FocusOut event straight to the
+        # widget, deterministically and without needing a real window.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            binding, schema = make_panel_binding(tmp_path)
+            panel = TunerPanel(binding, schema=schema)
+            row = panel._rows["GEAR1_MAX_SPEED"]
+            row.spin.show()
+
+            with mock.patch(
+                "tools.garage.panels.tuner.config_io.write", wraps=config_io.write
+            ) as write_spy:
+                row.spin.stepUp()
+                write_spy.assert_not_called()
+
+                focus_out = QFocusEvent(QFocusEvent.Type.FocusOut, Qt.FocusReason.OtherFocusReason)
+                row.spin.focusOutEvent(focus_out)  # focus leaves -> flush, no debounce wait
+
+            write_spy.assert_called_once()
+            self.assertFalse(row.step_timer.isActive())
+            self.assertEqual(row.persisted_value, 3)
+
+    def test_pending_step_write_flushed_on_window_close(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            garage_root = tmp_path / "nuke-raider-garage"
+            garage_root.mkdir()
+            game_repo = make_game_repo_with_config(tmp_path / "nuke-raider", PANEL_CONFIG_TEXT)
+            _run_git(["checkout", "-b", "feat"], game_repo)
+            write_json(tmp_path / "tunables.json", PANEL_TUNABLES)
+            window = GarageWindow(garage_root=garage_root)
+            schema = Schema.load(tmp_path / "tunables.json")
+            window.tuner_panel = TunerPanel(window.binding, window.binding_error, schema=schema)
+            window.tuner_panel.written.connect(window._on_tuner_written)
+            row = window.tuner_panel._rows["GEAR1_MAX_SPEED"]
+
+            with mock.patch(
+                "tools.garage.panels.tuner.config_io.write", wraps=config_io.write
+            ) as write_spy:
+                row.spin.stepUp()
+                write_spy.assert_not_called()
+
+                # A user who clicks + and immediately closes Garage must
+                # still get the write -- closeEvent flushes it.
+                window.close()
+
+            write_spy.assert_called_once()
+            self.assertIn(
+                "#define GEAR1_MAX_SPEED        3u",
+                window.binding.config_h.read_text(encoding="utf-8"),
+            )
+
+    def test_stepped_write_refreshes_header_totals_and_open_diff(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            garage_root = tmp_path / "nuke-raider-garage"
+            garage_root.mkdir()
+            game_repo = make_game_repo_with_config(tmp_path / "nuke-raider", PANEL_CONFIG_TEXT)
+            _run_git(["checkout", "-b", "feat"], game_repo)
+            write_json(tmp_path / "tunables.json", PANEL_TUNABLES)
+            window = GarageWindow(garage_root=garage_root)
+            schema = Schema.load(tmp_path / "tunables.json")
+            window.tuner_panel = TunerPanel(window.binding, window.binding_error, schema=schema)
+            window.tuner_panel.written.connect(window._on_tuner_written)
+            window.open_diff()
+            self.assertIn("clean", window.diff_panel.status_text().lower())
+            self.assertNotIn("●", window.header_label.text())
+
+            row = window.tuner_panel._rows["GEAR1_MAX_SPEED"]
+            row.spin.stepUp()
+            row.step_timer.timeout.emit()  # settle the debounce deterministically
+
+            header_text = window.header_label.text()
+            self.assertIn("●", header_text)
+            self.assertIn("1 file", header_text)
+            self.assertIn("src/config.h", window.diff_panel.file_paths())
+
+
+# -- Iteration 6 regression: QSpinBox up/down sub-controls ------------------
+
+
+class TestSpinBoxSubControlGeometry(unittest.TestCase):
+    """Regression guard for the "+ does nothing / misaligned" rendering bug:
+    once a QSpinBox picks up box styling (border/padding/background) from a
+    stylesheet, Qt stops delegating its up/down sub-controls to the native
+    style; without explicit ::up-button/::down-button/::up-arrow/::down-arrow
+    rules (tools/garage/theme/qss.py) they fell back to a default box that
+    painted nothing, at a position no longer guaranteed to line up with a
+    styled field.
+
+    TestTunerPanelStepping above proves stepUp() itself works, but that
+    calls stepBy() directly and would stay green even if the arrows were
+    completely invisible or the widget had shrunk to nothing -- it never
+    looks at what is painted or where the actual click regions are. These
+    tests do, via QStyle/QStyleOptionSpinBox, the same mechanism Qt itself
+    uses to hit-test a click.
+    """
+
+    def _themed_spinbox(self) -> QSpinBox:
+        theme.apply(_app)
+        spin = QSpinBox()
+        spin.setValue(5)
+        spin.resize(120, 28)
+        spin.show()
+        return spin
+
+    def test_up_and_down_hit_regions_are_present_distinct_and_in_bounds(self):
+        spin = self._themed_spinbox()
+        opt = QStyleOptionSpinBox()
+        spin.initStyleOption(opt)
+        style = spin.style()
+
+        up = style.subControlRect(
+            QStyle.ComplexControl.CC_SpinBox, opt, QStyle.SubControl.SC_SpinBoxUp, spin
+        )
+        down = style.subControlRect(
+            QStyle.ComplexControl.CC_SpinBox, opt, QStyle.SubControl.SC_SpinBoxDown, spin
+        )
+
+        self.assertFalse(up.isEmpty())
+        self.assertFalse(down.isEmpty())
+        self.assertFalse(up.intersects(down))
+        self.assertTrue(spin.rect().contains(up))
+        self.assertTrue(spin.rect().contains(down))
+
+    def test_an_arrow_is_actually_painted_in_each_button_not_just_hittable(self):
+        # The geometry above can be perfectly sane while nothing is drawn in
+        # it -- exactly what regressed. Render the widget and sample the
+        # pixel at the centre of each button; it must differ from the
+        # field's own background, i.e. an arrow is visibly there.
+        spin = self._themed_spinbox()
+        opt = QStyleOptionSpinBox()
+        spin.initStyleOption(opt)
+        style = spin.style()
+        up = style.subControlRect(
+            QStyle.ComplexControl.CC_SpinBox, opt, QStyle.SubControl.SC_SpinBoxUp, spin
+        )
+        down = style.subControlRect(
+            QStyle.ComplexControl.CC_SpinBox, opt, QStyle.SubControl.SC_SpinBoxDown, spin
+        )
+
+        image = QImage(spin.size(), QImage.Format.Format_ARGB32)
+        spin.render(image)
+        field_bg = image.pixelColor(10, spin.height() // 2)  # inside the text area
+
+        self.assertNotEqual(image.pixelColor(up.center()), field_bg)
+        self.assertNotEqual(image.pixelColor(down.center()), field_bg)
 
 
 if __name__ == "__main__":

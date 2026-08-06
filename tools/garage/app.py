@@ -7,13 +7,23 @@ visible; iteration 5 replaces that with the design the user actually
 approved: the Tuner is the whole window body again, the header states
 change *totals* only, and the full diff lives behind a menu action,
 closed until asked for (AC19, AC2).
+
+Iteration 5 also applies the dark stylesheet (R18/AC18): `main()` installs
+it once, on the QApplication, via `tools.garage.theme.apply`. This file
+holds no colour and no typeface literal of its own -- the one exception is
+the header line below, which mixes prose with monospace values and a
+warning clause; it renders as rich text built from `tools.garage.theme`'s
+named tokens (never a hex literal spelled out here), never with a
+`setStyleSheet` call.
 """
 from __future__ import annotations
 
+import html
 import sys
 from pathlib import Path
 from typing import Optional
 
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QApplication,
@@ -24,10 +34,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from tools.garage import theme
 from tools.garage.core import diff as diff_core
 from tools.garage.core.project import Binding, BindingError, bind
 from tools.garage.panels.diff_view import DiffPanel
 from tools.garage.panels.tuner import TunerPanel
+from tools.garage.theme.tokens import FONT_MONO, TOKENS
 
 
 def _format_change_clause(summary: Optional[diff_core.ChangeSummary]) -> str:
@@ -98,6 +110,53 @@ def format_header(
     return header
 
 
+def _mono_span(text: str) -> str:
+    return f'<span style="font-family:{FONT_MONO};">{html.escape(text)}</span>'
+
+
+def _warn_span(text: str) -> str:
+    return f'<span style="color:{TOKENS["warn"]};">{html.escape(text)}</span>'
+
+
+def format_header_html(
+    binding: Optional[Binding],
+    error: Optional[BindingError],
+    summary: Optional[diff_core.ChangeSummary] = None,
+) -> str:
+    """Rich-text rendering of `format_header`'s exact content -- the same
+    words, in the same order and spacing, so every substring a caller
+    already looks for in `format_header`'s plain output is still there in
+    this one (R18's header requirement is presentation only; the decision
+    of *what* the header says still lives in `format_header`, which this
+    mirrors rather than replaces).
+
+    R18: the path, the branch/mark and the change-totals clause carry the
+    monospace face (`tools.garage.theme.FONT_MONO`); "commit blocked on
+    master" reads as a warning, in the warn token
+    (`tools.garage.theme.TOKENS["warn"]`). Every value is escaped, since
+    this string is set on the QLabel as rich text -- an unescaped `<`, `>`
+    or `&` in a path would otherwise be parsed as markup.
+    """
+    if error is not None:
+        return (
+            f"Repository binding failed ({html.escape(error.key)}): "
+            f"{html.escape(error.message)}"
+        )
+
+    branch = binding.active_worktree.branch or "(detached HEAD)"
+    dirty = summary.dirty if summary is not None else False
+    mark = " ●" if dirty else ""
+    path_html = _mono_span(str(binding.active_worktree.path))
+    branch_html = _mono_span(f"{branch}{mark}")
+    clause_html = _mono_span(_format_change_clause(summary))
+    header = f"{path_html}  [{branch_html}]  {clause_html}"
+
+    if diff_core.is_master_branch(binding.active_worktree.branch):
+        header += "   " + _warn_span("commit blocked on master")
+
+    return header
+
+
 class GarageWindow(QMainWindow):
     def __init__(self, garage_root: Optional[Path] = None, parent=None):
         super().__init__(parent)
@@ -116,6 +175,10 @@ class GarageWindow(QMainWindow):
         self.header_label = QLabel()
         self.header_label.setObjectName("garage-header")
         self.header_label.setWordWrap(True)
+        # Rich text so format_header_html's monospace/warn spans render --
+        # see that function's docstring for why every value in it is
+        # html-escaped first.
+        self.header_label.setTextFormat(Qt.TextFormat.RichText)
         layout.addWidget(self.header_label)
 
         # The Tuner is the window body -- the tuning loop is what Garage
@@ -188,7 +251,9 @@ class GarageWindow(QMainWindow):
 
     def _refresh_header(self) -> None:
         summary = self._change_summary()
-        self.header_label.setText(format_header(self.binding, self.binding_error, summary))
+        self.header_label.setText(
+            format_header_html(self.binding, self.binding_error, summary)
+        )
 
     def _on_tuner_written(self) -> None:
         """A Tuner edit (or revert) writes config.h immediately -- there is
@@ -200,9 +265,19 @@ class GarageWindow(QMainWindow):
         if self.diff_dialog.isVisible():
             self.diff_panel.refresh()
 
+    def closeEvent(self, event) -> None:
+        """A stepped edit debounces briefly before it writes (see
+        tools/garage/panels/tuner.py's STEP_DEBOUNCE_MS); closing the
+        window must not race that timer and lose the write. Flush any
+        step still waiting to settle before Qt tears the window down.
+        """
+        self.tuner_panel.flush_pending_writes()
+        super().closeEvent(event)
+
 
 def main(argv=None) -> int:
     app = QApplication(argv if argv is not None else sys.argv)
+    theme.apply(app)  # R18/AC18: the dark stylesheet, applied once at startup.
     window = GarageWindow()
     window.show()
     return app.exec()
