@@ -1,4 +1,5 @@
-"""Coverage for tools/garage/core/project.py, schema.py and config_io.py.
+"""Coverage for tools/garage/core/project.py, schema.py, config_io.py,
+diff.py and doctor.py.
 
 No Qt import anywhere in this file. Must pass with PySide6 absent.
 
@@ -19,7 +20,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from tools.garage.core import config_io, diff, project  # noqa: E402
+from tools.garage.core import config_io, diff, doctor, project  # noqa: E402
 from tools.garage.core.schema import Schema, SchemaError  # noqa: E402
 
 
@@ -1247,6 +1248,433 @@ class TestGetChangeSummary(unittest.TestCase):
         self.assertTrue(diff.is_master_branch("master"))
         self.assertFalse(diff.is_master_branch("feat"))
         self.assertFalse(diff.is_master_branch(None))
+
+
+# -- doctor (R14 / AC14) -----------------------------------------------------
+#
+# Every test below describes a machine to `doctor.run_checks` through its
+# seams (`which`, `environ`, `settings`, `probe`) instead of asking the one
+# the suite happens to run on. Nothing here reads the real PATH: the point
+# of the module is what it says when a tool is missing, and the test machine
+# is not allowed a say in whether that case is exercised.
+
+
+def make_toolchain(tmp_path: Path):
+    """A machine with every R14 item present. Returns (which, environ,
+    settings); a test removes what it wants missing.
+
+    The paths that are looked at on disk (GBDK's bin/lcc, the Emulicious
+    jar) are created for real, since `doctor` stats them.
+    """
+    gbdk = tmp_path / "gbdk"
+    (gbdk / "bin").mkdir(parents=True, exist_ok=True)
+    (gbdk / "bin" / "lcc.exe").write_text("", encoding="utf-8")
+    (gbdk / "bin" / "romusage.exe").write_text("", encoding="utf-8")
+
+    jar = tmp_path / "Emulicious" / "Emulicious.jar"
+    jar.parent.mkdir(parents=True, exist_ok=True)
+    jar.write_text("", encoding="utf-8")
+
+    git_bin = tmp_path / "Git" / "bin"
+    git_usr_bin = tmp_path / "Git" / "usr" / "bin"
+
+    which = {
+        "make": str(tmp_path / "make.exe"),
+        "gcc": str(tmp_path / "mingw" / "bin" / "gcc.exe"),
+        "romusage": str(gbdk / "bin" / "romusage.exe"),
+        "java": str(tmp_path / "jdk" / "bin" / "java.exe"),
+        "bash": str(git_bin / "bash.exe"),
+        "sed": str(git_usr_bin / "sed.exe"),
+    }
+    environ = {"GBDK_HOME": str(gbdk)}
+    settings = {"emulicious_jar": str(jar)}
+    return which, environ, settings
+
+
+def stub_binding(tmp_path: Path) -> project.Binding:
+    """A resolved Binding built directly, for the tests whose subject is a
+    tool rather than the binding itself -- so a report's totals do not
+    depend on a git repository the test never looks at.
+    """
+    worktree = project.Worktree(path=tmp_path / "nuke-raider", branch="feat", head="0" * 40)
+    return project.Binding(
+        game_repo=worktree.path,
+        game_repo_source="recorded",
+        worktree_root=tmp_path / "worktrees",
+        worktrees=[worktree],
+        active_worktree=worktree,
+        active_source="main-fallback",
+        settings_path=tmp_path / "nuke-raider-garage" / "garage.local.json",
+    )
+
+
+def run_doctor(which_map, environ, settings, binding=None, binding_error=None):
+    return doctor.run_checks(
+        binding,
+        binding_error,
+        which=lambda name: which_map.get(name),
+        environ=environ,
+        settings=settings,
+        probe=lambda command: "1.2.3",
+    )
+
+
+class TestDoctorChecksEverythingR14Names(unittest.TestCase):
+    def test_report_covers_every_required_item(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            which, environ, settings = make_toolchain(Path(tmp))
+
+            report = run_doctor(which, environ, settings)
+
+            self.assertEqual(
+                [c.key for c in report.checks],
+                [
+                    "game-repo",
+                    "make",
+                    "gcc",
+                    "gbdk-home",
+                    "romusage",
+                    "git-unix-tools",
+                    "java",
+                    "emulicious",
+                ],
+            )
+
+    def test_a_complete_machine_passes_every_check(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            which, environ, settings = make_toolchain(tmp_path)
+            garage_root = tmp_path / "nuke-raider-garage"
+            garage_root.mkdir()
+            make_game_repo(tmp_path / "nuke-raider")
+            binding = project.bind(garage_root)
+
+            report = run_doctor(which, environ, settings, binding=binding)
+
+            self.assertTrue(report.ok, [c.detail for c in report.failures])
+            self.assertEqual(report.summary(), "8 of 8 checks passing")
+
+    def test_every_failure_names_what_it_prevents(self):
+        # The general form of AC14: no check may report a failure without
+        # saying which part of the loop just stopped working.
+        with tempfile.TemporaryDirectory() as tmp:
+            # An explicit jar path that does not exist: the default install
+            # path may well be present on the machine running this.
+            report = run_doctor(
+                {}, {"EMULICIOUS_JAR": str(Path(tmp) / "nowhere.jar")}, None
+            )
+
+            self.assertEqual(len(report.failures), 8)
+            for check in report.failures:
+                self.assertTrue(
+                    check.prevents.strip(),
+                    f"{check.key} failed without naming what it prevents",
+                )
+                self.assertTrue(check.detail.strip(), f"{check.key} gave no detail")
+
+
+class TestDoctorRomusage(unittest.TestCase):
+    """AC14: "The toolchain verification reports a failure when romusage is
+    absent from PATH, and names what it prevents."
+    """
+
+    def test_absent_from_path_is_a_failure_naming_bank_post_build(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            which, environ, settings = make_toolchain(Path(tmp))
+            del which["romusage"]
+
+            report = run_doctor(which, environ, settings)
+            check = {c.key: c for c in report.checks}["romusage"]
+
+            self.assertEqual(check.status, doctor.FAIL)
+            self.assertIn("not found on PATH", check.detail)
+            self.assertIn("bank-post-build", check.prevents)
+            self.assertIn("461", check.prevents)
+
+    def test_failure_shows_in_the_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            which, environ, settings = make_toolchain(tmp_path)
+            del which["romusage"]
+
+            report = run_doctor(
+                which, environ, settings, binding=stub_binding(tmp_path)
+            )
+
+            self.assertFalse(report.ok)
+            self.assertIn("romusage", report.summary())
+            self.assertIn("7 of 8 checks passing", report.summary())
+
+    def test_detail_names_the_gbdk_bin_directory_that_ships_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            which, environ, settings = make_toolchain(tmp_path)
+            del which["romusage"]
+
+            report = run_doctor(which, environ, settings)
+            check = {c.key: c for c in report.checks}["romusage"]
+
+            self.assertIn(str(tmp_path / "gbdk" / "bin"), check.detail)
+
+    def test_detail_omits_the_hint_when_gbdk_home_does_not_hold_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            which, environ, settings = make_toolchain(tmp_path)
+            del which["romusage"]
+            (tmp_path / "gbdk" / "bin" / "romusage.exe").unlink()
+
+            report = run_doctor(which, environ, settings)
+            check = {c.key: c for c in report.checks}["romusage"]
+
+            self.assertEqual(check.detail, "not found on PATH")
+
+    def test_present_reports_its_resolved_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            which, environ, settings = make_toolchain(tmp_path)
+
+            report = run_doctor(which, environ, settings)
+            check = {c.key: c for c in report.checks}["romusage"]
+
+            self.assertEqual(check.status, doctor.PASS)
+            self.assertEqual(check.detail, which["romusage"])
+            self.assertEqual(check.prevents, "")
+
+
+class TestDoctorBuildChain(unittest.TestCase):
+    def test_make_absent_is_a_failure_naming_the_targets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            which, environ, settings = make_toolchain(Path(tmp))
+            del which["make"]
+
+            check = {c.key: c for c in run_doctor(which, environ, settings).checks}["make"]
+
+            self.assertEqual(check.status, doctor.FAIL)
+            self.assertIn("memory-check", check.prevents)
+
+    def test_gcc_absent_is_a_failure_naming_the_host_tests(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            which, environ, settings = make_toolchain(Path(tmp))
+            del which["gcc"]
+
+            check = {c.key: c for c in run_doctor(which, environ, settings).checks}["gcc"]
+
+            self.assertEqual(check.status, doctor.FAIL)
+            self.assertIn("make test", check.prevents)
+
+    def test_gbdk_home_unset_is_a_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            which, environ, settings = make_toolchain(Path(tmp))
+            environ.pop("GBDK_HOME")
+
+            report = run_doctor(which, environ, settings)
+            check = {c.key: c for c in report.checks}["gbdk-home"]
+
+            self.assertEqual(check.status, doctor.FAIL)
+            self.assertEqual(check.detail, "not set")
+            self.assertIn("lcc", check.prevents)
+
+    def test_gbdk_home_without_lcc_is_a_failure_that_says_so(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            which, environ, settings = make_toolchain(tmp_path)
+            (tmp_path / "gbdk" / "bin" / "lcc.exe").unlink()
+
+            check = {
+                c.key: c for c in run_doctor(which, environ, settings).checks
+            }["gbdk-home"]
+
+            self.assertEqual(check.status, doctor.FAIL)
+            self.assertIn("bin/lcc", check.detail)
+
+    def test_gbdk_home_holding_lcc_passes_and_reports_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            which, environ, settings = make_toolchain(tmp_path)
+
+            check = {
+                c.key: c for c in run_doctor(which, environ, settings).checks
+            }["gbdk-home"]
+
+            self.assertEqual(check.status, doctor.PASS)
+            self.assertEqual(check.detail, str(tmp_path / "gbdk" / "bin" / "lcc.exe"))
+
+    def test_git_unix_tools_missing_bash_is_a_failure_naming_bash(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            which, environ, settings = make_toolchain(Path(tmp))
+            del which["bash"]
+
+            check = {
+                c.key: c for c in run_doctor(which, environ, settings).checks
+            }["git-unix-tools"]
+
+            self.assertEqual(check.status, doctor.FAIL)
+            self.assertIn("bash", check.detail)
+            self.assertNotIn("sed", check.detail)
+            self.assertIn("SHELL := bash", check.prevents)
+
+    def test_git_unix_tools_reports_both_directories_once_each(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            which, environ, settings = make_toolchain(tmp_path)
+
+            check = {
+                c.key: c for c in run_doctor(which, environ, settings).checks
+            }["git-unix-tools"]
+
+            self.assertEqual(check.status, doctor.PASS)
+            self.assertIn(str(tmp_path / "Git" / "bin"), check.detail)
+            self.assertIn(str(tmp_path / "Git" / "usr" / "bin"), check.detail)
+
+    def test_git_unix_tools_in_one_directory_is_not_repeated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            which, environ, settings = make_toolchain(tmp_path)
+            which["sed"] = str(Path(which["bash"]).parent / "sed.exe")
+
+            check = {
+                c.key: c for c in run_doctor(which, environ, settings).checks
+            }["git-unix-tools"]
+
+            self.assertEqual(check.detail, str(tmp_path / "Git" / "bin"))
+
+
+class TestDoctorEmulator(unittest.TestCase):
+    def test_java_absent_prevents_the_emulator(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            which, environ, settings = make_toolchain(Path(tmp))
+            del which["java"]
+
+            check = {c.key: c for c in run_doctor(which, environ, settings).checks}["java"]
+
+            self.assertEqual(check.status, doctor.FAIL)
+            self.assertIn("Emulicious", check.prevents)
+
+    def test_missing_jar_is_a_failure_naming_the_settings_key(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            which, environ, settings = make_toolchain(tmp_path)
+            (tmp_path / "Emulicious" / "Emulicious.jar").unlink()
+
+            check = {
+                c.key: c for c in run_doctor(which, environ, settings).checks
+            }["emulicious"]
+
+            self.assertEqual(check.status, doctor.FAIL)
+            self.assertIn("garage.local.json", check.detail)
+            self.assertIn("emulicious_jar", check.detail)
+
+    def test_jar_path_comes_from_settings_first_then_env_then_the_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            recorded = tmp_path / "recorded.jar"
+            from_env = tmp_path / "env.jar"
+
+            self.assertEqual(
+                doctor.resolve_emulicious_jar(
+                    {"emulicious_jar": str(recorded)},
+                    {"EMULICIOUS_JAR": str(from_env)},
+                ),
+                recorded,
+            )
+            self.assertEqual(
+                doctor.resolve_emulicious_jar({}, {"EMULICIOUS_JAR": str(from_env)}),
+                from_env,
+            )
+            self.assertEqual(
+                doctor.resolve_emulicious_jar(None, {}),
+                Path(doctor.DEFAULT_EMULICIOUS_JAR),
+            )
+
+
+class TestDoctorBinding(unittest.TestCase):
+    """R17's last sentence: a binding that no longer resolves is reported
+    here as a toolchain failure, not only inside the panels that trip on it.
+    """
+
+    def test_a_resolved_binding_passes_and_shows_the_active_worktree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            garage_root = tmp_path / "nuke-raider-garage"
+            garage_root.mkdir()
+            game_repo = make_game_repo(tmp_path / "nuke-raider")
+            binding = project.bind(garage_root)
+
+            check = doctor.check_binding(binding, None)
+
+            self.assertEqual(check.status, doctor.PASS)
+            self.assertEqual(check.detail, str(game_repo))
+
+    def test_a_binding_error_is_a_failure_carrying_its_message(self):
+        error = project.BindingError("game_repo", "the recorded path is gone")
+
+        check = doctor.check_binding(None, error)
+
+        self.assertEqual(check.status, doctor.FAIL)
+        self.assertIn("game_repo", check.detail)
+        self.assertIn("the recorded path is gone", check.detail)
+        self.assertIn("config.h", check.prevents)
+
+    def test_settings_default_to_the_bound_repositorys_own_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            garage_root = tmp_path / "nuke-raider-garage"
+            garage_root.mkdir()
+            make_game_repo(tmp_path / "nuke-raider")
+            binding = project.bind(garage_root)
+            jar = tmp_path / "recorded.jar"
+            jar.write_text("", encoding="utf-8")
+            recorded = project.load_settings(garage_root)
+            recorded["emulicious_jar"] = str(jar)
+            project.save_settings(garage_root, recorded)
+
+            report = doctor.run_checks(
+                binding,
+                None,
+                which=lambda name: None,
+                environ={},
+                probe=lambda command: "",
+            )
+            check = {c.key: c for c in report.checks}["emulicious"]
+
+            self.assertEqual(check.status, doctor.PASS)
+            self.assertEqual(check.detail, str(jar))
+
+    def test_load_binding_settings_without_a_binding(self):
+        self.assertIsNone(doctor.load_binding_settings(None))
+
+
+class TestDoctorVersionProbe(unittest.TestCase):
+    def test_reads_the_first_dotted_version_from_stdout(self):
+        self.assertEqual(
+            doctor.probe_version(
+                [sys.executable, "-c", "print('GNU Make 4.4.1')"]
+            ),
+            "4.4.1",
+        )
+
+    def test_reads_a_version_written_to_stderr(self):
+        # java -version writes its banner to stderr.
+        self.assertEqual(
+            doctor.probe_version(
+                [
+                    sys.executable,
+                    "-c",
+                    "import sys; sys.stderr.write('openjdk version \"25.0.3\"')",
+                ]
+            ),
+            "25.0.3",
+        )
+
+    def test_a_tool_that_cannot_be_run_gives_no_version_and_does_not_raise(self):
+        self.assertEqual(
+            doctor.probe_version(["no-such-executable-should-exist-here"]), ""
+        )
+
+    def test_output_without_a_version_gives_an_empty_string(self):
+        self.assertEqual(
+            doctor.probe_version([sys.executable, "-c", "print('hello')"]), ""
+        )
 
 
 if __name__ == "__main__":

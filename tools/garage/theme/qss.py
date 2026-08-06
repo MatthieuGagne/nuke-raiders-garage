@@ -20,6 +20,14 @@ names / dynamic properties the panels already expose for this purpose:
 - `[role="tuner-head-value"]`, `[role="tuner-revert"]` -- the per-row HEAD
   value and revert button, whose object names are unique per row (so
   cannot be selected by object name alone).
+- `#garage-toolchain-status` -- the one-line toolchain failure notice under
+  the header (`tools/garage/app.py`), shown only when a check failed.
+- `#doctor-summary`, `#doctor-check-row`, `#doctor-verdict`,
+  `#doctor-check-name`, `#doctor-check-detail`, `#doctor-check-tag`,
+  `#doctor-check-prevents` -- the Doctor panel
+  (`tools/garage/panels/doctor.py`). `[verdict="pass"|"fail"]` carries the
+  PASS/FAIL colour vocabulary the prototype's `.check` rows declare; the
+  chip also spells the word out, so colour is never the only signal.
 - `#diff-status`, `#diff-file-header`, `#diff-hunk-header`,
   `#diff-untracked-header`, `#diff-untracked-file`, `#diff-line`,
   `#diff-truncated-note`, `#diff-binary-note` -- the diff view
@@ -51,6 +59,45 @@ QMainWindow, QDialog {{
 QScrollArea {{
     background-color: transparent;
     border: none;
+}}
+/* The prototype is a web page and never declares a scrollbar, so these
+   take the surface/line tokens directly. Without them Qt paints the native
+   light Windows scrollbar, which is the one bright rectangle in an
+   otherwise dark window -- visible in any panel long enough to scroll (the
+   Doctor, the diff, a long Tuner tab). */
+QScrollBar:vertical, QScrollBar:horizontal {{
+    background-color: {t['bg']};
+    border: none;
+    margin: 0;
+}}
+QScrollBar:vertical {{
+    width: 10px;
+}}
+QScrollBar:horizontal {{
+    height: 10px;
+}}
+QScrollBar::handle:vertical, QScrollBar::handle:horizontal {{
+    background-color: {t['surface-3']};
+    border-radius: 5px;
+}}
+QScrollBar::handle:vertical {{
+    min-height: 24px;
+}}
+QScrollBar::handle:horizontal {{
+    min-width: 24px;
+}}
+QScrollBar::handle:hover {{
+    background-color: {t['line']};
+}}
+/* No stepper buttons: the arrows would need their own painted glyphs, and
+   a 10px track has no room for them. Zeroing both the buttons and the
+   page-area background leaves the track and the handle, nothing else. */
+QScrollBar::add-line, QScrollBar::sub-line {{
+    height: 0;
+    width: 0;
+}}
+QScrollBar::add-page, QScrollBar::sub-page {{
+    background-color: transparent;
 }}
 QLabel {{
     color: {t['text']};
@@ -182,6 +229,78 @@ QLabel#garage-header {{
     background-color: {t['surface-2']};
     border-bottom: 1px solid {t['line']};
     padding: 8px 12px;
+}}
+
+/* ============================================================
+   Toolchain notice under the header (tools/garage/app.py).
+   ============================================================ */
+QLabel#garage-toolchain-status {{
+    color: {t['fail']};
+    background-color: {t['fail-soft']};
+    border-bottom: 1px solid {t['line']};
+    padding: 6px 12px;
+    font-family: {FONT_MONO};
+}}
+
+/* ============================================================
+   Doctor panel (tools/garage/panels/doctor.py). Follows the
+   prototype's `.checks` list: one surface row per check, a soft
+   fail background on a failing row, a PASS/FAIL chip on the left
+   and the resolved path in the monospace face underneath.
+   ============================================================ */
+QLabel#doctor-summary {{
+    color: {t['text-2']};
+    padding: 2px 0 6px 0;
+}}
+QFrame#doctor-check-row {{
+    background-color: {t['surface']};
+    border: 1px solid {t['line']};
+    border-radius: 5px;
+}}
+QFrame#doctor-check-row[verdict="fail"] {{
+    background-color: {t['fail-soft']};
+    border-color: {t['fail']};
+}}
+QLabel#doctor-verdict {{
+    font-family: {FONT_MONO};
+    font-weight: 600;
+    border-radius: 3px;
+    padding: 2px 6px;
+    /* The chip is the same width for PASS and FAIL, so the names beside
+       it line up down the column. */
+    min-width: 34px;
+    qproperty-alignment: AlignCenter;
+}}
+QLabel#doctor-verdict[verdict="pass"] {{
+    color: {t['pass']};
+    background-color: {t['pass-soft']};
+}}
+QLabel#doctor-verdict[verdict="fail"] {{
+    color: {t['fail']};
+    background-color: {t['fail-soft']};
+}}
+QLabel#doctor-check-name {{
+    color: {t['text']};
+    font-weight: 600;
+}}
+QLabel#doctor-check-detail {{
+    font-family: {FONT_MONO};
+    color: {t['text-3']};
+}}
+QLabel#doctor-check-detail[verdict="fail"] {{
+    color: {t['fail']};
+}}
+QLabel#doctor-check-tag {{
+    font-family: {FONT_MONO};
+    color: {t['text-3']};
+}}
+QLabel#doctor-check-tag[verdict="fail"] {{
+    color: {t['fail']};
+}}
+QLabel#doctor-check-prevents {{
+    color: {t['text-2']};
+    border-left: 3px solid {t['fail']};
+    padding-left: 8px;
 }}
 
 /* ============================================================

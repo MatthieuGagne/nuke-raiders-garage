@@ -28,9 +28,10 @@ from PySide6.QtWidgets import (
 
 from tools.garage import theme
 from tools.garage.app import GarageWindow, format_header, format_header_html
-from tools.garage.core import config_io, diff as diff_core, project
+from tools.garage.core import config_io, diff as diff_core, doctor as doctor_core, project
 from tools.garage.core.schema import Schema
 from tools.garage.panels.diff_view import DiffPanel
+from tools.garage.panels.doctor import DoctorPanel
 from tools.garage.panels.tuner import TunerPanel, compute_derived_dependents
 
 GAME_REPO_REMOTE_URL = "https://github.com/MatthieuGagne/gmb-nuke-raider.git"
@@ -1531,6 +1532,231 @@ class TestSpinBoxSubControlGeometry(unittest.TestCase):
 
         self.assertNotEqual(image.pixelColor(up.center()), field_bg)
         self.assertNotEqual(image.pixelColor(down.center()), field_bg)
+
+
+class TestDoctorPanel(unittest.TestCase):
+    """The panel renders a `doctor.Report`; what the report *says* is
+    covered in tests/test_garage_core.py, with no Qt. Every report here is
+    therefore built by hand -- the panel must render the same way on a
+    machine that has the whole toolchain and on one that has none of it.
+    """
+
+    def _report(self):
+        return doctor_core.Report(
+            checks=[
+                doctor_core.CheckResult(
+                    key="make",
+                    name="make — every build target",
+                    status=doctor_core.PASS,
+                    detail="C:/bin/make.exe",
+                    tag="4.4.1",
+                ),
+                doctor_core.CheckResult(
+                    key="romusage",
+                    name="romusage — ROM bank budgets",
+                    status=doctor_core.FAIL,
+                    detail="not found on PATH — add C:/gbdk/bin",
+                    prevents="The ROM bank budget check. make bank-post-build exits 2.",
+                    tag="blocked",
+                ),
+            ]
+        )
+
+    def _panel(self, report):
+        with mock.patch.object(doctor_core, "run_checks", return_value=report):
+            return DoctorPanel(None, None)
+
+    def test_renders_one_row_per_check_with_its_detail(self):
+        panel = self._panel(self._report())
+
+        self.assertEqual(panel.check_keys(), ["make", "romusage"])
+        self.assertEqual(panel.detail_of("make"), "C:/bin/make.exe")
+        self.assertIn("not found on PATH", panel.detail_of("romusage"))
+
+    def test_a_failing_check_states_what_it_prevents(self):
+        # AC14, as rendered: the sentence is on the row, not only in the
+        # report object.
+        panel = self._panel(self._report())
+
+        self.assertIn("bank-post-build", panel.prevents_of("romusage"))
+        self.assertEqual(panel.prevents_of("make"), "")
+
+    def test_summary_line_counts_the_checks(self):
+        panel = self._panel(self._report())
+
+        self.assertIn("1 of 2 checks passing", panel.summary_text())
+        self.assertIn("romusage", panel.summary_text())
+        self.assertTrue(panel.has_failures())
+
+    def test_a_whole_toolchain_has_no_failures(self):
+        report = doctor_core.Report(
+            checks=[
+                doctor_core.CheckResult(
+                    key="make", name="make", status=doctor_core.PASS, detail="ok"
+                )
+            ]
+        )
+
+        panel = self._panel(report)
+
+        self.assertFalse(panel.has_failures())
+        self.assertEqual(panel.summary_text(), "1 of 1 checks passing")
+
+    def test_rows_carry_the_verdict_property_the_stylesheet_selects_on(self):
+        # AC18: the panel declares no colour of its own -- it exposes the
+        # result as a property and tools/garage/theme/qss.py colours it.
+        panel = self._panel(self._report())
+
+        self.assertEqual(panel.verdict_of("make"), "pass")
+        self.assertEqual(panel.verdict_of("romusage"), "fail")
+
+        chips = [
+            label
+            for label in panel.findChildren(QLabel)
+            if label.objectName() == "doctor-verdict"
+        ]
+        self.assertEqual([c.text() for c in chips], ["PASS", "FAIL"])
+        self.assertEqual(
+            [c.property("verdict") for c in chips], ["pass", "fail"]
+        )
+
+    def test_the_stylesheet_gives_both_verdicts_a_distinct_colour(self):
+        sheet = theme.build_stylesheet()
+
+        self.assertIn('QLabel#doctor-verdict[verdict="pass"]', sheet)
+        self.assertIn('QLabel#doctor-verdict[verdict="fail"]', sheet)
+        self.assertIn(theme.TOKENS["pass"], sheet)
+        self.assertIn(theme.TOKENS["fail"], sheet)
+
+
+class TestGarageWindowDoctorIntegration(unittest.TestCase):
+    def _window(self, garage_root, report):
+        with mock.patch.object(doctor_core, "run_checks", return_value=report):
+            return GarageWindow(garage_root=garage_root)
+
+    def _failing_report(self):
+        return doctor_core.Report(
+            checks=[
+                doctor_core.CheckResult(
+                    key="make", name="make", status=doctor_core.PASS, detail="ok"
+                ),
+                doctor_core.CheckResult(
+                    key="romusage",
+                    name="romusage — ROM bank budgets",
+                    status=doctor_core.FAIL,
+                    detail="not found on PATH",
+                    prevents="The ROM bank budget check.",
+                ),
+            ]
+        )
+
+    def _passing_report(self):
+        return doctor_core.Report(
+            checks=[
+                doctor_core.CheckResult(
+                    key="make", name="make", status=doctor_core.PASS, detail="ok"
+                )
+            ]
+        )
+
+    def _garage_root(self, tmp_path):
+        garage_root = tmp_path / "nuke-raider-garage"
+        garage_root.mkdir()
+        make_game_repo(tmp_path / "nuke-raider")
+        return garage_root
+
+    def test_a_failing_check_is_stated_in_the_window_itself(self):
+        # AC14 / R14: the failure is reported at startup, without the user
+        # having to open anything.
+        with tempfile.TemporaryDirectory() as tmp:
+            garage_root = self._garage_root(Path(tmp))
+
+            window = self._window(garage_root, self._failing_report())
+
+            self.assertTrue(window.toolchain_label.isVisibleTo(window))
+            text = window.toolchain_label.text()
+            self.assertIn("1 check failing", text)
+            self.assertIn("romusage", text)
+
+    def test_a_whole_toolchain_shows_no_notice_at_all(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            garage_root = self._garage_root(Path(tmp))
+
+            window = self._window(garage_root, self._passing_report())
+
+            self.assertFalse(window.toolchain_label.isVisibleTo(window))
+            self.assertFalse(window.doctor_dialog.isVisible())
+
+    def test_the_doctor_opens_itself_once_when_a_check_failed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            garage_root = self._garage_root(Path(tmp))
+
+            window = self._window(garage_root, self._failing_report())
+            self.assertFalse(window.doctor_dialog.isVisible())
+
+            window.show()
+            try:
+                self.assertTrue(window.doctor_dialog.isVisible())
+
+                # Closed by the user, it stays closed -- showing the window
+                # again (raise, restore) must not keep re-opening it.
+                window.doctor_dialog.close()
+                window.hide()
+                window.show()
+                self.assertFalse(window.doctor_dialog.isVisible())
+            finally:
+                window.close()
+
+    def test_the_doctor_stays_closed_when_every_check_passes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            garage_root = self._garage_root(Path(tmp))
+
+            window = self._window(garage_root, self._passing_report())
+            window.show()
+            try:
+                self.assertFalse(window.doctor_dialog.isVisible())
+            finally:
+                window.close()
+
+    def test_menu_action_opens_the_doctor_and_it_can_be_closed_and_reopened(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            garage_root = self._garage_root(Path(tmp))
+
+            window = self._window(garage_root, self._passing_report())
+
+            window.show_doctor_action.trigger()
+            self.assertTrue(window.doctor_dialog.isVisible())
+            self.assertIn("1 of 1 checks passing", window.doctor_panel.summary_text())
+
+            window.doctor_dialog.close()
+            self.assertFalse(window.doctor_dialog.isVisible())
+
+            window.show_doctor_action.trigger()
+            self.assertTrue(window.doctor_dialog.isVisible())
+            window.doctor_dialog.close()
+
+            # The Tuner underneath is untouched by the dialog, as with the
+            # diff -- a separate window, not part of the central layout.
+            self.assertIs(window.centralWidget(), window.tuner_panel.parentWidget())
+            self.assertTrue(window.tuner_panel.isEnabled())
+
+    def test_the_checks_run_once_at_startup_not_on_every_open(self):
+        # They read the process environment, which cannot change under a
+        # running Garage; re-running them would redraw the same answer and
+        # cost a subprocess per tool each time.
+        with tempfile.TemporaryDirectory() as tmp:
+            garage_root = self._garage_root(Path(tmp))
+
+            with mock.patch.object(
+                doctor_core, "run_checks", return_value=self._passing_report()
+            ) as run_checks:
+                window = GarageWindow(garage_root=garage_root)
+                self.assertEqual(run_checks.call_count, 1)
+
+                window.show_doctor_action.trigger()
+                window.doctor_dialog.close()
+
+                self.assertEqual(run_checks.call_count, 1)
 
 
 if __name__ == "__main__":

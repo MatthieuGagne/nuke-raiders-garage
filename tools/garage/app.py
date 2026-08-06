@@ -8,6 +8,10 @@ approved: the Tuner is the whole window body again, the header states
 change *totals* only, and the full diff lives behind a menu action,
 closed until asked for (AC19, AC2).
 
+Iteration 6 adds the Doctor (R14/AC14): the toolchain verification runs at
+startup, states a failure in the window itself, and opens its own dialog
+over the window when something is missing.
+
 Iteration 5 also applies the dark stylesheet (R18/AC18): `main()` installs
 it once, on the QApplication, via `tools.garage.theme.apply`. This file
 holds no colour and no typeface literal of its own -- the one exception is
@@ -38,6 +42,7 @@ from tools.garage import theme
 from tools.garage.core import diff as diff_core
 from tools.garage.core.project import Binding, BindingError, bind
 from tools.garage.panels.diff_view import DiffPanel
+from tools.garage.panels.doctor import DoctorPanel
 from tools.garage.panels.tuner import TunerPanel
 from tools.garage.theme.tokens import FONT_MONO, TOKENS
 
@@ -181,6 +186,17 @@ class GarageWindow(QMainWindow):
         self.header_label.setTextFormat(Qt.TextFormat.RichText)
         layout.addWidget(self.header_label)
 
+        # R14: the toolchain verification runs at startup, and a failure is
+        # stated in the window itself -- not only inside a panel the user
+        # would have to think to open. The notice is hidden when every
+        # check passes, so a healthy machine shows the tuning loop and
+        # nothing else. See _build_doctor / _refresh_toolchain_notice.
+        self.toolchain_label = QLabel()
+        self.toolchain_label.setObjectName("garage-toolchain-status")
+        self.toolchain_label.setWordWrap(True)
+        self.toolchain_label.hide()
+        layout.addWidget(self.toolchain_label)
+
         # The Tuner is the window body -- the tuning loop is what Garage
         # shows on launch (R19's redesign: the diff moved behind a menu,
         # see _build_menu / _open_diff below).
@@ -217,9 +233,69 @@ class GarageWindow(QMainWindow):
         # QDialog starts hidden until show()/exec() is called -- closed at
         # launch is the default, nothing further needed for that.
 
+        self._build_doctor()
+
         self._build_menu()
 
         self._refresh_header()
+
+        # The verification has already run (in the panel's constructor);
+        # this states its result in the window. Opening the Doctor over the
+        # window is deferred to the first showEvent, so it appears over a
+        # window that exists rather than before one does.
+        self._toolchain_reported = False
+        self._report_toolchain()
+
+    def _build_doctor(self) -> None:
+        """The Doctor lives in its own dialog, for the same reasons the
+        diff does (see below): a modeless QDialog never disturbs the
+        window's central layout, and re-opening it is a `show()`.
+
+        Unlike the diff, it is built and run *before* it is ever shown --
+        the checks run at startup whether or not the user opens the panel,
+        because the window's toolchain notice reads its result.
+        """
+        self.doctor_panel = DoctorPanel(self.binding, self.binding_error)
+        self.doctor_panel.setObjectName("garage-doctor-panel")
+        self.doctor_dialog = QDialog(self)
+        self.doctor_dialog.setObjectName("garage-doctor-dialog")
+        self.doctor_dialog.setWindowTitle("Toolchain")
+        dialog_layout = QVBoxLayout(self.doctor_dialog)
+        dialog_layout.addWidget(self.doctor_panel)
+        self.doctor_dialog.resize(760, 620)
+
+    def _report_toolchain(self) -> None:
+        """The one-line notice under the header: which checks failed, and
+        where to read what they prevent. Hidden entirely when the toolchain
+        is whole, so a healthy machine shows the tuning loop and nothing
+        else.
+        """
+        report = self.doctor_panel.report
+        if report is None or report.ok:
+            self.toolchain_label.hide()
+            return
+        failed = len(report.failures)
+        checks_word = "check" if failed == 1 else "checks"
+        self.toolchain_label.setText(
+            f"Toolchain: {failed} {checks_word} failing — "
+            + ", ".join(c.key for c in report.failures)
+            + ".  View ▸ Toolchain names what each one prevents."
+        )
+        self.toolchain_label.show()
+
+    def showEvent(self, event) -> None:
+        """R14: a failure is reported when Garage starts. The notice above
+        is always there, but a missing tool also opens the Doctor once, the
+        first time the window is shown -- the whole point of the check is
+        that a missing tool cannot go unnoticed, and a line the user has to
+        read before they start is easy to scroll past.
+        """
+        super().showEvent(event)
+        if self._toolchain_reported:
+            return
+        self._toolchain_reported = True
+        if self.doctor_panel.has_failures():
+            self.open_doctor()
 
     def _build_menu(self) -> None:
         menu_bar = self.menuBar()
@@ -228,6 +304,20 @@ class GarageWindow(QMainWindow):
         self.show_diff_action.setObjectName("garage-action-show-diff")
         self.show_diff_action.triggered.connect(self.open_diff)
         view_menu.addAction(self.show_diff_action)
+
+        self.show_doctor_action = QAction("&Toolchain…", self)
+        self.show_doctor_action.setObjectName("garage-action-show-doctor")
+        self.show_doctor_action.triggered.connect(self.open_doctor)
+        view_menu.addAction(self.show_doctor_action)
+
+    def open_doctor(self) -> None:
+        """Show the Doctor. The checks are not re-run here: they read the
+        process environment, which cannot change under a running Garage,
+        so re-running them would only redraw the same answer.
+        """
+        self.doctor_dialog.show()
+        self.doctor_dialog.raise_()
+        self.doctor_dialog.activateWindow()
 
     def open_diff(self) -> None:
         """Show the diff dialog, re-reading git first so it reflects
