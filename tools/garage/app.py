@@ -1,7 +1,7 @@
 """Garage main window. Thin Qt layer: all logic lives in tools.garage.core.
 
-Iteration 1 delivers the window shell and the header only (AC1, AC2, AC17).
-Panels arrive in later iterations.
+Iteration 1 delivers the window shell and the header (AC1, AC2, AC17).
+Iteration 2 adds the Tuner panel as the window body (AC7, AC8).
 """
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 )
 
 from tools.garage.core.project import Binding, BindingError, bind
+from tools.garage.panels.tuner import TunerPanel
 
 
 def format_header(binding: Optional[Binding], error: Optional[BindingError]) -> str:
@@ -50,10 +51,9 @@ class GarageWindow(QMainWindow):
         self.header_label.setWordWrap(True)
         layout.addWidget(self.header_label)
 
-        self.body_placeholder = QLabel("(panels arrive in a later iteration)")
-        self.body_placeholder.setObjectName("garage-body-placeholder")
-        layout.addWidget(self.body_placeholder)
-        layout.addStretch(1)
+        self.tuner_panel = TunerPanel(self.binding, self.binding_error, parent=central)
+        self.tuner_panel.setObjectName("garage-tuner-panel")
+        layout.addWidget(self.tuner_panel, 1)
 
         self.setCentralWidget(central)
         self.resize(900, 600)
