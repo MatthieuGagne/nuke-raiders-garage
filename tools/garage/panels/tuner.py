@@ -2,10 +2,20 @@
 category, bound to the active worktree's `src/config.h`.
 
 R7 / AC7: only `tunable` entries are ever offered, edits are clamped to the
-declared [min, max] at the widget level, and Save goes through
-`core.config_io.write` so comments, order and formatting survive untouched.
-AC8: `structural` / `derived` / `marker` entries -- including MAX_SPRITES --
-never appear here.
+declared [min, max] at the widget level, and every committed edit goes
+through `core.config_io.write` so comments, order and formatting survive
+untouched. AC8: `structural` / `derived` / `marker` entries -- including
+MAX_SPRITES -- never appear here.
+
+Redesign (iteration 4): there is no Save button and no pending state.
+The user rejected the pending-then-save model -- nothing exists only inside
+Garage. A row is either equal to git HEAD or differs from it; there is no
+third "edited but not yet saved" state. `config.h` is written the moment an
+edit is *committed* -- Enter, focus leaving the field, or a programmatic
+revert -- never on every tick of a held arrow key or every keystroke of a
+multi-digit number. That is exactly what QSpinBox's `editingFinished` signal
+gives (fires on Return/Enter or on focus-out; NOT on stepUp()/arrow-key
+repeats or on each character typed) -- see `_make_row` below.
 
 Qt lives only in this file (and its siblings under tools/garage/panels/);
 tools/garage/core/ stays pure and Qt-free.
@@ -15,6 +25,7 @@ from __future__ import annotations
 import re
 from typing import Dict, List, Optional
 
+from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QFormLayout,
     QHBoxLayout,
@@ -38,8 +49,8 @@ from tools.garage.core.schema import Schema, SchemaError, TunableEntry
 _DEFINE_HEAD_RE = re.compile(r"^#define[ \t]+\w+\b")
 _IDENT_RE = re.compile(r"[A-Za-z_]\w*")
 
-_DIRTY_STYLE = "font-weight: bold; color: #b35c00;"
-_DIRTY_PREFIX = "● "  # filled circle, marks a changed-but-unsaved row
+_DIFFERS_STYLE = "font-weight: bold; color: #b35c00;"
+_DIFFERS_PREFIX = "● "  # filled circle, marks a row that differs from HEAD
 
 
 def compute_derived_dependents(
@@ -71,7 +82,14 @@ def compute_derived_dependents(
 
 
 class _TunableRow:
-    """The widgets and bookkeeping for one tunable's row."""
+    """The widgets and bookkeeping for one tunable's row.
+
+    There is no "dirty"/pending state anymore -- a row is either equal to
+    HEAD or differs from it (`differs_from_head`), full stop. `persisted_value`
+    is not a third UI state; it is bookkeeping only, so a committed edit that
+    reproduces the value already on disk (e.g. typing the same number back
+    in) does not trigger a redundant write.
+    """
 
     def __init__(
         self,
@@ -80,7 +98,7 @@ class _TunableRow:
         name_label: QLabel,
         range_label: QLabel,
         dependents_label: QLabel,
-        original_value: int,
+        persisted_value: int,
         head_value: Optional[int],
         head_label: QLabel,
         revert_button: QPushButton,
@@ -90,17 +108,15 @@ class _TunableRow:
         self.name_label = name_label
         self.range_label = range_label
         self.dependents_label = dependents_label
-        self.original_value = original_value
+        # The value currently written to config.h on disk. Updated after
+        # every successful write (including a revert). Used only to skip a
+        # no-op write, never shown to the user as a state of its own.
+        self.persisted_value = persisted_value
         # R9/AC10: the value at git HEAD, or None when HEAD (or this
-        # define at HEAD) could not be read -- "changed" always means
-        # "differs from HEAD", never "touched in this session", so this
-        # is independent of original_value/is_dirty().
+        # define at HEAD) could not be read.
         self.head_value = head_value
         self.head_label = head_label
         self.revert_button = revert_button
-
-    def is_dirty(self) -> bool:
-        return self.spin.value() != self.original_value
 
     def differs_from_head(self) -> bool:
         return self.head_value is not None and self.spin.value() != self.head_value
@@ -108,16 +124,22 @@ class _TunableRow:
 
 class TunerPanel(QWidget):
     """Fills the Garage window body. One tab per category; a persistent
-    top bar (visible across tabs) reports how many edits are pending and
-    what Save did.
+    top bar (visible across tabs) carries Revert All and a status message.
 
     Layout choice: 60 tunables across ~8 categories is too much for a
     single flat list on one screen without heavy scrolling, but the
     categories are small and well-separated (2-21 rows each), so tabs --
     one per category, each independently scrollable -- keep any single
-    screen to a manageable size while the pending-count/Save bar above
-    the tabs stays visible no matter which tab is open.
+    screen to a manageable size while the top bar stays visible no matter
+    which tab is open.
     """
+
+    # R19/AC19: the Diff panel (and the header) must refresh after a write
+    # with no relaunch. Emitted once at the end of every write (whether it
+    # wrote one value or several, via a committed edit or a revert) so a
+    # listener can always just re-read the current diff/header rather than
+    # track what changed.
+    written = Signal()
 
     def __init__(
         self,
@@ -165,10 +187,6 @@ class TunerPanel(QWidget):
         self._revert_all_button.setObjectName("tuner-revert-all")
         self._revert_all_button.clicked.connect(self.revert_all)
         top_bar.addWidget(self._revert_all_button)
-        self._save_button = QPushButton("Save")
-        self._save_button.setObjectName("tuner-save")
-        self._save_button.clicked.connect(self.save)
-        top_bar.addWidget(self._save_button)
         outer.addLayout(top_bar)
 
         self._tabs = QTabWidget()
@@ -176,7 +194,6 @@ class TunerPanel(QWidget):
         outer.addWidget(self._tabs, 1)
 
         self._load(schema)
-        self._update_status()
 
     # -- construction ---------------------------------------------------
 
@@ -238,7 +255,6 @@ class TunerPanel(QWidget):
         self._explanation_label.setText(message)
         self._explanation_label.show()
         self._tabs.hide()
-        self._save_button.setEnabled(False)
         self._revert_all_button.setEnabled(False)
 
     def explanation_text(self) -> str:
@@ -287,8 +303,8 @@ class TunerPanel(QWidget):
         # be entered, let alone saved.
         spin.setRange(entry.min, entry.max)
         spin.setToolTip(entry.reason)
-        original_value = self._schema.clamp(entry.name, define.value)  # type: ignore[union-attr]
-        spin.setValue(original_value)
+        persisted_value = self._schema.clamp(entry.name, define.value)  # type: ignore[union-attr]
+        spin.setValue(persisted_value)
 
         # The range is stated up front -- no need to hit the ceiling to
         # discover it.
@@ -323,12 +339,22 @@ class TunerPanel(QWidget):
             name_label=name_label,
             range_label=range_label,
             dependents_label=dependents_label,
-            original_value=original_value,
+            persisted_value=persisted_value,
             head_value=head_value,
             head_label=head_label,
             revert_button=revert_button,
         )
+        # valueChanged fires on every tick (typing a digit, holding an
+        # arrow key, scrubbing) -- used only to keep the differs-from-HEAD
+        # styling live as the user edits, never to write.
         spin.valueChanged.connect(lambda _value, name=entry.name: self._on_value_changed(name))
+        # editingFinished fires once an edit is *committed* -- Return/Enter
+        # or the field losing focus -- and NOT on stepUp()/arrow-key
+        # repeats or per keystroke (verified empirically: typing "100"
+        # digit by digit emits valueChanged three times and editingFinished
+        # zero times; Enter or a focus-out then emits editingFinished once).
+        # This is the signal that writes to disk.
+        spin.editingFinished.connect(lambda name=entry.name: self._on_edit_finished(name))
         self._set_row_style(row)
         return row
 
@@ -352,19 +378,20 @@ class TunerPanel(QWidget):
             outer.addWidget(row.dependents_label)
         return container
 
-    # -- change tracking --------------------------------------------------
+    # -- HEAD-diff styling --------------------------------------------------
 
     def _set_row_style(self, row: "_TunableRow") -> None:
-        dirty = row.is_dirty()
-        row.name_label.setStyleSheet(_DIRTY_STYLE if dirty else "")
-        prefix = _DIRTY_PREFIX if dirty else ""
+        # R9/AC10: the HEAD value (and its revert control), and the bold
+        # "differs" styling, are visible exactly on rows that currently
+        # differ from HEAD -- regardless of whether that difference came
+        # from this session's edits or was already there (e.g. a
+        # hand-edited config.h) when the panel opened. There is no other
+        # row state: a row is either equal to HEAD or it differs.
+        differs = row.differs_from_head()
+        row.name_label.setStyleSheet(_DIFFERS_STYLE if differs else "")
+        prefix = _DIFFERS_PREFIX if differs else ""
         row.name_label.setText(f"{prefix}{row.entry.name}")
 
-        # R9/AC10: the HEAD value (and its revert control) is visible
-        # exactly on rows that currently differ from HEAD -- regardless of
-        # whether that difference came from this session's edits or was
-        # already there (e.g. a hand-edited config.h) when the panel opened.
-        differs = row.differs_from_head()
         if differs:
             row.head_label.setText(f"HEAD: {row.head_value}")
             row.head_label.show()
@@ -375,79 +402,87 @@ class TunerPanel(QWidget):
             row.revert_button.hide()
 
     def _on_value_changed(self, name: str) -> None:
+        # Fires on every tick (typing, holding an arrow key, scrubbing).
+        # Only ever touches styling -- never writes. See _on_edit_finished
+        # for the write path.
         self._set_row_style(self._rows[name])
-        self._update_status()
-
-    def pending_count(self) -> int:
-        return sum(1 for row in self._rows.values() if row.is_dirty())
-
-    def _update_status(self) -> None:
-        n = self.pending_count()
-        if n == 0:
-            self._status_label.setText("No changes pending.")
-        else:
-            self._status_label.setText(f"{n} change{'s' if n != 1 else ''} pending.")
 
     def status_text(self) -> str:
         return self._status_label.text()
 
-    # -- revert (R9/AC10) -----------------------------------------------
+    # -- writing --------------------------------------------------------
+    #
+    # There is no Save button and no pending state: an edit writes the
+    # instant it is committed (_on_edit_finished, below), and revert writes
+    # immediately too. Every write goes through _write_values so the
+    # "refresh totals/diff" side effect (the `written` signal) always fires
+    # from one place.
 
-    def revert_row(self, name: str) -> None:
-        """Set `name`'s value back to its HEAD value, as a pending change.
-
-        Never writes: the file only changes on Save. A row with no HEAD
-        value available (no HEAD, or config.h absent at HEAD) is a no-op.
-        Reverting a row whose HEAD value equals what is currently on disk
-        simply clears the pending mark (it never got saved in the first
-        place); reverting a hand-edited/previously-saved row marks it
-        pending so Save is required to actually write it.
+    def _write_values(self, changes: Dict[str, int]) -> None:
+        """Write `changes` (name -> new value) through config_io in a
+        single call, refresh this panel's rows from the result, and tell
+        listeners (the header, the diff dialog) to refresh. A write
+        failure (a refused non-tunable target, or an I/O error) is shown
+        and nothing is written -- config_io.write is all-or-nothing.
         """
-        row = self._rows.get(name)
-        if row is None or row.head_value is None:
+        if self.binding is None or self._schema is None or self._config is None or not changes:
             return
-        row.spin.setValue(row.head_value)  # emits valueChanged -> style/status refresh
-
-    def revert_all(self) -> None:
-        """Revert every row that currently differs from HEAD. Same
-        no-write guarantee as revert_row.
-        """
-        for name, row in self._rows.items():
-            if row.differs_from_head():
-                self.revert_row(name)
-
-    # -- save ---------------------------------------------------------------
-
-    def save(self) -> str:
-        """Write every pending change through config_io and report what
-        happened. Never silent: returns (and shows) either how many
-        values were written or the error that stopped it.
-        """
-        if self.binding is None or self._schema is None or self._config is None:
-            message = "Cannot save: " + (self._explanation or "no repository is bound.")
-            self._status_label.setText(message)
-            return message
-
-        changes = {name: row.spin.value() for name, row in self._rows.items() if row.is_dirty()}
-        if not changes:
-            message = "0 values written -- nothing to save."
-            self._status_label.setText(message)
-            return message
-
         try:
             config_io.write(self.binding, self._schema, changes)
         except config_io.ConfigIOError as exc:
-            message = f"Save failed, nothing written: {exc}"
-            self._status_label.setText(message)
-            return message
+            self._status_label.setText(f"Write failed, nothing written: {exc}")
+            self.written.emit()
+            return
 
         self._config = config_io.read(self.binding, self._schema)
         for name in changes:
             row = self._rows[name]
-            row.original_value = self._schema.clamp(name, self._config.defines[name].value)
+            row.persisted_value = self._schema.clamp(name, self._config.defines[name].value)
             self._set_row_style(row)
 
         count = len(changes)
-        message = f"Saved {count} value{'s' if count != 1 else ''}."
-        self._status_label.setText(message)
-        return message
+        self._status_label.setText(f"Wrote {count} value{'s' if count != 1 else ''}.")
+        self.written.emit()
+
+    def _on_edit_finished(self, name: str) -> None:
+        """The edit-finished write path: Enter, or the field losing focus
+        (QSpinBox.editingFinished -- never fires per keystroke or per
+        arrow-key tick, only once an edit is committed). A value equal to
+        what is already on disk is not written again.
+        """
+        row = self._rows[name]
+        new_value = row.spin.value()
+        if new_value == row.persisted_value:
+            return
+        self._write_values({name: new_value})
+
+    # -- revert (R9/AC10) -----------------------------------------------
+
+    def revert_row(self, name: str) -> None:
+        """Set `name`'s value back to its HEAD value and write it at once.
+
+        A row with no HEAD value available (no HEAD, or config.h absent at
+        HEAD) is a no-op. A row whose HEAD value already equals what is on
+        disk performs a no-op write (persisted_value already matches).
+        """
+        row = self._rows.get(name)
+        if row is None or row.head_value is None:
+            return
+        row.spin.setValue(row.head_value)  # emits valueChanged -> style refresh
+        self._on_edit_finished(name)
+
+    def revert_all(self) -> None:
+        """Revert every row that currently differs from HEAD, writing every
+        one of them in a single config_io.write call -- not one write per
+        row.
+        """
+        changes = {
+            name: row.head_value
+            for name, row in self._rows.items()
+            if row.differs_from_head()
+        }
+        if not changes:
+            return
+        for name, value in changes.items():
+            self._rows[name].spin.setValue(value)  # emits valueChanged -> style refresh
+        self._write_values(changes)

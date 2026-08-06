@@ -14,11 +14,14 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import Qt
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication, QLabel
 
-from tools.garage.app import GarageWindow
-from tools.garage.core import config_io, project
+from tools.garage.app import GarageWindow, format_header
+from tools.garage.core import config_io, diff as diff_core, project
 from tools.garage.core.schema import Schema
+from tools.garage.panels.diff_view import DiffPanel
 from tools.garage.panels.tuner import TunerPanel, compute_derived_dependents
 
 GAME_REPO_REMOTE_URL = "https://github.com/MatthieuGagne/gmb-nuke-raider.git"
@@ -128,6 +131,43 @@ def make_panel_binding(tmp_path: Path):
     make_game_repo_with_config(tmp_path / "nuke-raider", PANEL_CONFIG_TEXT)
     binding = project.bind(garage_root)
     schema = Schema.load(write_json(tmp_path / "tunables.json", PANEL_TUNABLES))
+    return binding, schema
+
+
+# A single wide-range tunable (0-999), used only to exercise the
+# multi-digit-typing case ("100" typed digit by digit must not write 1,
+# then 10, then 100) -- PANEL_TUNABLES' entries all top out at 20.
+
+WIDE_CONFIG_TEXT = """\
+#ifndef CONFIG_H
+#define CONFIG_H
+
+#define SPEED        5u
+
+#endif /* CONFIG_H */
+"""
+
+WIDE_TUNABLES = {
+    "_shape": "test fixture",
+    "entries": {
+        "CONFIG_H": {"class": "marker", "reason": "include guard"},
+        "SPEED": {
+            "class": "tunable",
+            "category": "Misc",
+            "min": 0,
+            "max": 999,
+            "reason": "speed",
+        },
+    },
+}
+
+
+def make_wide_panel_binding(tmp_path: Path):
+    garage_root = tmp_path / "nuke-raider-garage"
+    garage_root.mkdir()
+    make_game_repo_with_config(tmp_path / "nuke-raider", WIDE_CONFIG_TEXT)
+    binding = project.bind(garage_root)
+    schema = Schema.load(write_json(tmp_path / "tunables.json", WIDE_TUNABLES))
     return binding, schema
 
 
@@ -291,26 +331,6 @@ class TestTunerPanel(unittest.TestCase):
 
             self.assertIn("PATROL_HP", row.spin.toolTip() + row.name_label.toolTip())
 
-    def test_changed_row_marked_pending_and_count_reported(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            binding, schema = make_panel_binding(tmp_path)
-
-            panel = TunerPanel(binding, schema=schema)
-            self.assertEqual(panel.pending_count(), 0)
-            self.assertFalse(panel._rows["GEAR1_MAX_SPEED"].is_dirty())
-
-            panel._rows["GEAR1_MAX_SPEED"].spin.setValue(9)
-
-            self.assertTrue(panel._rows["GEAR1_MAX_SPEED"].is_dirty())
-            self.assertEqual(panel.pending_count(), 1)
-            self.assertIn("1", panel.status_text())
-
-            # Setting it back to the original value clears the pending mark.
-            panel._rows["GEAR1_MAX_SPEED"].spin.setValue(2)
-            self.assertFalse(panel._rows["GEAR1_MAX_SPEED"].is_dirty())
-            self.assertEqual(panel.pending_count(), 0)
-
     def test_racer_hp_row_shows_its_derived_dependent(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -323,7 +343,10 @@ class TestTunerPanel(unittest.TestCase):
             # A tunable with no derived reader shows no such note.
             self.assertEqual(panel._rows["PLAYER_ARMOR"].dependents_label.text(), "")
 
-    def test_save_round_trips_a_value_into_a_temp_config_and_reports_count(self):
+    def test_editing_finished_writes_the_value_immediately(self):
+        # There is no Save button anymore: committing an edit (the
+        # spinbox's editingFinished signal -- Enter or focus-out) writes
+        # config.h at once.
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             binding, schema = make_panel_binding(tmp_path)
@@ -331,31 +354,75 @@ class TestTunerPanel(unittest.TestCase):
             self.assertNotEqual(config_path, Path("C:/Code/nuke-raider/src/config.h"))
 
             panel = TunerPanel(binding, schema=schema)
-            panel._rows["GEAR1_MAX_SPEED"].spin.setValue(9)
-            panel._rows["PLAYER_ARMOR"].spin.setValue(3)
+            row = panel._rows["GEAR1_MAX_SPEED"]
+            row.spin.setValue(9)
+            # Nothing written yet -- only editingFinished writes.
+            self.assertEqual(
+                config_path.read_text(encoding="utf-8"), PANEL_CONFIG_TEXT
+            )
 
-            result = panel.save()
+            row.spin.editingFinished.emit()
 
-            self.assertIn("2", result)
             new_text = config_path.read_text(encoding="utf-8")
             self.assertIn("#define GEAR1_MAX_SPEED        9u", new_text)
-            self.assertIn("#define PLAYER_ARMOR     3   /* reduces damage */", new_text)
             # Untouched lines survive byte-for-byte (R10/AC7).
             self.assertIn("#define RACER_HP              5u   /* bullet hits to destroy a racer */", new_text)
             self.assertIn("#define PATROL_HP             RACER_HP   /* 5 bullet hits to destroy */", new_text)
+            self.assertEqual(row.persisted_value, 9)
 
-            self.assertEqual(panel.pending_count(), 0)
-            self.assertIn("2", panel.status_text())
-
-    def test_save_with_no_changes_reports_nothing_to_save(self):
+    def test_committing_the_value_already_on_disk_does_not_rewrite(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             binding, schema = make_panel_binding(tmp_path)
 
             panel = TunerPanel(binding, schema=schema)
-            result = panel.save()
+            row = panel._rows["GEAR1_MAX_SPEED"]
 
-            self.assertIn("0", result)
+            with mock.patch(
+                "tools.garage.panels.tuner.config_io.write"
+            ) as write_spy:
+                row.spin.editingFinished.emit()  # value unchanged from load (2)
+
+            write_spy.assert_not_called()
+
+    def test_intermediate_value_while_typing_does_not_write(self):
+        # AC/spec: "100" typed digit by digit must not write 1, then 10,
+        # then 100 -- only editingFinished (Enter, here) writes, and only
+        # the final value.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            binding, schema = make_wide_panel_binding(tmp_path)
+
+            panel = TunerPanel(binding, schema=schema)
+            row = panel._rows["SPEED"]
+            row.spin.show()
+            row.spin.setFocus()
+            row.spin.selectAll()
+
+            written = []
+            real_write = config_io.write
+
+            def spy_write(binding_, schema_, changes):
+                written.append(dict(changes))
+                return real_write(binding_, schema_, changes)
+
+            with mock.patch(
+                "tools.garage.panels.tuner.config_io.write", side_effect=spy_write
+            ):
+                QTest.keyClicks(row.spin, "100")
+                self.assertEqual(row.spin.value(), 100)
+                # Still nothing written while typing.
+                self.assertEqual(written, [])
+                self.assertEqual(
+                    binding.config_h.read_text(encoding="utf-8"), WIDE_CONFIG_TEXT
+                )
+
+                QTest.keyClick(row.spin, Qt.Key_Return)  # commits the edit
+
+            # Exactly one write, of the final value -- never 1, then 10.
+            self.assertEqual(written, [{"SPEED": 100}])
+            new_text = binding.config_h.read_text(encoding="utf-8")
+            self.assertIn("#define SPEED        100u", new_text)
 
     def test_binding_error_shows_explanation_without_crashing(self):
         error = project.BindingError("game_repo", "No sibling 'nuke-raider' directory found.")
@@ -400,15 +467,12 @@ class TestTunerPanelRevert(unittest.TestCase):
             panel = TunerPanel(binding, schema=schema)
             row = panel._rows["GEAR1_MAX_SPEED"]
 
-            self.assertEqual(row.spin.value(), 9)  # current (unsaved) value
+            self.assertEqual(row.spin.value(), 9)  # value currently on disk
             self.assertEqual(row.head_value, 2)  # committed value
             self.assertTrue(row.differs_from_head())
             self.assertIn("2", row.head_label.text())
             self.assertFalse(row.head_label.isHidden())
             self.assertFalse(row.revert_button.isHidden())
-            # Never touched this session -- "changed" means "differs from
-            # HEAD", not "touched in this session", so this is NOT pending.
-            self.assertFalse(row.is_dirty())
 
     def test_row_matching_head_hides_head_value_and_revert(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -437,76 +501,75 @@ class TestTunerPanelRevert(unittest.TestCase):
             self.assertFalse(row.differs_from_head())
             self.assertTrue(row.head_label.isHidden())
 
-    def test_per_row_revert_of_unsaved_edit_simply_clears_pending(self):
+    def test_per_row_revert_writes_head_value_at_once(self):
+        # A row that has been hand-edited (or written by a previous
+        # session) differs from HEAD from launch. Revert restores it and
+        # writes it -- there is no "pending" state to clear first.
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             binding, schema = make_panel_binding(tmp_path)
+            binding.config_h.write_text(
+                PANEL_CONFIG_TEXT.replace(
+                    "#define GEAR1_MAX_SPEED        2u",
+                    "#define GEAR1_MAX_SPEED        9u",
+                ),
+                encoding="utf-8",
+            )
+
             panel = TunerPanel(binding, schema=schema)
             row = panel._rows["GEAR1_MAX_SPEED"]
-
-            row.spin.setValue(9)
-            self.assertTrue(row.is_dirty())
+            self.assertTrue(row.differs_from_head())
 
             panel.revert_row("GEAR1_MAX_SPEED")
 
             self.assertEqual(row.spin.value(), 2)
-            self.assertFalse(row.is_dirty())
-            self.assertEqual(panel.pending_count(), 0)
-            # Revert never saves -- the file on disk is untouched.
+            self.assertFalse(row.differs_from_head())
+            # Written immediately -- no separate save step.
             self.assertEqual(
                 binding.config_h.read_text(encoding="utf-8"), PANEL_CONFIG_TEXT
             )
 
-    def test_revert_of_value_that_differed_before_launch_marks_pending_without_writing(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            binding, schema = make_panel_binding(tmp_path)
-            hand_edited_text = PANEL_CONFIG_TEXT.replace(
-                "#define GEAR1_MAX_SPEED        2u",
-                "#define GEAR1_MAX_SPEED        9u",
-            )
-            binding.config_h.write_text(hand_edited_text, encoding="utf-8")
-
-            panel = TunerPanel(binding, schema=schema)
-            row = panel._rows["GEAR1_MAX_SPEED"]
-            self.assertFalse(row.is_dirty())  # matches on-disk file untouched this session
-
-            panel.revert_row("GEAR1_MAX_SPEED")
-
-            self.assertEqual(row.spin.value(), 2)
-            self.assertTrue(row.is_dirty())  # now differs from the on-disk file: pending
-            self.assertEqual(panel.pending_count(), 1)
-
-            # Still not written -- only Save writes.
-            self.assertEqual(
-                binding.config_h.read_text(encoding="utf-8"), hand_edited_text
-            )
-
-            result = panel.save()
-
-            self.assertIn("1", result)
-            saved_text = binding.config_h.read_text(encoding="utf-8")
-            self.assertIn("#define GEAR1_MAX_SPEED        2u", saved_text)
-
-    def test_revert_all_restores_every_differing_row(self):
+    def test_revert_all_restores_every_differing_row_in_one_write(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             binding, schema = make_panel_binding(tmp_path)
             panel = TunerPanel(binding, schema=schema)
 
             panel._rows["GEAR1_MAX_SPEED"].spin.setValue(9)
+            panel._rows["GEAR1_MAX_SPEED"].spin.editingFinished.emit()
             panel._rows["PLAYER_ARMOR"].spin.setValue(3)
-            self.assertEqual(panel.pending_count(), 2)
+            panel._rows["PLAYER_ARMOR"].spin.editingFinished.emit()
+            self.assertTrue(panel._rows["GEAR1_MAX_SPEED"].differs_from_head())
+            self.assertTrue(panel._rows["PLAYER_ARMOR"].differs_from_head())
 
-            panel.revert_all()
+            with mock.patch(
+                "tools.garage.panels.tuner.config_io.write", wraps=config_io.write
+            ) as write_spy:
+                panel.revert_all()
 
+            # Revert All writes every differing row in a single pass, not
+            # one write per row.
+            write_spy.assert_called_once()
             self.assertEqual(panel._rows["GEAR1_MAX_SPEED"].spin.value(), 2)
             self.assertEqual(panel._rows["PLAYER_ARMOR"].spin.value(), 5)
             self.assertEqual(panel._rows["RACER_HP"].spin.value(), 5)
-            self.assertEqual(panel.pending_count(), 0)
+            self.assertFalse(panel._rows["GEAR1_MAX_SPEED"].differs_from_head())
             self.assertEqual(
                 binding.config_h.read_text(encoding="utf-8"), PANEL_CONFIG_TEXT
             )
+
+    def test_revert_all_is_a_no_op_when_nothing_differs_from_head(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            binding, schema = make_panel_binding(tmp_path)
+            panel = TunerPanel(binding, schema=schema)
+
+            with mock.patch(
+                "tools.garage.panels.tuner.config_io.write"
+            ) as write_spy:
+                panel.revert_all()
+
+            write_spy.assert_not_called()
 
     def test_revert_all_button_wired_to_revert_all(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -514,10 +577,15 @@ class TestTunerPanelRevert(unittest.TestCase):
             binding, schema = make_panel_binding(tmp_path)
             panel = TunerPanel(binding, schema=schema)
             panel._rows["GEAR1_MAX_SPEED"].spin.setValue(9)
+            panel._rows["GEAR1_MAX_SPEED"].spin.editingFinished.emit()
 
             panel._revert_all_button.click()
 
             self.assertEqual(panel._rows["GEAR1_MAX_SPEED"].spin.value(), 2)
+            self.assertIn(
+                "#define GEAR1_MAX_SPEED        2u",
+                binding.config_h.read_text(encoding="utf-8"),
+            )
 
     def test_per_row_revert_button_wired_to_revert_row(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -526,10 +594,15 @@ class TestTunerPanelRevert(unittest.TestCase):
             panel = TunerPanel(binding, schema=schema)
             row = panel._rows["GEAR1_MAX_SPEED"]
             row.spin.setValue(9)
+            row.spin.editingFinished.emit()
 
             row.revert_button.click()
 
             self.assertEqual(row.spin.value(), 2)
+            self.assertIn(
+                "#define GEAR1_MAX_SPEED        2u",
+                binding.config_h.read_text(encoding="utf-8"),
+            )
 
     def test_head_values_read_once_per_refresh_not_once_per_row(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -610,6 +683,347 @@ class TestTunerPanelRevert(unittest.TestCase):
             self.assertIsNone(row.head_value)
             self.assertTrue(panel.head_status_text())
             self.assertIn("config.h", panel.head_status_text().lower())
+
+
+# -- R19/AC19/AC2: diff panel, header dirty mark and master warning --------
+
+
+class TestDiffPanel(unittest.TestCase):
+    def test_clean_worktree_shows_clean_message(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            binding, _schema = make_panel_binding(tmp_path)
+
+            panel = DiffPanel(binding)
+
+            self.assertIn("clean", panel.status_text().lower())
+            self.assertEqual(panel.file_paths(), [])
+            self.assertEqual(panel.untracked_files(), [])
+
+    def test_modified_file_shows_hunks_and_lines(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            binding, _schema = make_panel_binding(tmp_path)
+            binding.config_h.write_text(
+                PANEL_CONFIG_TEXT.replace(
+                    "#define GEAR1_MAX_SPEED        2u",
+                    "#define GEAR1_MAX_SPEED        9u",
+                ),
+                encoding="utf-8",
+            )
+
+            panel = DiffPanel(binding)
+
+            self.assertIn("src/config.h", panel.file_paths())
+            headers = [
+                w.text() for w in panel.findChildren(QLabel, "diff-file-header")
+            ]
+            self.assertTrue(any("src/config.h" in h for h in headers))
+            hunk_headers = panel.findChildren(QLabel, "diff-hunk-header")
+            self.assertTrue(len(hunk_headers) >= 1)
+            line_labels = panel.findChildren(QLabel, "diff-line")
+            texts = [l.text() for l in line_labels]
+            self.assertTrue(any(t.startswith("- ") and "2u" in t for t in texts))
+            self.assertTrue(any(t.startswith("+ ") and "9u" in t for t in texts))
+            kinds = {l.property("diffKind") for l in line_labels}
+            self.assertIn("add", kinds)
+            self.assertIn("remove", kinds)
+
+    def test_untracked_file_listed_separately(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            binding, _schema = make_panel_binding(tmp_path)
+            (binding.game_repo / "assets" / "sprites").mkdir(parents=True)
+            (binding.game_repo / "assets" / "sprites" / "car-2.xcf").write_bytes(b"\x00\x01")
+
+            panel = DiffPanel(binding)
+
+            self.assertEqual(panel.untracked_files(), ["assets/sprites/car-2.xcf"])
+            self.assertEqual(panel.file_paths(), [])
+            untracked_labels = panel.findChildren(
+                QLabel, "diff-untracked-file"
+            )
+            self.assertTrue(
+                any("car-2.xcf" in w.text() for w in untracked_labels)
+            )
+
+    def test_binding_error_shows_explanation_without_crashing(self):
+        error = project.BindingError("game_repo", "No sibling 'nuke-raider' directory found.")
+
+        panel = DiffPanel(None, binding_error=error)
+
+        self.assertIn("game_repo", panel.explanation_text())
+
+    def test_refresh_picks_up_new_untracked_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            binding, _schema = make_panel_binding(tmp_path)
+
+            panel = DiffPanel(binding)
+            self.assertEqual(panel.untracked_files(), [])
+
+            (binding.game_repo / "new.txt").write_text("hi\n", encoding="utf-8")
+            panel.refresh()
+
+            self.assertEqual(panel.untracked_files(), ["new.txt"])
+
+
+class TestFormatHeader(unittest.TestCase):
+    """The redesigned header (R2/AC2): totals only, never a per-file list,
+    so its length depends only on digit counts, never on how many files
+    or lines actually changed.
+    """
+
+    def _binding_on(self, tmp_path: Path, branch: str) -> project.Binding:
+        game_repo = make_game_repo(tmp_path / "nuke-raider")
+        if branch != "master":
+            _run_git(["checkout", "-b", branch], game_repo)
+        garage_root = tmp_path / "nuke-raider-garage"
+        garage_root.mkdir()
+        return project.bind(garage_root)
+
+    def test_clean_shows_no_changes_and_no_mark(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            binding = self._binding_on(tmp_path, "feat")
+            summary = diff_core.ChangeSummary(
+                changed_file_count=0, untracked_count=0, added_lines=0, removed_lines=0
+            )
+
+            text = format_header(binding, None, summary)
+
+            self.assertIn("no changes", text)
+            self.assertNotIn("●", text)
+            self.assertNotIn("commit blocked", text.lower())
+
+    def test_one_file_singular_with_line_counts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            binding = self._binding_on(tmp_path, "feat")
+            summary = diff_core.ChangeSummary(
+                changed_file_count=1, untracked_count=0, added_lines=5, removed_lines=5
+            )
+
+            text = format_header(binding, None, summary)
+
+            self.assertIn("1 file ", text)
+            self.assertNotIn("1 files", text)
+            self.assertIn("+5", text)
+            self.assertIn("−5", text)
+            self.assertIn("●", text)
+
+    def test_several_files_plural_with_line_counts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            binding = self._binding_on(tmp_path, "feat")
+            summary = diff_core.ChangeSummary(
+                changed_file_count=12, untracked_count=0, added_lines=847, removed_lines=203
+            )
+
+            text = format_header(binding, None, summary)
+
+            self.assertIn("12 files", text)
+            self.assertIn("+847", text)
+            self.assertIn("−203", text)
+
+    def test_untracked_present_appended_after_file_totals(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            binding = self._binding_on(tmp_path, "feat")
+            summary = diff_core.ChangeSummary(
+                changed_file_count=1, untracked_count=1, added_lines=5, removed_lines=5
+            )
+
+            text = format_header(binding, None, summary)
+
+            self.assertIn("1 file +5 −5 · 1 untracked", text)
+
+    def test_untracked_absent_omits_the_untracked_clause(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            binding = self._binding_on(tmp_path, "feat")
+            summary = diff_core.ChangeSummary(
+                changed_file_count=1, untracked_count=0, added_lines=5, removed_lines=5
+            )
+
+            text = format_header(binding, None, summary)
+
+            self.assertNotIn("untracked", text)
+
+    def test_master_appends_commit_blocked_clause(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            binding = self._binding_on(tmp_path, "master")
+            summary = diff_core.ChangeSummary(
+                changed_file_count=0, untracked_count=0, added_lines=0, removed_lines=0
+            )
+
+            text = format_header(binding, None, summary)
+
+            self.assertIn("commit blocked on master", text)
+
+    def test_off_master_omits_commit_blocked_clause(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            binding = self._binding_on(tmp_path, "feat")
+            summary = diff_core.ChangeSummary(
+                changed_file_count=1, untracked_count=0, added_lines=1, removed_lines=1
+            )
+
+            text = format_header(binding, None, summary)
+
+            self.assertNotIn("commit blocked", text.lower())
+
+    def test_dirty_master_still_shows_mark_and_commit_blocked(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            binding = self._binding_on(tmp_path, "master")
+            summary = diff_core.ChangeSummary(
+                changed_file_count=1, untracked_count=0, added_lines=1, removed_lines=1
+            )
+
+            text = format_header(binding, None, summary)
+
+            self.assertIn("●", text)
+            self.assertIn("commit blocked on master", text)
+
+
+class TestGarageWindowDiffIntegration(unittest.TestCase):
+    def test_diff_dialog_is_closed_on_launch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            garage_root = tmp_path / "nuke-raider-garage"
+            garage_root.mkdir()
+            make_game_repo(tmp_path / "nuke-raider")
+
+            window = GarageWindow(garage_root=garage_root)
+
+            self.assertIsInstance(window.diff_panel, DiffPanel)
+            self.assertFalse(window.diff_dialog.isVisible())
+
+    def test_menu_action_opens_diff_dialog_and_it_can_be_closed_and_reopened(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            garage_root = tmp_path / "nuke-raider-garage"
+            garage_root.mkdir()
+            make_game_repo(tmp_path / "nuke-raider")
+
+            window = GarageWindow(garage_root=garage_root)
+            self.assertFalse(window.diff_dialog.isVisible())
+
+            window.show_diff_action.trigger()
+            self.assertTrue(window.diff_dialog.isVisible())
+            self.assertIn("clean", window.diff_panel.status_text().lower())
+
+            window.diff_dialog.close()
+            self.assertFalse(window.diff_dialog.isVisible())
+            # The Tuner underneath must be unaffected by opening/closing the
+            # dialog -- it is a separate window, not part of the central
+            # widget's layout, so it is still the (enabled, intact) central
+            # widget's body.
+            self.assertIsInstance(window.tuner_panel, TunerPanel)
+            self.assertIs(window.centralWidget(), window.tuner_panel.parentWidget())
+            self.assertTrue(window.tuner_panel.isEnabled())
+
+            window.show_diff_action.trigger()
+            self.assertTrue(window.diff_dialog.isVisible())
+
+    def test_ac20_header_reads_no_changes_and_untracked_for_untracked_only_tree(self):
+        # AC20 against a real bound repository: two untracked files, no
+        # tracked change at all. The "●" mark stands for a tracked file
+        # differing from HEAD, so it must not appear here; "no changes"
+        # names the tracked state, "2 untracked" the rest.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            garage_root = tmp_path / "nuke-raider-garage"
+            garage_root.mkdir()
+            game_repo = make_game_repo(tmp_path / "nuke-raider")
+            _run_git(["checkout", "-b", "feat"], game_repo)
+            (game_repo / "a.txt").write_text("x\n", encoding="utf-8")
+            (game_repo / "b.txt").write_text("y\n", encoding="utf-8")
+
+            window = GarageWindow(garage_root=garage_root)
+
+            header_text = window.header_label.text()
+            self.assertNotIn("●", header_text)
+            self.assertIn("no changes · 2 untracked", header_text)
+
+    def test_header_shows_dirty_mark_for_a_tracked_change(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            garage_root = tmp_path / "nuke-raider-garage"
+            garage_root.mkdir()
+            game_repo = make_game_repo(tmp_path / "nuke-raider")
+            _run_git(["checkout", "-b", "feat"], game_repo)
+            (game_repo / "README.md").write_text("changed\n", encoding="utf-8")
+
+            window = GarageWindow(garage_root=garage_root)
+
+            header_text = window.header_label.text()
+            self.assertIn("●", header_text)
+            self.assertIn("1 file", header_text)
+
+    def test_header_states_commit_blocked_on_master(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            garage_root = tmp_path / "nuke-raider-garage"
+            garage_root.mkdir()
+            make_game_repo(tmp_path / "nuke-raider")
+
+            window = GarageWindow(garage_root=garage_root)
+
+            self.assertIn("commit blocked", window.header_label.text().lower())
+
+    def test_tuner_write_refreshes_header_totals(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            garage_root = tmp_path / "nuke-raider-garage"
+            garage_root.mkdir()
+            game_repo = make_game_repo_with_config(tmp_path / "nuke-raider", PANEL_CONFIG_TEXT)
+            _run_git(["checkout", "-b", "feat"], game_repo)
+            write_json(tmp_path / "tunables.json", PANEL_TUNABLES)
+            # Point the schema the Tuner loads at our fixture tunables.json
+            # by binding with default schema discovery bypassed: build the
+            # window, then swap in a fixture-backed TunerPanel the same way
+            # other tests reach into the window's wiring.
+            window = GarageWindow(garage_root=garage_root)
+            schema = Schema.load(tmp_path / "tunables.json")
+            window.tuner_panel = TunerPanel(window.binding, window.binding_error, schema=schema)
+            window.tuner_panel.written.connect(window._on_tuner_written)
+
+            self.assertIn("no changes", window.header_label.text())
+            self.assertNotIn("●", window.header_label.text())
+
+            row = window.tuner_panel._rows["GEAR1_MAX_SPEED"]
+            row.spin.setValue(9)
+            row.spin.editingFinished.emit()  # committing the edit writes at once
+
+            header_text = window.header_label.text()
+            self.assertIn("●", header_text)
+            self.assertIn("1 file", header_text)
+            self.assertIn("+1", header_text)
+            self.assertIn("−1", header_text)
+
+    def test_tuner_write_refreshes_open_diff_dialog(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            garage_root = tmp_path / "nuke-raider-garage"
+            garage_root.mkdir()
+            game_repo = make_game_repo_with_config(tmp_path / "nuke-raider", PANEL_CONFIG_TEXT)
+            _run_git(["checkout", "-b", "feat"], game_repo)
+            write_json(tmp_path / "tunables.json", PANEL_TUNABLES)
+            window = GarageWindow(garage_root=garage_root)
+            schema = Schema.load(tmp_path / "tunables.json")
+            window.tuner_panel = TunerPanel(window.binding, window.binding_error, schema=schema)
+            window.tuner_panel.written.connect(window._on_tuner_written)
+            window.open_diff()
+            self.assertIn("clean", window.diff_panel.status_text().lower())
+
+            row = window.tuner_panel._rows["GEAR1_MAX_SPEED"]
+            row.spin.setValue(9)
+            row.spin.editingFinished.emit()
+
+            self.assertIn("src/config.h", window.diff_panel.file_paths())
 
 
 if __name__ == "__main__":

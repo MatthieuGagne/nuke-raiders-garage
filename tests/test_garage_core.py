@@ -19,7 +19,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from tools.garage.core import config_io, project  # noqa: E402
+from tools.garage.core import config_io, diff, project  # noqa: E402
 from tools.garage.core.schema import Schema, SchemaError  # noqa: E402
 
 
@@ -791,6 +791,462 @@ class TestConfigIOReadConfigAtHead(unittest.TestCase):
                 config_io.read_config_at_head(binding)
             message = str(ctx.exception).lower()
             self.assertIn("config.h", message)
+
+
+# -- R19/AC19/AC2: tools/garage/core/diff.py ---------------------------------
+#
+# The diff of the active worktree against HEAD (staged + unstaged in one
+# view), the untracked file list, and the dirty/master check the header (and
+# later the Worktree and Commit panels) need. Fixtures build real git repos
+# in a temp dir, same convention as the rest of this file -- no mocked git
+# output for the happy-path cases.
+
+
+def make_bare_game_repo(path: Path) -> Path:
+    """A git repo with no commits at all -- an unborn HEAD."""
+    path.mkdir(parents=True, exist_ok=True)
+    _run_git(["init", "-b", "master"], path)
+    _run_git(["config", "user.email", "test@example.com"], path)
+    _run_git(["config", "user.name", "Test"], path)
+    _run_git(["remote", "add", "origin", GAME_REPO_REMOTE_URL], path)
+    return path
+
+
+def make_committed_game_repo(path: Path, files: dict) -> Path:
+    """A git repo with one commit holding `files` (relative-path -> text)."""
+    path.mkdir(parents=True, exist_ok=True)
+    for rel, text in files.items():
+        file_path = path / rel
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.write_text(text, encoding="utf-8")
+    _run_git(["init", "-b", "master"], path)
+    _run_git(["config", "user.email", "test@example.com"], path)
+    _run_git(["config", "user.name", "Test"], path)
+    _run_git(["add", "."], path)
+    _run_git(["commit", "-m", "init"], path)
+    _run_git(["remote", "add", "origin", GAME_REPO_REMOTE_URL], path)
+    return path
+
+
+def bind_over(tmp_path: Path, game_repo: Path) -> project.Binding:
+    garage_root = tmp_path / "nuke-raider-garage"
+    garage_root.mkdir(exist_ok=True)
+    return project.bind(garage_root)
+
+
+class TestParseDiffTextPure(unittest.TestCase):
+    """parse_diff_text is pure -- fed crafted `git diff` text, no git call."""
+
+    def test_modified_file_hunk_lines_tagged(self):
+        text = (
+            "diff --git a/src/config.h b/src/config.h\n"
+            "index 1111111..2222222 100644\n"
+            "--- a/src/config.h\n"
+            "+++ b/src/config.h\n"
+            "@@ -1,3 +1,3 @@\n"
+            " context line\n"
+            "-#define GEAR1_MAX_SPEED 2u\n"
+            "+#define GEAR1_MAX_SPEED 9u\n"
+        )
+        files, truncated, reason = diff.parse_diff_text(text)
+
+        self.assertFalse(truncated)
+        self.assertEqual(reason, "")
+        self.assertEqual(len(files), 1)
+        f = files[0]
+        self.assertEqual(f.path, "src/config.h")
+        self.assertEqual(f.change_type, "modified")
+        self.assertFalse(f.binary)
+        self.assertEqual(len(f.hunks), 1)
+        hunk = f.hunks[0]
+        self.assertEqual(hunk.header, "@@ -1,3 +1,3 @@")
+        kinds = [(l.kind, l.text) for l in hunk.lines]
+        self.assertEqual(
+            kinds,
+            [
+                ("context", "context line"),
+                ("remove", "#define GEAR1_MAX_SPEED 2u"),
+                ("add", "#define GEAR1_MAX_SPEED 9u"),
+            ],
+        )
+
+    def test_added_file(self):
+        text = (
+            "diff --git a/new.txt b/new.txt\n"
+            "new file mode 100644\n"
+            "index 0000000..1111111\n"
+            "--- /dev/null\n"
+            "+++ b/new.txt\n"
+            "@@ -0,0 +1,2 @@\n"
+            "+line one\n"
+            "+line two\n"
+        )
+        files, _, _ = diff.parse_diff_text(text)
+        self.assertEqual(files[0].change_type, "added")
+        self.assertEqual(files[0].path, "new.txt")
+        self.assertEqual([l.kind for l in files[0].hunks[0].lines], ["add", "add"])
+
+    def test_deleted_file(self):
+        text = (
+            "diff --git a/gone.txt b/gone.txt\n"
+            "deleted file mode 100644\n"
+            "index 1111111..0000000\n"
+            "--- a/gone.txt\n"
+            "+++ /dev/null\n"
+            "@@ -1,2 +0,0 @@\n"
+            "-line one\n"
+            "-line two\n"
+        )
+        files, _, _ = diff.parse_diff_text(text)
+        self.assertEqual(files[0].change_type, "deleted")
+        self.assertEqual(files[0].path, "gone.txt")
+        self.assertEqual([l.kind for l in files[0].hunks[0].lines], ["remove", "remove"])
+
+    def test_binary_file_reported_without_crash(self):
+        text = (
+            "diff --git a/assets/sprites/car-2.png b/assets/sprites/car-2.png\n"
+            "index 1111111..2222222 100644\n"
+            "Binary files a/assets/sprites/car-2.png and b/assets/sprites/car-2.png differ\n"
+        )
+        files, truncated, _ = diff.parse_diff_text(text)
+        self.assertFalse(truncated)
+        self.assertEqual(len(files), 1)
+        self.assertTrue(files[0].binary)
+        self.assertEqual(files[0].hunks, [])
+
+    def test_no_newline_at_eof_marker_does_not_crash(self):
+        text = (
+            "diff --git a/f.txt b/f.txt\n"
+            "index 1111111..2222222 100644\n"
+            "--- a/f.txt\n"
+            "+++ b/f.txt\n"
+            "@@ -1 +1 @@\n"
+            "-old\n"
+            "\\ No newline at end of file\n"
+            "+new\n"
+            "\\ No newline at end of file\n"
+        )
+        files, _, _ = diff.parse_diff_text(text)
+        kinds = [l.kind for l in files[0].hunks[0].lines]
+        self.assertEqual(kinds, ["remove", "meta", "add", "meta"])
+
+    def test_multiple_files_in_one_diff(self):
+        text = (
+            "diff --git a/a.txt b/a.txt\n"
+            "index 1111111..2222222 100644\n"
+            "--- a/a.txt\n"
+            "+++ b/a.txt\n"
+            "@@ -1 +1 @@\n"
+            "-a\n"
+            "+A\n"
+            "diff --git a/b.txt b/b.txt\n"
+            "index 3333333..4444444 100644\n"
+            "--- a/b.txt\n"
+            "+++ b/b.txt\n"
+            "@@ -1 +1 @@\n"
+            "-b\n"
+            "+B\n"
+        )
+        files, _, _ = diff.parse_diff_text(text)
+        self.assertEqual([f.path for f in files], ["a.txt", "b.txt"])
+
+    def test_empty_text_is_no_files(self):
+        files, truncated, reason = diff.parse_diff_text("")
+        self.assertEqual(files, [])
+        self.assertFalse(truncated)
+        self.assertEqual(reason, "")
+
+    def test_large_diff_is_truncated_visibly(self):
+        hunk_lines = "".join(f"+line {i}\n" for i in range(50))
+        text = (
+            "diff --git a/big.txt b/big.txt\n"
+            "index 1111111..2222222 100644\n"
+            "--- a/big.txt\n"
+            "+++ b/big.txt\n"
+            "@@ -0,0 +1,50 @@\n"
+            + hunk_lines
+        )
+        files, truncated, reason = diff.parse_diff_text(text, max_lines=10)
+
+        self.assertTrue(truncated)
+        self.assertNotEqual(reason, "")
+        total_lines = sum(len(h.lines) for f in files for h in f.hunks)
+        self.assertLessEqual(total_lines, 10)
+
+
+class TestGetDiff(unittest.TestCase):
+    def test_clean_worktree_has_no_files_and_no_untracked(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            game_repo = make_committed_game_repo(
+                tmp_path / "nuke-raider", {"src/config.h": "#define X 1\n"}
+            )
+            binding = bind_over(tmp_path, game_repo)
+
+            result = diff.get_diff(binding)
+
+            self.assertEqual(result.files, [])
+            self.assertEqual(result.untracked, [])
+            self.assertFalse(result.truncated)
+
+    def test_modified_file_appears_as_removed_and_added_line(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            game_repo = make_committed_game_repo(
+                tmp_path / "nuke-raider", {"src/config.h": "#define GEAR1_MAX_SPEED 2u\n"}
+            )
+            binding = bind_over(tmp_path, game_repo)
+            (game_repo / "src" / "config.h").write_text(
+                "#define GEAR1_MAX_SPEED 9u\n", encoding="utf-8"
+            )
+
+            result = diff.get_diff(binding)
+
+            self.assertEqual(len(result.files), 1)
+            f = result.files[0]
+            self.assertEqual(f.path, "src/config.h")
+            self.assertEqual(f.change_type, "modified")
+            kinds = {l.kind for h in f.hunks for l in h.lines}
+            self.assertIn("add", kinds)
+            self.assertIn("remove", kinds)
+
+    def test_staged_and_unstaged_changes_both_appear_in_one_diff(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            game_repo = make_committed_game_repo(
+                tmp_path / "nuke-raider",
+                {"a.txt": "a\n", "b.txt": "b\n"},
+            )
+            binding = bind_over(tmp_path, game_repo)
+            (game_repo / "a.txt").write_text("A\n", encoding="utf-8")
+            _run_git(["add", "a.txt"], game_repo)  # staged
+            (game_repo / "b.txt").write_text("B\n", encoding="utf-8")  # unstaged
+
+            result = diff.get_diff(binding)
+
+            self.assertEqual({f.path for f in result.files}, {"a.txt", "b.txt"})
+
+    def test_deleted_file_shows_as_deleted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            game_repo = make_committed_game_repo(
+                tmp_path / "nuke-raider", {"gone.txt": "bye\n"}
+            )
+            binding = bind_over(tmp_path, game_repo)
+            (game_repo / "gone.txt").unlink()
+
+            result = diff.get_diff(binding)
+
+            self.assertEqual(len(result.files), 1)
+            self.assertEqual(result.files[0].change_type, "deleted")
+
+    def test_untracked_file_listed_by_name_not_diffed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            game_repo = make_committed_game_repo(
+                tmp_path / "nuke-raider", {"src/config.h": "#define X 1\n"}
+            )
+            binding = bind_over(tmp_path, game_repo)
+            (game_repo / "assets" / "sprites").mkdir(parents=True)
+            (game_repo / "assets" / "sprites" / "car-2.xcf").write_bytes(b"\x00\x01")
+
+            result = diff.get_diff(binding)
+
+            self.assertEqual(result.files, [])
+            self.assertEqual(result.untracked, ["assets/sprites/car-2.xcf"])
+
+    def test_binary_file_change_reports_binary_without_crashing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            game_repo = make_committed_game_repo(
+                tmp_path / "nuke-raider", {"art.bin": "\x00\x01\x02"}
+            )
+            binding = bind_over(tmp_path, game_repo)
+            (game_repo / "art.bin").write_bytes(b"\x00\x01\x02\x03\xff")
+
+            result = diff.get_diff(binding)
+
+            self.assertEqual(len(result.files), 1)
+            self.assertTrue(result.files[0].binary)
+            self.assertEqual(result.files[0].hunks, [])
+
+    def test_no_commits_yet_still_diffs_staged_content(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            game_repo = make_bare_game_repo(tmp_path / "nuke-raider")
+            (game_repo / "src").mkdir()
+            (game_repo / "src" / "config.h").write_text("#define X 1\n", encoding="utf-8")
+            _run_git(["add", "."], game_repo)
+            binding = bind_over(tmp_path, game_repo)
+
+            result = diff.get_diff(binding)
+
+            self.assertEqual(len(result.files), 1)
+            self.assertEqual(result.files[0].path, "src/config.h")
+            self.assertEqual(result.files[0].change_type, "added")
+
+    def test_no_commits_yet_with_no_staged_content_is_clean_with_untracked(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            game_repo = make_bare_game_repo(tmp_path / "nuke-raider")
+            (game_repo / "README.md").write_text("hi\n", encoding="utf-8")
+            binding = bind_over(tmp_path, game_repo)
+
+            result = diff.get_diff(binding)
+
+            self.assertEqual(result.files, [])
+            self.assertEqual(result.untracked, ["README.md"])
+
+    def test_normal_refresh_uses_two_subprocess_calls(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            game_repo = make_committed_game_repo(
+                tmp_path / "nuke-raider", {"src/config.h": "#define X 1\n"}
+            )
+            binding = bind_over(tmp_path, game_repo)
+            (game_repo / "src" / "config.h").write_text("#define X 2\n", encoding="utf-8")
+
+            with unittest.mock.patch(
+                "tools.garage.core.diff.subprocess.run", wraps=subprocess.run
+            ) as spy:
+                diff.get_diff(binding)
+
+            self.assertEqual(spy.call_count, 2)  # one diff, one untracked list
+
+
+class TestGetChangeSummary(unittest.TestCase):
+    """R2/AC2, redesigned header: the four totals -- tracked changed-file
+    count, untracked count, added lines, removed lines -- computed once in
+    core so the Qt layer never derives them itself.
+    """
+
+    def test_clean_worktree_is_not_dirty(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            game_repo = make_committed_game_repo(
+                tmp_path / "nuke-raider", {"src/config.h": "#define X 1\n"}
+            )
+
+            summary = diff.get_change_summary(game_repo)
+
+            self.assertFalse(summary.dirty)
+            self.assertEqual(summary.changed_file_count, 0)
+            self.assertEqual(summary.untracked_count, 0)
+            self.assertEqual(summary.added_lines, 0)
+            self.assertEqual(summary.removed_lines, 0)
+
+    def test_tracked_change_and_untracked_file_are_counted_separately(self):
+        # AC2 fix: an untracked file must not inflate changed_file_count --
+        # one modified tracked file and one untracked file must read as
+        # changed_file_count=1, untracked_count=1, never changed_file_count=2.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            game_repo = make_committed_game_repo(
+                tmp_path / "nuke-raider", {"a.txt": "a\n", "b.txt": "b\n"}
+            )
+            (game_repo / "a.txt").write_text("A\n", encoding="utf-8")
+            (game_repo / "new.txt").write_text("new\n", encoding="utf-8")
+
+            summary = diff.get_change_summary(game_repo)
+
+            self.assertTrue(summary.dirty)
+            self.assertEqual(summary.changed_file_count, 1)
+            self.assertEqual(summary.untracked_count, 1)
+
+    def test_added_and_removed_line_totals(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            game_repo = make_committed_game_repo(
+                tmp_path / "nuke-raider", {"a.txt": "one\ntwo\nthree\n"}
+            )
+            (game_repo / "a.txt").write_text("one\nTWO\nTHREE\nfour\n", encoding="utf-8")
+
+            summary = diff.get_change_summary(game_repo)
+
+            self.assertEqual(summary.changed_file_count, 1)
+            self.assertEqual(summary.added_lines, 3)
+            self.assertEqual(summary.removed_lines, 2)
+
+    def test_multiple_changed_files_sum_across_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            game_repo = make_committed_game_repo(
+                tmp_path / "nuke-raider", {"a.txt": "a\n", "b.txt": "b\nc\n"}
+            )
+            (game_repo / "a.txt").write_text("A\nA2\n", encoding="utf-8")
+            (game_repo / "b.txt").write_text("B\n", encoding="utf-8")
+
+            summary = diff.get_change_summary(game_repo)
+
+            self.assertEqual(summary.changed_file_count, 2)
+            self.assertEqual(summary.added_lines, 3)  # A, A2, B
+            self.assertEqual(summary.removed_lines, 3)  # a, b, c
+
+    def test_no_commits_yet_counts_staged_content(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            game_repo = make_bare_game_repo(tmp_path / "nuke-raider")
+            (game_repo / "src").mkdir()
+            (game_repo / "src" / "config.h").write_text("#define X 1\n", encoding="utf-8")
+            _run_git(["add", "."], game_repo)
+
+            summary = diff.get_change_summary(game_repo)
+
+            self.assertEqual(summary.changed_file_count, 1)
+            self.assertEqual(summary.added_lines, 1)
+            self.assertEqual(summary.removed_lines, 0)
+            self.assertEqual(summary.untracked_count, 0)
+
+    def test_ac20_untracked_only_is_not_dirty(self):
+        # AC20: the "●" mark stands for a *tracked* file that differs from
+        # HEAD. An untracked file is counted (untracked_count == 1) but
+        # must not raise `dirty` on its own -- real temp git repo, no mock.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            game_repo = make_committed_game_repo(
+                tmp_path / "nuke-raider", {"src/config.h": "#define X 1\n"}
+            )
+            (game_repo / "new.txt").write_text("new\n", encoding="utf-8")
+
+            summary = diff.get_change_summary(game_repo)
+
+            self.assertFalse(summary.dirty)
+            self.assertEqual(summary.changed_file_count, 0)
+            self.assertEqual(summary.untracked_count, 1)
+
+    def test_ac20_tracked_change_alone_is_dirty(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            game_repo = make_committed_game_repo(
+                tmp_path / "nuke-raider", {"a.txt": "a\n"}
+            )
+            (game_repo / "a.txt").write_text("A\n", encoding="utf-8")
+
+            summary = diff.get_change_summary(game_repo)
+
+            self.assertTrue(summary.dirty)
+            self.assertEqual(summary.changed_file_count, 1)
+            self.assertEqual(summary.untracked_count, 0)
+
+    def test_ac20_tracked_change_and_untracked_together_is_dirty(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            game_repo = make_committed_game_repo(
+                tmp_path / "nuke-raider", {"a.txt": "a\n"}
+            )
+            (game_repo / "a.txt").write_text("A\n", encoding="utf-8")
+            (game_repo / "new.txt").write_text("new\n", encoding="utf-8")
+
+            summary = diff.get_change_summary(game_repo)
+
+            self.assertTrue(summary.dirty)
+            self.assertEqual(summary.changed_file_count, 1)
+            self.assertEqual(summary.untracked_count, 1)
+
+    def test_is_master_branch(self):
+        self.assertTrue(diff.is_master_branch("master"))
+        self.assertFalse(diff.is_master_branch("feat"))
+        self.assertFalse(diff.is_master_branch(None))
 
 
 if __name__ == "__main__":
