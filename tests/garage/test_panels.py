@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
@@ -376,6 +377,239 @@ class TestTunerPanel(unittest.TestCase):
 
             self.assertEqual(panel._rows, {})
             self.assertTrue(panel.explanation_text())
+
+
+# -- AC10/R9: HEAD values and revert -----------------------------------------
+
+
+class TestTunerPanelRevert(unittest.TestCase):
+    def test_row_differing_from_head_before_launch_shows_head_value(self):
+        # Case 1: the file was hand-edited (or a previous session saved) --
+        # this must show up on launch, not only after an in-session edit.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            binding, schema = make_panel_binding(tmp_path)
+            binding.config_h.write_text(
+                PANEL_CONFIG_TEXT.replace(
+                    "#define GEAR1_MAX_SPEED        2u",
+                    "#define GEAR1_MAX_SPEED        9u",
+                ),
+                encoding="utf-8",
+            )
+
+            panel = TunerPanel(binding, schema=schema)
+            row = panel._rows["GEAR1_MAX_SPEED"]
+
+            self.assertEqual(row.spin.value(), 9)  # current (unsaved) value
+            self.assertEqual(row.head_value, 2)  # committed value
+            self.assertTrue(row.differs_from_head())
+            self.assertIn("2", row.head_label.text())
+            self.assertFalse(row.head_label.isHidden())
+            self.assertFalse(row.revert_button.isHidden())
+            # Never touched this session -- "changed" means "differs from
+            # HEAD", not "touched in this session", so this is NOT pending.
+            self.assertFalse(row.is_dirty())
+
+    def test_row_matching_head_hides_head_value_and_revert(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            binding, schema = make_panel_binding(tmp_path)
+
+            panel = TunerPanel(binding, schema=schema)
+            row = panel._rows["GEAR1_MAX_SPEED"]
+
+            self.assertFalse(row.differs_from_head())
+            self.assertTrue(row.head_label.isHidden())
+            self.assertTrue(row.revert_button.isHidden())
+
+    def test_editing_then_editing_back_to_head_value_hides_head_display_again(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            binding, schema = make_panel_binding(tmp_path)
+            panel = TunerPanel(binding, schema=schema)
+            row = panel._rows["GEAR1_MAX_SPEED"]
+
+            row.spin.setValue(9)
+            self.assertTrue(row.differs_from_head())
+            self.assertFalse(row.head_label.isHidden())
+
+            row.spin.setValue(2)
+            self.assertFalse(row.differs_from_head())
+            self.assertTrue(row.head_label.isHidden())
+
+    def test_per_row_revert_of_unsaved_edit_simply_clears_pending(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            binding, schema = make_panel_binding(tmp_path)
+            panel = TunerPanel(binding, schema=schema)
+            row = panel._rows["GEAR1_MAX_SPEED"]
+
+            row.spin.setValue(9)
+            self.assertTrue(row.is_dirty())
+
+            panel.revert_row("GEAR1_MAX_SPEED")
+
+            self.assertEqual(row.spin.value(), 2)
+            self.assertFalse(row.is_dirty())
+            self.assertEqual(panel.pending_count(), 0)
+            # Revert never saves -- the file on disk is untouched.
+            self.assertEqual(
+                binding.config_h.read_text(encoding="utf-8"), PANEL_CONFIG_TEXT
+            )
+
+    def test_revert_of_value_that_differed_before_launch_marks_pending_without_writing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            binding, schema = make_panel_binding(tmp_path)
+            hand_edited_text = PANEL_CONFIG_TEXT.replace(
+                "#define GEAR1_MAX_SPEED        2u",
+                "#define GEAR1_MAX_SPEED        9u",
+            )
+            binding.config_h.write_text(hand_edited_text, encoding="utf-8")
+
+            panel = TunerPanel(binding, schema=schema)
+            row = panel._rows["GEAR1_MAX_SPEED"]
+            self.assertFalse(row.is_dirty())  # matches on-disk file untouched this session
+
+            panel.revert_row("GEAR1_MAX_SPEED")
+
+            self.assertEqual(row.spin.value(), 2)
+            self.assertTrue(row.is_dirty())  # now differs from the on-disk file: pending
+            self.assertEqual(panel.pending_count(), 1)
+
+            # Still not written -- only Save writes.
+            self.assertEqual(
+                binding.config_h.read_text(encoding="utf-8"), hand_edited_text
+            )
+
+            result = panel.save()
+
+            self.assertIn("1", result)
+            saved_text = binding.config_h.read_text(encoding="utf-8")
+            self.assertIn("#define GEAR1_MAX_SPEED        2u", saved_text)
+
+    def test_revert_all_restores_every_differing_row(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            binding, schema = make_panel_binding(tmp_path)
+            panel = TunerPanel(binding, schema=schema)
+
+            panel._rows["GEAR1_MAX_SPEED"].spin.setValue(9)
+            panel._rows["PLAYER_ARMOR"].spin.setValue(3)
+            self.assertEqual(panel.pending_count(), 2)
+
+            panel.revert_all()
+
+            self.assertEqual(panel._rows["GEAR1_MAX_SPEED"].spin.value(), 2)
+            self.assertEqual(panel._rows["PLAYER_ARMOR"].spin.value(), 5)
+            self.assertEqual(panel._rows["RACER_HP"].spin.value(), 5)
+            self.assertEqual(panel.pending_count(), 0)
+            self.assertEqual(
+                binding.config_h.read_text(encoding="utf-8"), PANEL_CONFIG_TEXT
+            )
+
+    def test_revert_all_button_wired_to_revert_all(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            binding, schema = make_panel_binding(tmp_path)
+            panel = TunerPanel(binding, schema=schema)
+            panel._rows["GEAR1_MAX_SPEED"].spin.setValue(9)
+
+            panel._revert_all_button.click()
+
+            self.assertEqual(panel._rows["GEAR1_MAX_SPEED"].spin.value(), 2)
+
+    def test_per_row_revert_button_wired_to_revert_row(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            binding, schema = make_panel_binding(tmp_path)
+            panel = TunerPanel(binding, schema=schema)
+            row = panel._rows["GEAR1_MAX_SPEED"]
+            row.spin.setValue(9)
+
+            row.revert_button.click()
+
+            self.assertEqual(row.spin.value(), 2)
+
+    def test_head_values_read_once_per_refresh_not_once_per_row(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            binding, schema = make_panel_binding(tmp_path)
+
+            with mock.patch(
+                "tools.garage.panels.tuner.config_io.read_config_at_head",
+                wraps=config_io.read_config_at_head,
+            ) as spy:
+                panel = TunerPanel(binding, schema=schema)
+
+            self.assertGreaterEqual(len(panel._rows), 2)
+            self.assertEqual(spy.call_count, 1)
+
+    def test_no_head_available_does_not_crash_and_explains(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            garage_root = tmp_path / "nuke-raider-garage"
+            garage_root.mkdir()
+            game_repo = tmp_path / "nuke-raider"
+            (game_repo / "src").mkdir(parents=True)
+            (game_repo / "src" / "config.h").write_text(PANEL_CONFIG_TEXT, encoding="utf-8")
+            _run_git(["init", "-b", "master"], game_repo)
+            _run_git(["remote", "add", "origin", GAME_REPO_REMOTE_URL], game_repo)
+            # Deliberately no commit -- HEAD does not exist yet.
+
+            settings_path = garage_root / "garage.local.json"
+            settings_path.write_text(
+                json.dumps(
+                    {
+                        "game_repo": game_repo.as_posix(),
+                        "worktree_root": (tmp_path / "worktrees").as_posix(),
+                        "active": None,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            binding = project.bind(garage_root)
+            schema = Schema.load(write_json(tmp_path / "tunables.json", PANEL_TUNABLES))
+
+            panel = TunerPanel(binding, schema=schema)
+
+            # A missing HEAD is not fatal -- rows still build and are
+            # still editable/saveable.
+            self.assertIn("GEAR1_MAX_SPEED", panel._rows)
+            row = panel._rows["GEAR1_MAX_SPEED"]
+            self.assertIsNone(row.head_value)
+            self.assertFalse(row.differs_from_head())
+            self.assertTrue(row.head_label.isHidden())
+            self.assertTrue(row.revert_button.isHidden())
+
+            self.assertTrue(panel.head_status_text())
+            self.assertIn("commit", panel.head_status_text().lower())
+
+            # Revert is a safe no-op when there is no HEAD value to revert to.
+            panel.revert_row("GEAR1_MAX_SPEED")
+            panel.revert_all()
+            self.assertEqual(row.spin.value(), 2)
+
+    def test_config_h_missing_at_head_does_not_crash_and_explains(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            garage_root = tmp_path / "nuke-raider-garage"
+            garage_root.mkdir()
+            game_repo = make_game_repo(tmp_path / "nuke-raider")  # commit has no src/config.h
+            (game_repo / "src").mkdir(parents=True)
+            (game_repo / "src" / "config.h").write_text(PANEL_CONFIG_TEXT, encoding="utf-8")
+            # Deliberately left uncommitted.
+
+            binding = project.bind(garage_root)
+            schema = Schema.load(write_json(tmp_path / "tunables.json", PANEL_TUNABLES))
+
+            panel = TunerPanel(binding, schema=schema)
+
+            self.assertIn("GEAR1_MAX_SPEED", panel._rows)
+            row = panel._rows["GEAR1_MAX_SPEED"]
+            self.assertIsNone(row.head_value)
+            self.assertTrue(panel.head_status_text())
+            self.assertIn("config.h", panel.head_status_text().lower())
 
 
 if __name__ == "__main__":

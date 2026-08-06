@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 # Make the repository root importable regardless of the test runner's cwd.
@@ -689,6 +690,107 @@ class TestConfigIOReadWrite(unittest.TestCase):
 
             with self.assertRaises(config_io.ConfigIOError):
                 config_io.read_value_at_head(binding, "LOADER_BG_START", schema)
+
+
+class TestConfigIOReadConfigAtHead(unittest.TestCase):
+    """R9/AC10: a single `git show HEAD:src/config.h` per refresh, not one
+    `git show` per row -- read_config_at_head returns the whole parsed
+    HEAD file so callers (the Tuner) can look up as many names as they
+    like from one subprocess call.
+    """
+
+    def test_returns_whole_parsed_file_from_one_call(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            garage_root = tmp_path / "nuke-raider-garage"
+            garage_root.mkdir()
+            game_repo = make_game_repo_with_config(tmp_path / "nuke-raider", SAMPLE_CONFIG_TEXT)
+            binding = project.bind(garage_root)
+            schema = Schema.load(write_json(
+                tmp_path / "tunables.json", SAMPLE_TUNABLES_FOR_CONFIG_IO
+            ))
+
+            # Hand-edit the working copy without committing, on two
+            # different tunables, to prove both come back from one read.
+            (game_repo / "src" / "config.h").write_text(
+                SAMPLE_CONFIG_TEXT.replace(
+                    "#define GEAR1_MAX_SPEED        2u",
+                    "#define GEAR1_MAX_SPEED        11u",
+                ).replace(
+                    "#define PLAYER_ARMOR     5   /* reduces damage */",
+                    "#define PLAYER_ARMOR     9   /* reduces damage */",
+                ),
+                encoding="utf-8",
+            )
+
+            with unittest.mock.patch(
+                "tools.garage.core.config_io.subprocess.run",
+                wraps=subprocess.run,
+            ) as spy:
+                head_config = config_io.read_config_at_head(binding, schema)
+
+            self.assertEqual(spy.call_count, 1)
+            self.assertEqual(head_config.defines["GEAR1_MAX_SPEED"].value, 2)
+            self.assertEqual(head_config.defines["PLAYER_ARMOR"].value, 5)
+
+    def test_read_value_at_head_still_works_built_on_shared_helper(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            garage_root = tmp_path / "nuke-raider-garage"
+            garage_root.mkdir()
+            make_game_repo_with_config(tmp_path / "nuke-raider", SAMPLE_CONFIG_TEXT)
+            binding = project.bind(garage_root)
+            schema = Schema.load(write_json(
+                tmp_path / "tunables.json", SAMPLE_TUNABLES_FOR_CONFIG_IO
+            ))
+
+            self.assertEqual(
+                config_io.read_value_at_head(binding, "PLAYER_ARMOR", schema), 5
+            )
+
+    def test_no_commits_yet_raises_explanatory_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            garage_root = tmp_path / "nuke-raider-garage"
+            garage_root.mkdir()
+            game_repo = tmp_path / "nuke-raider"
+            (game_repo / "src").mkdir(parents=True)
+            (game_repo / "src" / "config.h").write_text(SAMPLE_CONFIG_TEXT, encoding="utf-8")
+            _run_git(["init", "-b", "master"], game_repo)
+            _run_git(["remote", "add", "origin", GAME_REPO_REMOTE_URL], game_repo)
+            # Deliberately no commit -- HEAD does not exist yet.
+
+            settings_path = garage_root / "garage.local.json"
+            settings_path.write_text(
+                json.dumps(
+                    {
+                        "game_repo": game_repo.as_posix(),
+                        "worktree_root": (tmp_path / "worktrees").as_posix(),
+                        "active": None,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            binding = project.bind(garage_root)
+
+            with self.assertRaises(config_io.ConfigIOError) as ctx:
+                config_io.read_config_at_head(binding)
+            message = str(ctx.exception).lower()
+            self.assertIn("commit", message)
+
+    def test_missing_config_h_at_head_raises_explanatory_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            garage_root = tmp_path / "nuke-raider-garage"
+            garage_root.mkdir()
+            game_repo = make_game_repo(tmp_path / "nuke-raider")  # no src/config.h at all
+
+            binding = project.bind(garage_root)
+
+            with self.assertRaises(config_io.ConfigIOError) as ctx:
+                config_io.read_config_at_head(binding)
+            message = str(ctx.exception).lower()
+            self.assertIn("config.h", message)
 
 
 if __name__ == "__main__":

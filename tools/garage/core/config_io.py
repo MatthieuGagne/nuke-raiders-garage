@@ -205,13 +205,22 @@ def write(binding: Binding, schema: Schema, changes: Dict[str, int]) -> None:
         f.write(new_text)
 
 
-def read_value_at_head(binding: Binding, name: str, schema: Optional[Schema] = None) -> int:
-    """Return the integer value of #define `name` in `src/config.h` at git
-    HEAD of the active worktree. Iteration 3 (revert) needs this; no revert
-    UI is built here.
+def read_config_at_head(binding: Binding, schema: Optional[Schema] = None) -> ConfigFile:
+    """Return the whole of `src/config.h` as it exists at git HEAD of the
+    active worktree, parsed exactly like `read()` parses the working copy.
 
-    Raises ConfigIOError if `name` has no parseable literal value at HEAD,
-    or if `git show` fails (e.g. the file is new / untracked).
+    R9 / AC10: the Tuner needs the HEAD value of every changed row on a
+    single refresh. `git show HEAD:src/config.h` returns the entire file
+    in one process, so callers should read HEAD once per refresh with this
+    function and look up as many names as they need from the result --
+    never call this (or read_value_at_head) once per row.
+
+    Raises ConfigIOError, distinguishing the two ways this can fail so the
+    caller can explain itself rather than crash:
+      - no git HEAD to read from at all (a fresh repository with no
+        commit yet);
+      - HEAD exists but has no `src/config.h` (e.g. a brand-new repo whose
+        first commit hasn't landed the file yet).
     """
     result = subprocess.run(
         ["git", "-C", str(binding.active_worktree.path), "show", "HEAD:src/config.h"],
@@ -219,10 +228,35 @@ def read_value_at_head(binding: Binding, name: str, schema: Optional[Schema] = N
         text=True,
     )
     if result.returncode != 0:
-        raise ConfigIOError(
-            f"could not read src/config.h at HEAD: {result.stderr.strip()}"
-        )
-    head_config = parse(result.stdout, schema=schema)
+        stderr = result.stderr.strip()
+        lowered = stderr.lower()
+        if "invalid object name" in lowered or "unknown revision" in lowered or "bad revision" in lowered:
+            raise ConfigIOError(
+                "could not read src/config.h at HEAD: this repository has "
+                f"no commits yet ({stderr})"
+            )
+        if "does not exist" in lowered:
+            raise ConfigIOError(
+                "could not read src/config.h at HEAD: src/config.h does "
+                f"not exist at HEAD ({stderr})"
+            )
+        raise ConfigIOError(f"could not read src/config.h at HEAD: {stderr}")
+    return parse(result.stdout, schema=schema)
+
+
+def read_value_at_head(binding: Binding, name: str, schema: Optional[Schema] = None) -> int:
+    """Return the integer value of #define `name` in `src/config.h` at git
+    HEAD of the active worktree.
+
+    Convenience wrapper around `read_config_at_head` for a single name.
+    Reading several names for the same refresh (as the Tuner's revert
+    feature does) should call `read_config_at_head` once instead of this
+    once per name -- each call here re-runs `git show` from scratch.
+
+    Raises ConfigIOError if `name` has no parseable literal value at HEAD,
+    or if `read_config_at_head` fails (see its docstring).
+    """
+    head_config = read_config_at_head(binding, schema=schema)
     define = head_config.defines.get(name)
     if define is None or not define.has_value:
         raise ConfigIOError(f"'{name}' has no parseable value in src/config.h at HEAD")

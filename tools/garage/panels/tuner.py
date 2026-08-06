@@ -81,6 +81,9 @@ class _TunableRow:
         range_label: QLabel,
         dependents_label: QLabel,
         original_value: int,
+        head_value: Optional[int],
+        head_label: QLabel,
+        revert_button: QPushButton,
     ):
         self.entry = entry
         self.spin = spin
@@ -88,9 +91,19 @@ class _TunableRow:
         self.range_label = range_label
         self.dependents_label = dependents_label
         self.original_value = original_value
+        # R9/AC10: the value at git HEAD, or None when HEAD (or this
+        # define at HEAD) could not be read -- "changed" always means
+        # "differs from HEAD", never "touched in this session", so this
+        # is independent of original_value/is_dirty().
+        self.head_value = head_value
+        self.head_label = head_label
+        self.revert_button = revert_button
 
     def is_dirty(self) -> bool:
         return self.spin.value() != self.original_value
+
+    def differs_from_head(self) -> bool:
+        return self.head_value is not None and self.spin.value() != self.head_value
 
 
 class TunerPanel(QWidget):
@@ -123,6 +136,13 @@ class TunerPanel(QWidget):
         self._dependents: Dict[str, List[str]] = {}
         self._explanation: str = ""
 
+        # R9/AC10: the whole config.h at git HEAD, read once per refresh
+        # (never once per row -- see config_io.read_config_at_head), plus
+        # why it is unavailable when it is (no commit yet / config.h not
+        # present at HEAD). Neither failure is fatal to the panel.
+        self._head_config: Optional[config_io.ConfigFile] = None
+        self._head_error: str = ""
+
         outer = QVBoxLayout(self)
 
         self._explanation_label = QLabel()
@@ -131,10 +151,20 @@ class TunerPanel(QWidget):
         self._explanation_label.hide()
         outer.addWidget(self._explanation_label)
 
+        self._head_status_label = QLabel()
+        self._head_status_label.setObjectName("tuner-head-status")
+        self._head_status_label.setWordWrap(True)
+        self._head_status_label.hide()
+        outer.addWidget(self._head_status_label)
+
         top_bar = QHBoxLayout()
         self._status_label = QLabel()
         self._status_label.setObjectName("tuner-status")
         top_bar.addWidget(self._status_label, 1)
+        self._revert_all_button = QPushButton("Revert All")
+        self._revert_all_button.setObjectName("tuner-revert-all")
+        self._revert_all_button.clicked.connect(self.revert_all)
+        top_bar.addWidget(self._revert_all_button)
         self._save_button = QPushButton("Save")
         self._save_button.setObjectName("tuner-save")
         self._save_button.clicked.connect(self.save)
@@ -170,8 +200,30 @@ class TunerPanel(QWidget):
             self._set_error(f"Could not read '{self.binding.config_h}': {exc}")
             return
 
+        self._load_head()
         self._dependents = compute_derived_dependents(self._schema, self._config)
         self._build_rows()
+
+    def _load_head(self) -> None:
+        """Read git HEAD's config.h once for this refresh (R9/AC10). A
+        missing HEAD or a config.h absent at HEAD is not fatal -- rows
+        still build and stay editable; only the HEAD/revert annotations
+        are unavailable, and the panel says so.
+        """
+        assert self.binding is not None
+        try:
+            self._head_config = config_io.read_config_at_head(self.binding, self._schema)
+        except config_io.ConfigIOError as exc:
+            self._head_config = None
+            self._head_error = (
+                f"Git HEAD values unavailable, so nothing can be reverted: {exc}"
+            )
+            self._head_status_label.setText(self._head_error)
+            self._head_status_label.show()
+
+    def head_status_text(self) -> str:
+        """Why HEAD values/revert are unavailable, or "" when they are fine."""
+        return self._head_error
 
     def _binding_error_message(self) -> str:
         if self.binding_error is not None:
@@ -187,6 +239,7 @@ class TunerPanel(QWidget):
         self._explanation_label.show()
         self._tabs.hide()
         self._save_button.setEnabled(False)
+        self._revert_all_button.setEnabled(False)
 
     def explanation_text(self) -> str:
         """Why the panel is empty, or "" when it built normally."""
@@ -252,6 +305,18 @@ class TunerPanel(QWidget):
         dependents_label.setObjectName("tuner-dependents")
         dependents_label.setWordWrap(True)
 
+        head_define = self._head_config.defines.get(entry.name) if self._head_config else None
+        head_value = head_define.value if head_define is not None and head_define.has_value else None
+
+        head_label = QLabel()
+        head_label.setObjectName(f"tuner-head-{entry.name}")
+        head_label.hide()
+
+        revert_button = QPushButton("Revert")
+        revert_button.setObjectName(f"tuner-revert-{entry.name}")
+        revert_button.hide()
+        revert_button.clicked.connect(lambda _checked=False, name=entry.name: self.revert_row(name))
+
         row = _TunableRow(
             entry=entry,
             spin=spin,
@@ -259,8 +324,12 @@ class TunerPanel(QWidget):
             range_label=range_label,
             dependents_label=dependents_label,
             original_value=original_value,
+            head_value=head_value,
+            head_label=head_label,
+            revert_button=revert_button,
         )
         spin.valueChanged.connect(lambda _value, name=entry.name: self._on_value_changed(name))
+        self._set_row_style(row)
         return row
 
     @staticmethod
@@ -274,6 +343,8 @@ class TunerPanel(QWidget):
         row.spin.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         inner.addWidget(row.spin)
         inner.addWidget(row.range_label)
+        inner.addWidget(row.head_label)
+        inner.addWidget(row.revert_button)
         inner.addStretch(1)
         outer.addLayout(inner)
 
@@ -283,15 +354,28 @@ class TunerPanel(QWidget):
 
     # -- change tracking --------------------------------------------------
 
-    def _set_row_style(self, name: str) -> None:
-        row = self._rows[name]
+    def _set_row_style(self, row: "_TunableRow") -> None:
         dirty = row.is_dirty()
         row.name_label.setStyleSheet(_DIRTY_STYLE if dirty else "")
         prefix = _DIRTY_PREFIX if dirty else ""
         row.name_label.setText(f"{prefix}{row.entry.name}")
 
+        # R9/AC10: the HEAD value (and its revert control) is visible
+        # exactly on rows that currently differ from HEAD -- regardless of
+        # whether that difference came from this session's edits or was
+        # already there (e.g. a hand-edited config.h) when the panel opened.
+        differs = row.differs_from_head()
+        if differs:
+            row.head_label.setText(f"HEAD: {row.head_value}")
+            row.head_label.show()
+            row.revert_button.show()
+        else:
+            row.head_label.setText("")
+            row.head_label.hide()
+            row.revert_button.hide()
+
     def _on_value_changed(self, name: str) -> None:
-        self._set_row_style(name)
+        self._set_row_style(self._rows[name])
         self._update_status()
 
     def pending_count(self) -> int:
@@ -306,6 +390,31 @@ class TunerPanel(QWidget):
 
     def status_text(self) -> str:
         return self._status_label.text()
+
+    # -- revert (R9/AC10) -----------------------------------------------
+
+    def revert_row(self, name: str) -> None:
+        """Set `name`'s value back to its HEAD value, as a pending change.
+
+        Never writes: the file only changes on Save. A row with no HEAD
+        value available (no HEAD, or config.h absent at HEAD) is a no-op.
+        Reverting a row whose HEAD value equals what is currently on disk
+        simply clears the pending mark (it never got saved in the first
+        place); reverting a hand-edited/previously-saved row marks it
+        pending so Save is required to actually write it.
+        """
+        row = self._rows.get(name)
+        if row is None or row.head_value is None:
+            return
+        row.spin.setValue(row.head_value)  # emits valueChanged -> style/status refresh
+
+    def revert_all(self) -> None:
+        """Revert every row that currently differs from HEAD. Same
+        no-write guarantee as revert_row.
+        """
+        for name, row in self._rows.items():
+            if row.differs_from_head():
+                self.revert_row(name)
 
     # -- save ---------------------------------------------------------------
 
@@ -336,7 +445,7 @@ class TunerPanel(QWidget):
         for name in changes:
             row = self._rows[name]
             row.original_value = self._schema.clamp(name, self._config.defines[name].value)
-            self._set_row_style(name)
+            self._set_row_style(row)
 
         count = len(changes)
         message = f"Saved {count} value{'s' if count != 1 else ''}."
