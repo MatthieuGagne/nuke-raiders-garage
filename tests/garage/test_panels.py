@@ -28,8 +28,15 @@ from PySide6.QtWidgets import (
 
 from tools.garage import theme
 from tools.garage.app import GarageWindow, format_header, format_header_html
-from tools.garage.core import config_io, diff as diff_core, doctor as doctor_core, project
+from tools.garage.core import (
+    config_io,
+    diff as diff_core,
+    doctor as doctor_core,
+    make_runner,
+    project,
+)
 from tools.garage.core.schema import Schema
+from tools.garage.panels.compile_bar import CompileBar
 from tools.garage.panels.diff_view import DiffPanel
 from tools.garage.panels.doctor import DoctorPanel
 from tools.garage.panels.tuner import TunerPanel, compute_derived_dependents
@@ -1757,6 +1764,420 @@ class TestGarageWindowDoctorIntegration(unittest.TestCase):
                 window.doctor_dialog.close()
 
                 self.assertEqual(run_checks.call_count, 1)
+
+
+class TestCompileBar(unittest.TestCase):
+    """The compile bar drives `make_runner` on a worker thread. Every test
+    below runs a real subprocess -- this interpreter, not `make`, so the
+    suite needs no toolchain -- through the real threading path, because
+    the threading is most of what this panel is.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        tmp_path = Path(self._tmp.name)
+        garage_root = tmp_path / "nuke-raider-garage"
+        garage_root.mkdir()
+        make_game_repo(tmp_path / "nuke-raider")
+        self.binding = project.bind(garage_root)
+        self.worktree = self.binding.active_worktree.path
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _bar(self):
+        bar = CompileBar(self.binding)
+        self.addCleanup(bar.stop_and_wait)
+        return bar
+
+    @staticmethod
+    def _python_command(source, label="make"):
+        return make_runner.Command(argv=(sys.executable, "-c", source), label=label)
+
+    @staticmethod
+    def _wait_until(predicate, timeout_ms=15000):
+        """Spin the event loop until `predicate` holds. The worker thread
+        delivers its lines as queued signals, so they only arrive while the
+        loop runs -- a plain sleep here would hang forever.
+        """
+        waited = 0
+        while waited < timeout_ms and not predicate():
+            QTest.qWait(20)
+            waited += 20
+        return predicate()
+
+    def _run_and_wait(self, bar, commands, expects_rom=False):
+        bar._start(commands, expects_rom=expects_rom)
+        self.assertTrue(
+            self._wait_until(lambda: not bar.is_running()), "the run never finished"
+        )
+
+    def test_output_is_shown_and_the_command_is_echoed(self):
+        bar = self._bar()
+
+        self._run_and_wait(
+            bar, [self._python_command("print('compiling'); print('done')")]
+        )
+
+        self.assertIn("$ make", bar.log_text())
+        self.assertIn("compiling", bar.log_text())
+        self.assertIn("done", bar.log_text())
+
+    def test_output_appears_while_the_run_is_still_going(self):
+        # R6: a display with no progress reads as a failure. The child
+        # holds its second line for 400ms; the first must already be in the
+        # log, with the panel still marked running.
+        bar = self._bar()
+
+        bar._start(
+            [
+                self._python_command(
+                    "import time\n"
+                    "print('first', flush=True)\n"
+                    "time.sleep(0.4)\n"
+                    "print('second', flush=True)\n"
+                )
+            ],
+            expects_rom=False,
+        )
+        try:
+            self.assertTrue(self._wait_until(lambda: "first" in bar.log_text()))
+            self.assertTrue(bar.is_running())
+            self.assertNotIn("second", bar.log_text())
+            self.assertEqual(bar.state(), "busy")
+        finally:
+            self.assertTrue(self._wait_until(lambda: not bar.is_running()))
+        self.assertIn("second", bar.log_text())
+
+    def test_buttons_are_disabled_while_a_run_is_in_flight(self):
+        bar = self._bar()
+
+        bar._start(
+            [self._python_command("import time; time.sleep(0.4)")], expects_rom=False
+        )
+        try:
+            self.assertFalse(bar.build_button.isEnabled())
+            self.assertFalse(bar.clean_build_button.isEnabled())
+            self.assertTrue(bar.stop_button.isEnabled())
+        finally:
+            self.assertTrue(self._wait_until(lambda: not bar.is_running()))
+
+        self.assertTrue(bar.build_button.isEnabled())
+        self.assertFalse(bar.stop_button.isEnabled())
+
+    def test_a_successful_run_reports_ok_and_its_duration(self):
+        bar = self._bar()
+
+        self._run_and_wait(bar, [self._python_command("print('ok')")])
+
+        self.assertIn("make — ok in", bar.status_text())
+        self.assertEqual(bar.state(), "pass")
+
+    def test_a_failing_run_reports_the_exit_code(self):
+        bar = self._bar()
+
+        self._run_and_wait(bar, [self._python_command("raise SystemExit(2)")])
+
+        self.assertIn("failed (exit 2)", bar.status_text())
+        self.assertEqual(bar.state(), "fail")
+
+    def test_a_stopped_run_reads_as_stopped_not_as_a_failure(self):
+        bar = self._bar()
+
+        bar._start(
+            [
+                self._python_command(
+                    "import time\n"
+                    "print('started', flush=True)\n"
+                    "while True: time.sleep(0.05)\n"
+                )
+            ],
+            expects_rom=False,
+        )
+        self.assertTrue(self._wait_until(lambda: "started" in bar.log_text()))
+
+        bar.stop()
+
+        self.assertTrue(
+            self._wait_until(lambda: not bar.is_running()),
+            "stop did not end the run",
+        )
+        self.assertIn("stopped", bar.status_text())
+        self.assertNotIn("failed", bar.status_text())
+        self.assertEqual(bar.state(), "idle")
+
+    def test_a_clean_build_stops_when_the_clean_fails(self):
+        bar = self._bar()
+
+        self._run_and_wait(
+            bar,
+            [
+                self._python_command("raise SystemExit(2)", label="make clean"),
+                self._python_command("print('built')", label="make"),
+            ],
+        )
+
+        self.assertIn("make clean — failed (exit 2)", bar.status_text())
+        self.assertNotIn("built", bar.log_text())
+
+    def test_a_successful_build_names_the_rom_it_produced(self):
+        # AC11: the ROM lands in the active worktree, and the bar says so
+        # from the file rather than from the exit code.
+        bar = self._bar()
+        source = (
+            "import pathlib\n"
+            "build = pathlib.Path('build')\n"
+            "build.mkdir(exist_ok=True)\n"
+            "(build / 'nuke-raider.gb').write_bytes(b'\\0' * 524288)\n"
+            "print('Built build/nuke-raider.gb')\n"
+        )
+
+        self._run_and_wait(bar, [self._python_command(source)], expects_rom=True)
+
+        self.assertTrue((self.worktree / "build" / "nuke-raider.gb").is_file())
+        self.assertIn("nuke-raider.gb — 512 KB", bar.log_text())
+
+    def test_a_build_that_writes_no_rom_says_so(self):
+        bar = self._bar()
+
+        self._run_and_wait(
+            bar, [self._python_command("print('nothing to do')")], expects_rom=True
+        )
+
+        self.assertIn("was not written", bar.log_text())
+
+    def test_the_run_happens_in_the_active_worktree(self):
+        # R2: every make call resolves against the active worktree.
+        bar = self._bar()
+
+        self._run_and_wait(
+            bar, [self._python_command("import os; print(os.getcwd())")]
+        )
+
+        self.assertIn(str(self.worktree), bar.log_text())
+
+    def test_the_four_targets_r11_names_are_all_reachable(self):
+        bar = self._bar()
+
+        self.assertEqual(make_runner.make_command("build").label, "make")
+        for target in ("clean", "memory-check", "bank-post-build"):
+            self.assertEqual(
+                make_runner.make_command(target).label, f"make {target}"
+            )
+        self.assertTrue(bar.memory_check_button.isEnabled())
+        self.assertTrue(bar.bank_check_button.isEnabled())
+
+    def test_a_second_run_cannot_start_while_one_is_in_flight(self):
+        bar = self._bar()
+
+        bar._start(
+            [self._python_command("import time; time.sleep(0.4); print('first')")],
+            expects_rom=False,
+        )
+        bar._start([self._python_command("print('second')")], expects_rom=False)
+
+        self.assertTrue(self._wait_until(lambda: not bar.is_running()))
+        self.assertIn("first", bar.log_text())
+        self.assertNotIn("second", bar.log_text())
+
+    def test_build_cleans_first_when_config_h_changed_since_the_compile(self):
+        # The Build button must always produce a ROM carrying the values on
+        # screen; with no header dependency in the game repository's
+        # Makefile, that costs a full recompile in exactly this case.
+        bar = self._bar()
+
+        with mock.patch.object(make_runner, "needs_clean_build", return_value=True):
+            with mock.patch.object(bar, "_start") as start:
+                bar.run_build()
+
+        commands, kwargs = start.call_args[0], start.call_args[1]
+        self.assertEqual([c.label for c in commands[0]], ["make clean", "make"])
+        self.assertTrue(kwargs["expects_rom"])
+        self.assertIn("no header dependency", bar.log_text())
+
+    def test_build_stays_incremental_when_nothing_changed(self):
+        bar = self._bar()
+
+        with mock.patch.object(make_runner, "needs_clean_build", return_value=False):
+            with mock.patch.object(bar, "_start") as start:
+                bar.run_build()
+
+        self.assertEqual([c.label for c in start.call_args[0][0]], ["make"])
+        self.assertEqual(bar.log_text(), "")
+
+    def test_a_failure_names_the_toolchain_check_that_explains_it(self):
+        # The real case: `make bank-post-build` dies on a missing romusage,
+        # which the Doctor already reported at startup.
+        bar = self._bar()
+        bar.set_doctor_report(
+            doctor_core.Report(
+                checks=[
+                    doctor_core.CheckResult(
+                        key="romusage",
+                        name="romusage — ROM bank budgets",
+                        status=doctor_core.FAIL,
+                        detail="not found on PATH — add C:/gbdk/bin",
+                        prevents="The ROM bank budget check.",
+                    )
+                ]
+            )
+        )
+
+        self._run_and_wait(
+            bar,
+            [
+                make_runner.Command(
+                    argv=(sys.executable, "-c", "raise SystemExit(1)"),
+                    label="make bank-post-build",
+                    target="bank-post-build",
+                )
+            ],
+        )
+
+        self.assertIn("add C:/gbdk/bin", bar.log_text())
+        self.assertIn("ROM bank budget check", bar.log_text())
+
+    def test_a_measuring_target_that_failed_with_no_rom_says_build_first(self):
+        bar = self._bar()
+
+        self._run_and_wait(
+            bar,
+            [
+                make_runner.Command(
+                    argv=(sys.executable, "-c", "raise SystemExit(1)"),
+                    label="make memory-check",
+                    target="memory-check",
+                )
+            ],
+        )
+
+        self.assertIn("Run Build first", bar.log_text())
+
+    def test_a_failure_with_a_whole_toolchain_explains_nothing(self):
+        # A genuine compile error must not be buried under toolchain prose.
+        bar = self._bar()
+        bar.set_doctor_report(
+            doctor_core.Report(
+                checks=[
+                    doctor_core.CheckResult(
+                        key="romusage",
+                        name="romusage",
+                        status=doctor_core.PASS,
+                        detail="C:/gbdk/bin/romusage.exe",
+                    )
+                ]
+            )
+        )
+
+        self._run_and_wait(
+            bar,
+            [
+                make_runner.Command(
+                    argv=(sys.executable, "-c", "print('error: x.c:3'); raise SystemExit(2)"),
+                    label="make",
+                    target="build",
+                )
+            ],
+        )
+
+        self.assertIn("error: x.c:3", bar.log_text())
+        self.assertNotIn("Toolchain", bar.log_text())
+
+    def test_the_window_hands_the_doctor_report_to_the_compile_bar(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            garage_root = tmp_path / "nuke-raider-garage"
+            garage_root.mkdir()
+            make_game_repo(tmp_path / "nuke-raider")
+
+            window = GarageWindow(garage_root=garage_root)
+            self.addCleanup(window.close)
+
+            self.assertIs(
+                window.compile_bar._doctor_report, window.doctor_panel.report
+            )
+
+    def test_without_a_binding_nothing_can_be_started(self):
+        error = project.BindingError("game_repo", "the recorded path is gone")
+
+        bar = CompileBar(None, error)
+
+        self.assertFalse(bar.build_button.isEnabled())
+        self.assertIn("the recorded path is gone", bar.status_text())
+        bar.run_build()
+        self.assertFalse(bar.is_running())
+
+    def test_the_stylesheet_colours_every_state_of_the_dot(self):
+        sheet = theme.build_stylesheet()
+
+        for state in ("busy", "pass", "fail"):
+            self.assertIn(f'QLabel#compile-dot[state="{state}"]', sheet)
+
+
+class TestGarageWindowCompileIntegration(unittest.TestCase):
+    def test_the_compile_bar_is_in_the_window_body(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            garage_root = tmp_path / "nuke-raider-garage"
+            garage_root.mkdir()
+            make_game_repo(tmp_path / "nuke-raider")
+
+            window = GarageWindow(garage_root=garage_root)
+            self.addCleanup(window.close)
+
+            self.assertIsInstance(window.compile_bar, CompileBar)
+            self.assertIs(
+                window.centralWidget(), window.compile_bar.parentWidget()
+            )
+            self.assertEqual(window.compile_bar.status_text(), "ready")
+
+    def test_a_finished_run_refreshes_the_header(self):
+        # A compile writes into the worktree, so the header's totals can be
+        # stale the moment it ends.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            garage_root = tmp_path / "nuke-raider-garage"
+            garage_root.mkdir()
+            make_game_repo(tmp_path / "nuke-raider")
+
+            window = GarageWindow(garage_root=garage_root)
+            self.addCleanup(window.close)
+
+            with mock.patch.object(window, "_refresh_header") as refresh:
+                window.compile_bar.ran.emit([])
+
+            refresh.assert_called_once()
+
+    def test_closing_the_window_stops_a_run_in_flight(self):
+        # A QThread still running when Qt tears its parent down is a crash,
+        # and a compile that outlives its window is invisible work in the
+        # user's worktree.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            garage_root = tmp_path / "nuke-raider-garage"
+            garage_root.mkdir()
+            make_game_repo(tmp_path / "nuke-raider")
+
+            window = GarageWindow(garage_root=garage_root)
+            window.compile_bar._start(
+                [
+                    make_runner.Command(
+                        argv=(
+                            sys.executable,
+                            "-c",
+                            "import time\nprint('x', flush=True)\n"
+                            "while True: time.sleep(0.05)\n",
+                        ),
+                        label="make",
+                    )
+                ],
+                expects_rom=False,
+            )
+            self.assertTrue(window.compile_bar.is_running())
+
+            window.close()
+
+            self.assertFalse(window.compile_bar.is_running())
 
 
 if __name__ == "__main__":

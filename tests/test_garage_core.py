@@ -11,6 +11,7 @@ import json
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 import unittest.mock
 from pathlib import Path
@@ -20,7 +21,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from tools.garage.core import config_io, diff, doctor, project  # noqa: E402
+from tools.garage.core import (  # noqa: E402
+    config_io,
+    diff,
+    doctor,
+    make_runner,
+    project,
+)
 from tools.garage.core.schema import Schema, SchemaError  # noqa: E402
 
 
@@ -1286,7 +1293,10 @@ def make_toolchain(tmp_path: Path):
         "bash": str(git_bin / "bash.exe"),
         "sed": str(git_usr_bin / "sed.exe"),
     }
-    environ = {"GBDK_HOME": str(gbdk)}
+    # Forward slashes, like the value that actually builds: the Makefile
+    # expands GBDK_HOME inside a bash recipe, so a backslash in it is a
+    # failure of its own (see the backslash test below).
+    environ = {"GBDK_HOME": str(gbdk).replace("\\", "/")}
     settings = {"emulicious_jar": str(jar)}
     return which, environ, settings
 
@@ -1487,6 +1497,25 @@ class TestDoctorBuildChain(unittest.TestCase):
             self.assertEqual(check.status, doctor.FAIL)
             self.assertIn("bin/lcc", check.detail)
 
+    def test_gbdk_home_with_backslashes_fails_even_though_lcc_is_there(self):
+        # The real defect: `C:\gbdk` holds bin/lcc, so every existence test
+        # passes, and no source file compiles. The Makefile expands it into
+        # a bash recipe, where `\g` is an escape and the path is mangled.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            which, environ, settings = make_toolchain(tmp_path)
+            environ["GBDK_HOME"] = str(tmp_path / "gbdk").replace("/", "\\")
+
+            check = {
+                c.key: c for c in run_doctor(which, environ, settings).checks
+            }["gbdk-home"]
+
+            self.assertEqual(check.status, doctor.FAIL)
+            self.assertIn("backslash", check.detail)
+            # It names the form to use, not just the problem.
+            self.assertIn(str(tmp_path / "gbdk").replace("\\", "/"), check.detail)
+            self.assertIn("127", check.prevents)
+
     def test_gbdk_home_holding_lcc_passes_and_reports_it(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -1675,6 +1704,434 @@ class TestDoctorVersionProbe(unittest.TestCase):
         self.assertEqual(
             doctor.probe_version([sys.executable, "-c", "print('hello')"]), ""
         )
+
+
+# -- make_runner (R11 / R6 / AC11) -------------------------------------------
+#
+# Nothing here runs `make`: the suite must pass on a machine with no
+# toolchain (AC15), and what is being tested is the streaming, the exit
+# code, the cwd and the cancellation -- none of which is specific to make.
+# The child process is this interpreter, which is guaranteed to be present
+# and whose output the test controls exactly.
+
+
+def _worktree_with_objects(worktree: Path) -> Path:
+    """A worktree that has been compiled once: src/config.h and a couple of
+    objects in build/obj.
+    """
+    (worktree / "src").mkdir(parents=True, exist_ok=True)
+    (worktree / "src" / "config.h").write_text("#define A 1\n", encoding="utf-8")
+    (worktree / "build" / "obj").mkdir(parents=True, exist_ok=True)
+    for name in ("main.o", "race.o"):
+        (worktree / "build" / "obj" / name).write_bytes(b"\0")
+    return worktree
+
+
+def _touch_newer(path: Path, than: Path) -> None:
+    """Make `path` unambiguously newer than everything in `than`, without
+    depending on the filesystem's timestamp resolution or on sleeping.
+    """
+    newest = max(child.stat().st_mtime for child in than.iterdir())
+    import os
+
+    os.utime(path, (newest + 10, newest + 10))
+
+
+def python_command(source: str, label="python") -> make_runner.Command:
+    return make_runner.Command(argv=(sys.executable, "-c", source), label=label)
+
+
+class TestMakeCommands(unittest.TestCase):
+    def test_the_four_targets_r11_names(self):
+        self.assertEqual(make_runner.make_command("build").argv, ("make",))
+        self.assertEqual(make_runner.make_command("clean").argv, ("make", "clean"))
+        self.assertEqual(
+            make_runner.make_command("memory-check").argv, ("make", "memory-check")
+        )
+        self.assertEqual(
+            make_runner.make_command("bank-post-build").argv,
+            ("make", "bank-post-build"),
+        )
+
+    def test_label_is_what_a_log_echoes(self):
+        self.assertEqual(make_runner.make_command("build").label, "make")
+        self.assertEqual(make_runner.make_command("clean").label, "make clean")
+
+    def test_an_unknown_target_is_refused(self):
+        with self.assertRaises(make_runner.UnknownTargetError) as raised:
+            make_runner.make_command("install")
+        self.assertIn("bank-post-build", str(raised.exception))
+
+    def test_rom_path_resolves_against_the_worktree(self):
+        # AC11: the ROM the default target writes, in the active worktree.
+        worktree = Path("C:/worktrees/feat-x")
+        self.assertEqual(
+            make_runner.rom_path(worktree), worktree / "build" / "nuke-raider.gb"
+        )
+
+    def test_describe_rom_reports_the_written_rom_and_its_size(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            worktree = Path(tmp)
+            (worktree / "build").mkdir()
+            (worktree / "build" / "nuke-raider.gb").write_bytes(b"\0" * 524288)
+
+            description = make_runner.describe_rom(worktree)
+
+            self.assertIn("nuke-raider.gb", description)
+            self.assertIn("512 KB", description)
+
+    def test_a_config_edit_after_a_compile_needs_a_clean_build(self):
+        # The game repository's Makefile has no header dependency, so an
+        # incremental make would relink the old objects and hand back a ROM
+        # that does not carry the edited value.
+        with tempfile.TemporaryDirectory() as tmp:
+            worktree = _worktree_with_objects(Path(tmp))
+            _touch_newer(worktree / "src" / "config.h", worktree / "build" / "obj")
+
+            self.assertTrue(make_runner.needs_clean_build(worktree))
+
+    def test_objects_compiled_after_the_last_edit_need_no_clean(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            worktree = _worktree_with_objects(Path(tmp))
+            _touch_newer(worktree / "build" / "obj" / "main.o", worktree / "src")
+
+            self.assertFalse(make_runner.needs_clean_build(worktree))
+
+    def test_a_tree_that_was_never_compiled_needs_no_clean(self):
+        # Nothing to relink: a build with no objects compiles everything,
+        # and cleaning would only delete an empty directory.
+        with tempfile.TemporaryDirectory() as tmp:
+            worktree = Path(tmp)
+            (worktree / "src").mkdir()
+            (worktree / "src" / "config.h").write_text("#define A 1\n", encoding="utf-8")
+
+            self.assertFalse(make_runner.needs_clean_build(worktree))
+
+    def test_a_command_remembers_the_target_it_came_from(self):
+        self.assertEqual(make_runner.make_command("clean").target, "clean")
+
+    def test_describe_rom_says_so_when_the_rom_is_absent(self):
+        # A make that exits 0 without writing the ROM must not read as a
+        # successful build.
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIn("was not written", make_runner.describe_rom(Path(tmp)))
+
+
+class TestExplainFailure(unittest.TestCase):
+    """A failed target names the toolchain check that already explains it.
+    Both of the real cases this came from -- `make clean` dying on a
+    missing `rm` (Git's usr\\bin absent, so make's `SHELL := bash` falls
+    back to cmd) and `make bank-post-build` dying on a missing `romusage`
+    -- were reported by the Doctor at startup and then left for the user to
+    re-derive from the tool's own traceback.
+    """
+
+    def _report(self, *failing_keys):
+        checks = []
+        for key in ("make", "gbdk-home", "romusage", "git-unix-tools"):
+            failed = key in failing_keys
+            checks.append(
+                doctor.CheckResult(
+                    key=key,
+                    name=f"{key} — a tool",
+                    status=doctor.FAIL if failed else doctor.PASS,
+                    detail="not found on PATH" if failed else "C:/bin/tool.exe",
+                    prevents="the thing it prevents" if failed else "",
+                )
+            )
+        return doctor.Report(checks=checks)
+
+    def test_every_target_declares_what_it_needs(self):
+        self.assertEqual(
+            set(make_runner.TARGET_REQUIREMENTS), set(make_runner.MAKE_TARGETS)
+        )
+        keys = {
+            key
+            for required in make_runner.TARGET_REQUIREMENTS.values()
+            for key in required
+        }
+        report_keys = {c.key for c in doctor.run_checks(which=lambda n: None).checks}
+        self.assertTrue(
+            keys <= report_keys, f"unknown check keys: {keys - report_keys}"
+        )
+
+    def test_bank_post_build_points_at_romusage(self):
+        lines = make_runner.explain_failure(
+            "bank-post-build", self._report("romusage")
+        )
+
+        self.assertTrue(lines)
+        self.assertIn("Toolchain", lines[0])
+        self.assertTrue(any("romusage" in line for line in lines))
+        self.assertTrue(any("the thing it prevents" in line for line in lines))
+
+    def test_clean_points_at_the_missing_coreutils(self):
+        lines = make_runner.explain_failure("clean", self._report("git-unix-tools"))
+
+        self.assertTrue(any("git-unix-tools" in line for line in lines))
+
+    def test_a_check_the_target_does_not_need_is_not_mentioned(self):
+        # memory-check runs a Python script; a missing romusage has nothing
+        # to do with it, and saying so would bury the real error.
+        self.assertEqual(
+            make_runner.explain_failure("memory-check", self._report("romusage")), []
+        )
+
+    def test_a_whole_toolchain_explains_nothing(self):
+        self.assertEqual(
+            make_runner.explain_failure("bank-post-build", self._report()), []
+        )
+
+    def test_a_measuring_target_with_no_build_says_build_first(self):
+        # The real case: `make memory-check` against a cleaned worktree
+        # raises a TypeError out of the game repository's own script,
+        # because it formats a None. "Run Build first" is the content.
+        with tempfile.TemporaryDirectory() as tmp:
+            lines = make_runner.explain_missing_rom("memory-check", Path(tmp))
+
+            self.assertTrue(lines)
+            self.assertIn("Run Build first", lines[0])
+            self.assertIn("nuke-raider.gb", lines[0])
+
+    def test_a_measuring_target_with_a_rom_present_explains_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            worktree = Path(tmp)
+            (worktree / "build").mkdir()
+            (worktree / "build" / "nuke-raider.gb").write_bytes(b"\0")
+
+            self.assertEqual(
+                make_runner.explain_missing_rom("bank-post-build", worktree), []
+            )
+
+    def test_a_build_target_is_never_told_to_build_first(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(make_runner.explain_missing_rom("build", Path(tmp)), [])
+            self.assertEqual(make_runner.explain_missing_rom("clean", Path(tmp)), [])
+
+    def test_no_report_and_no_target_are_both_harmless(self):
+        self.assertEqual(make_runner.explain_failure("build", None), [])
+        self.assertEqual(make_runner.explain_failure("", self._report("make")), [])
+
+
+class TestRun(unittest.TestCase):
+    def test_lines_arrive_one_by_one_in_order(self):
+        lines = []
+
+        result = make_runner.run(
+            python_command("print('one'); print('two'); print('three')"),
+            Path.cwd(),
+            lines.append,
+        )
+
+        self.assertEqual(lines, ["one", "two", "three"])
+        self.assertTrue(result.ok)
+        self.assertEqual(result.exit_code, 0)
+
+    def test_output_arrives_while_the_process_is_still_running(self):
+        # R6: the display must show progress, not a blob at the end. The
+        # child holds its second line back until the test has seen the
+        # first one, so this can only pass if `run` delivered mid-flight.
+        seen_first = threading.Event()
+        lines = []
+
+        def on_line(line):
+            lines.append(line)
+            seen_first.set()
+
+        source = (
+            "import sys, time\n"
+            "print('first', flush=True)\n"
+            "time.sleep(0.4)\n"
+            "print('second', flush=True)\n"
+        )
+        finished = threading.Event()
+
+        def target():
+            make_runner.run(python_command(source), Path.cwd(), on_line)
+            finished.set()
+
+        worker = threading.Thread(target=target)
+        worker.start()
+        try:
+            self.assertTrue(seen_first.wait(10), "no line arrived at all")
+            self.assertEqual(lines, ["first"])
+            self.assertFalse(finished.is_set(), "the run had already ended")
+        finally:
+            worker.join(15)
+        self.assertEqual(lines, ["first", "second"])
+
+    def test_stderr_is_merged_into_the_same_stream(self):
+        lines = []
+
+        make_runner.run(
+            python_command(
+                "import sys\n"
+                "sys.stdout.write('out\\n'); sys.stdout.flush()\n"
+                "sys.stderr.write('err\\n')\n"
+            ),
+            Path.cwd(),
+            lines.append,
+        )
+
+        self.assertEqual(sorted(lines), ["err", "out"])
+
+    def test_a_failing_command_reports_its_exit_code(self):
+        result = make_runner.run(
+            python_command("raise SystemExit(2)"), Path.cwd(), lambda line: None
+        )
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.exit_code, 2)
+        self.assertFalse(result.cancelled)
+
+    def test_it_runs_in_the_directory_it_is_given(self):
+        # R2: every make call resolves against the active worktree.
+        with tempfile.TemporaryDirectory() as tmp:
+            lines = []
+
+            make_runner.run(
+                python_command("import os; print(os.getcwd())"),
+                Path(tmp),
+                lines.append,
+            )
+
+            self.assertEqual(
+                Path(lines[0]).resolve(), Path(tmp).resolve()
+            )
+
+    def test_a_missing_executable_is_a_result_not_a_crash(self):
+        lines = []
+
+        result = make_runner.run(
+            make_runner.Command(argv=("no-such-tool-anywhere",), label="no-such-tool"),
+            Path.cwd(),
+            lines.append,
+        )
+
+        self.assertEqual(result.exit_code, make_runner.EXIT_NOT_STARTED)
+        self.assertFalse(result.ok)
+        self.assertTrue(lines, "the failure was not reported to the log")
+        self.assertIn("no-such-tool-anywhere", lines[0])
+
+    def test_output_that_is_not_utf8_costs_one_glyph_not_the_run(self):
+        result = make_runner.run(
+            python_command(
+                "import sys\n"
+                "sys.stdout.buffer.write(b'caf\\xe9 au lait\\n')\n"
+            ),
+            Path.cwd(),
+            lambda line: None,
+        )
+
+        self.assertTrue(result.ok)
+
+
+class TestCancellation(unittest.TestCase):
+    FOREVER = (
+        "import time\n"
+        "print('started', flush=True)\n"
+        "while True:\n"
+        "    time.sleep(0.05)\n"
+    )
+
+    def test_cancelling_a_running_command_ends_it(self):
+        started = threading.Event()
+        cancellation = make_runner.Cancellation()
+        results = []
+
+        def on_line(line):
+            started.set()
+
+        def target():
+            results.append(
+                make_runner.run(
+                    python_command(self.FOREVER), Path.cwd(), on_line, cancellation
+                )
+            )
+
+        worker = threading.Thread(target=target)
+        worker.start()
+        try:
+            self.assertTrue(started.wait(10), "the child never started")
+            cancellation.cancel()
+            worker.join(15)
+            self.assertFalse(worker.is_alive(), "the run outlived its cancellation")
+        finally:
+            cancellation.cancel()
+            worker.join(15)
+
+        result = results[0]
+        self.assertTrue(result.cancelled)
+        self.assertEqual(result.exit_code, make_runner.EXIT_CANCELLED)
+        # A stopped run is not a failed build, and must not read as one.
+        self.assertFalse(result.ok)
+
+    def test_a_command_started_after_a_cancellation_never_runs(self):
+        cancellation = make_runner.Cancellation()
+        cancellation.cancel()
+        lines = []
+
+        result = make_runner.run(
+            python_command("print('should not appear')"),
+            Path.cwd(),
+            lines.append,
+            cancellation,
+        )
+
+        self.assertEqual(lines, [])
+        self.assertTrue(result.cancelled)
+
+
+class TestRunSequence(unittest.TestCase):
+    def test_commands_run_in_order_and_are_echoed_first(self):
+        echoed = []
+        lines = []
+
+        results = make_runner.run_sequence(
+            [
+                python_command("print('clean')", label="make clean"),
+                python_command("print('build')", label="make"),
+            ],
+            Path.cwd(),
+            lines.append,
+            on_command=lambda command: echoed.append(command.label),
+        )
+
+        self.assertEqual(echoed, ["make clean", "make"])
+        self.assertEqual(lines, ["clean", "build"])
+        self.assertEqual(len(results), 2)
+        self.assertTrue(all(r.ok for r in results))
+
+    def test_a_failure_stops_the_rest(self):
+        # "Clean build" is clean then build; building on a clean that
+        # failed would compile against a half-deleted tree.
+        lines = []
+
+        results = make_runner.run_sequence(
+            [
+                python_command("raise SystemExit(2)", label="make clean"),
+                python_command("print('build')", label="make"),
+            ],
+            Path.cwd(),
+            lines.append,
+        )
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].exit_code, 2)
+        self.assertEqual(lines, [])
+
+    def test_a_cancelled_sequence_stops_between_commands(self):
+        cancellation = make_runner.Cancellation()
+        cancellation.cancel()
+
+        results = make_runner.run_sequence(
+            [python_command("print('nope')")],
+            Path.cwd(),
+            lambda line: None,
+            cancellation,
+        )
+
+        self.assertEqual(results, [])
 
 
 if __name__ == "__main__":

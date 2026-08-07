@@ -263,6 +263,30 @@ def check_gbdk_home(environ) -> CheckResult:
             prevents=prevents,
             tag="blocked",
         )
+    if "\\" in raw:
+        # Found by building, not by this check: `C:\gbdk` passes every test
+        # above -- Python resolves either separator, so bin/lcc is right
+        # there -- and still cannot compile a single file. The Makefile
+        # interpolates the variable as `$(GBDK_HOME)/bin/lcc` and runs the
+        # recipe under `SHELL := bash`, where `\g` is an escape sequence:
+        # bash reads `C:gbdk/bin/lcc` and exits 127. Verifying that a tool
+        # exists is not the same as verifying the build can use it.
+        return CheckResult(
+            key="gbdk-home",
+            name=name,
+            status=FAIL,
+            detail=(
+                f"{raw} uses backslashes — set it to "
+                f"{raw.replace(chr(92), '/')} instead"
+            ),
+            prevents=(
+                "Every compile. The Makefile expands this into "
+                "$(GBDK_HOME)/bin/lcc and runs it under bash, which reads a "
+                "backslash as an escape: the compile resolves a mangled "
+                "path and exits 127 on the first source file."
+            ),
+            tag="blocked",
+        )
     return CheckResult(
         key="gbdk-home", name=name, status=PASS, detail=str(lcc), tag=raw
     )

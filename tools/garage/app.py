@@ -8,6 +8,9 @@ approved: the Tuner is the whole window body again, the header states
 change *totals* only, and the full diff lives behind a menu action,
 closed until asked for (AC19, AC2).
 
+Iteration 7 adds the compile bar (R11/AC11): the four make calls, run in
+the active worktree, with their output as it arrives.
+
 Iteration 6 adds the Doctor (R14/AC14): the toolchain verification runs at
 startup, states a failure in the window itself, and opens its own dialog
 over the window when something is missing.
@@ -41,6 +44,7 @@ from PySide6.QtWidgets import (
 from tools.garage import theme
 from tools.garage.core import diff as diff_core
 from tools.garage.core.project import Binding, BindingError, bind
+from tools.garage.panels.compile_bar import CompileBar
 from tools.garage.panels.diff_view import DiffPanel
 from tools.garage.panels.doctor import DoctorPanel
 from tools.garage.panels.tuner import TunerPanel
@@ -206,6 +210,15 @@ class GarageWindow(QMainWindow):
 
         self.tuner_panel.written.connect(self._on_tuner_written)
 
+        # Iteration 7 (R11/AC11): the compile bar is pinned under the
+        # Tuner, following the prototype's build bar. The loop is change a
+        # value → compile → look, so the compile controls sit in the same
+        # window as the values, not behind a menu action like the diff.
+        self.compile_bar = CompileBar(self.binding, self.binding_error, parent=central)
+        self.compile_bar.setObjectName("garage-compile-bar")
+        self.compile_bar.ran.connect(self._on_compile_ran)
+        layout.addWidget(self.compile_bar)
+
         self.setCentralWidget(central)
         self.resize(1200, 700)
 
@@ -234,6 +247,9 @@ class GarageWindow(QMainWindow):
         # launch is the default, nothing further needed for that.
 
         self._build_doctor()
+        # A failed target whose tool the Doctor already reported missing
+        # says so in the compile log -- see CompileBar._explain_failure.
+        self.compile_bar.set_doctor_report(self.doctor_panel.report)
 
         self._build_menu()
 
@@ -355,13 +371,28 @@ class GarageWindow(QMainWindow):
         if self.diff_dialog.isVisible():
             self.diff_panel.refresh()
 
+    def _on_compile_ran(self, results) -> None:
+        """A compile writes into the worktree (build/, and the generated
+        sources the Makefile regenerates), so the header's change totals
+        can be stale the moment it ends. An open diff is re-read for the
+        same reason.
+        """
+        self._refresh_header()
+        if self.diff_dialog.isVisible():
+            self.diff_panel.refresh()
+
     def closeEvent(self, event) -> None:
         """A stepped edit debounces briefly before it writes (see
         tools/garage/panels/tuner.py's STEP_DEBOUNCE_MS); closing the
         window must not race that timer and lose the write. Flush any
         step still waiting to settle before Qt tears the window down.
+
+        A compile runs on its own thread, and a QThread still running when
+        Qt destroys its parent is a crash -- so a run in flight is stopped
+        and joined here too.
         """
         self.tuner_panel.flush_pending_writes()
+        self.compile_bar.stop_and_wait()
         super().closeEvent(event)
 
 

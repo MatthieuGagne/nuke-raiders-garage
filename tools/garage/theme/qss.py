@@ -22,6 +22,11 @@ names / dynamic properties the panels already expose for this purpose:
   cannot be selected by object name alone).
 - `#garage-toolchain-status` -- the one-line toolchain failure notice under
   the header (`tools/garage/app.py`), shown only when a check failed.
+- `#compile-controls`, `#compile-dot`, `#compile-status`, `#compile-log`
+  and the `[role="primary"|"danger"]` buttons -- the compile bar
+  (`tools/garage/panels/compile_bar.py`). `[state="busy"|"pass"|"fail"]` on
+  the dot is the run's state; the status line beside it says the same in
+  words, so the dot is never the only signal.
 - `#doctor-summary`, `#doctor-check-row`, `#doctor-verdict`,
   `#doctor-check-name`, `#doctor-check-detail`, `#doctor-check-tag`,
   `#doctor-check-prevents` -- the Doctor panel
@@ -229,6 +234,71 @@ QLabel#garage-header {{
     background-color: {t['surface-2']};
     border-bottom: 1px solid {t['line']};
     padding: 8px 12px;
+}}
+
+/* ============================================================
+   Compile bar (tools/garage/panels/compile_bar.py). The
+   prototype's build bar: a controls row on `surface-2` above a
+   log on `bg`, both pinned to the bottom of the window.
+   ============================================================ */
+QWidget#compile-controls {{
+    background-color: {t['surface-2']};
+    border-top: 1px solid {t['line']};
+}}
+QPushButton[role="primary"] {{
+    background-color: {t['accent']};
+    border-color: {t['accent']};
+    color: {t['accent-ink']};
+    font-weight: 600;
+}}
+QPushButton[role="primary"]:hover {{
+    background-color: {t['accent-line']};
+    border-color: {t['accent']};
+    color: {t['text']};
+}}
+QPushButton[role="danger"] {{
+    color: {t['fail']};
+    border-color: {t['fail']};
+}}
+QPushButton[role="danger"]:hover {{
+    background-color: {t['fail-soft']};
+}}
+QPushButton[role="primary"]:disabled, QPushButton[role="danger"]:disabled {{
+    background-color: {t['surface']};
+    color: {t['text-3']};
+    border-color: {t['line-soft']};
+}}
+/* The status dot: a fixed 8px square with a full radius. Qt has no
+   aspect-ratio rule, so both dimensions are pinned rather than left to the
+   label's (empty) text to size. */
+QLabel#compile-dot {{
+    min-width: 8px;
+    max-width: 8px;
+    min-height: 8px;
+    max-height: 8px;
+    border-radius: 4px;
+    background-color: {t['text-3']};
+}}
+QLabel#compile-dot[state="busy"] {{
+    background-color: {t['accent']};
+}}
+QLabel#compile-dot[state="pass"] {{
+    background-color: {t['pass']};
+}}
+QLabel#compile-dot[state="fail"] {{
+    background-color: {t['fail']};
+}}
+QLabel#compile-status {{
+    font-family: {FONT_MONO};
+    color: {t['text-2']};
+}}
+QPlainTextEdit#compile-log {{
+    background-color: {t['bg']};
+    color: {t['text-2']};
+    font-family: {FONT_MONO};
+    border: none;
+    border-top: 1px solid {t['line']};
+    padding: 6px 10px;
 }}
 
 /* ============================================================
