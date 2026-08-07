@@ -29,19 +29,28 @@ from PySide6.QtWidgets import (
 from tools.garage import theme
 from tools.garage.app import GarageWindow, format_header, format_header_html
 from tools.garage.core import (
+    budgets as budgets_core,
     config_io,
     diff as diff_core,
     doctor as doctor_core,
+    emulicious,
     make_runner,
     project,
 )
 from tools.garage.core.schema import Schema
+from tools.garage.panels.budgets import BudgetsPanel
 from tools.garage.panels.compile_bar import CompileBar
 from tools.garage.panels.diff_view import DiffPanel
 from tools.garage.panels.doctor import DoctorPanel
 from tools.garage.panels.tuner import TunerPanel, compute_derived_dependents
 
 GAME_REPO_REMOTE_URL = "https://github.com/MatthieuGagne/gmb-nuke-raider.git"
+
+# The verbatim tool output the core suite parses, imported rather than
+# copied: two fixtures that could drift apart would let the panel be tested
+# against text `make memory-check` never prints.
+sys.path.insert(0, str(REPO_ROOT / "tests"))
+from test_garage_core import BANK_REPORT_OUTPUT, MEMORY_CHECK_OUTPUT  # noqa: E402
 
 _app = QApplication.instance() or QApplication([])
 
@@ -939,7 +948,7 @@ class TestGarageWindowDiffIntegration(unittest.TestCase):
             # widget's layout, so it is still the (enabled, intact) central
             # widget's body.
             self.assertIsInstance(window.tuner_panel, TunerPanel)
-            self.assertIs(window.centralWidget(), window.tuner_panel.parentWidget())
+            self.assertTrue(window.centralWidget().isAncestorOf(window.tuner_panel))
             self.assertTrue(window.tuner_panel.isEnabled())
 
             window.show_diff_action.trigger()
@@ -1744,7 +1753,7 @@ class TestGarageWindowDoctorIntegration(unittest.TestCase):
 
             # The Tuner underneath is untouched by the dialog, as with the
             # diff -- a separate window, not part of the central layout.
-            self.assertIs(window.centralWidget(), window.tuner_panel.parentWidget())
+            self.assertTrue(window.centralWidget().isAncestorOf(window.tuner_panel))
             self.assertTrue(window.tuner_panel.isEnabled())
 
     def test_the_checks_run_once_at_startup_not_on_every_open(self):
@@ -1766,11 +1775,13 @@ class TestGarageWindowDoctorIntegration(unittest.TestCase):
                 self.assertEqual(run_checks.call_count, 1)
 
 
-class TestCompileBar(unittest.TestCase):
-    """The compile bar drives `make_runner` on a worker thread. Every test
-    below runs a real subprocess -- this interpreter, not `make`, so the
-    suite needs no toolchain -- through the real threading path, because
-    the threading is most of what this panel is.
+class CompileBarFixture:
+    """Shared rig for the compile-bar suites: a throwaway game repo, a
+    bound panel, and the event-loop spinning a queued signal needs.
+
+    A mixin rather than a base TestCase on purpose -- subclassing a
+    TestCase re-runs every one of its tests in each subclass, and each of
+    these costs a git repo and a subprocess.
     """
 
     def setUp(self):
@@ -1811,6 +1822,14 @@ class TestCompileBar(unittest.TestCase):
         self.assertTrue(
             self._wait_until(lambda: not bar.is_running()), "the run never finished"
         )
+
+
+class TestCompileBar(CompileBarFixture, unittest.TestCase):
+    """The compile bar drives `make_runner` on a worker thread. Every test
+    below runs a real subprocess -- this interpreter, not `make`, so the
+    suite needs no toolchain -- through the real threading path, because
+    the threading is most of what this panel is.
+    """
 
     def test_output_is_shown_and_the_command_is_echoed(self):
         bar = self._bar()
@@ -1991,7 +2010,11 @@ class TestCompileBar(unittest.TestCase):
                 bar.run_build()
 
         commands, kwargs = start.call_args[0], start.call_args[1]
-        self.assertEqual([c.label for c in commands[0]], ["make clean", "make"])
+        # The measuring targets follow the build itself -- see
+        # TestCompileBarBudgets for why they are part of the chain.
+        self.assertEqual(
+            [c.label for c in commands[0]][:2], ["make clean", "make"]
+        )
         self.assertTrue(kwargs["expects_rom"])
         self.assertIn("no header dependency", bar.log_text())
 
@@ -2002,7 +2025,7 @@ class TestCompileBar(unittest.TestCase):
             with mock.patch.object(bar, "_start") as start:
                 bar.run_build()
 
-        self.assertEqual([c.label for c in start.call_args[0][0]], ["make"])
+        self.assertEqual([c.label for c in start.call_args[0][0]][:1], ["make"])
         self.assertEqual(bar.log_text(), "")
 
     def test_a_failure_names_the_toolchain_check_that_explains_it(self):
@@ -2178,6 +2201,283 @@ class TestGarageWindowCompileIntegration(unittest.TestCase):
             window.close()
 
             self.assertFalse(window.compile_bar.is_running())
+
+
+class TestBudgetsPanel(unittest.TestCase):
+    """R12: the four budgets, after a compile. The report itself is parsed
+    and tested in tests/test_garage_core.py against real tool output; this
+    covers what the panel does with it.
+    """
+
+    def _report(self):
+        return budgets_core.build_report(MEMORY_CHECK_OUTPUT, BANK_REPORT_OUTPUT)
+
+    def test_before_any_compile_it_says_so_rather_than_showing_empty_meters(self):
+        panel = BudgetsPanel()
+
+        self.assertIn("No compile yet", panel.status_text())
+        self.assertEqual(panel.budget_keys(), [])
+
+    def test_it_shows_the_four_budgets_r12_names(self):
+        panel = BudgetsPanel()
+
+        panel.set_report(self._report())
+
+        self.assertEqual(
+            panel.budget_keys(), ["wram", "vram", "oam", "rom-banks"]
+        )
+
+    def test_the_numbers_are_the_tools_numbers(self):
+        # AC12: the same numbers as `make memory-check`.
+        panel = BudgetsPanel()
+
+        panel.set_report(self._report())
+
+        self.assertEqual(panel.value_text("wram"), "1,534 / 8,192 bytes")
+        self.assertEqual(panel.value_text("vram"), "76 / 384 tiles")
+        self.assertEqual(panel.value_text("oam"), "32 / 40 sprites")
+        self.assertEqual(panel.verdict_text("oam"), "WARN")
+        self.assertEqual(panel.verdict_text("wram"), "PASS")
+
+    def test_each_meter_carries_the_status_the_stylesheet_selects_on(self):
+        panel = BudgetsPanel()
+
+        panel.set_report(self._report())
+
+        self.assertEqual(panel.status_of("wram"), "pass")
+        self.assertEqual(panel.status_of("oam"), "warn")
+
+    def test_an_unmeasured_budget_reads_as_blocked_with_no_numbers(self):
+        panel = BudgetsPanel()
+
+        panel.set_report(budgets_core.build_report(MEMORY_CHECK_OUTPUT, ""))
+
+        self.assertEqual(panel.verdict_text("rom-banks"), "BLOCKED")
+        self.assertEqual(panel.value_text("rom-banks"), "—")
+        self.assertEqual(panel.status_of("rom-banks"), "blocked")
+
+    def test_the_per_scene_oam_peaks_are_listed_with_the_busiest_marked(self):
+        panel = BudgetsPanel()
+
+        panel.set_report(self._report())
+
+        rows = panel.scene_rows()
+        self.assertEqual(len(rows), 7)
+        self.assertTrue(any("Playing" in row and "32 / 40" in row for row in rows))
+        peaks = [
+            label.text()
+            for label in panel.findChildren(QLabel)
+            if label.objectName() == "budgets-scene"
+            and label.property("peak") == "true"
+        ]
+        self.assertEqual(len(peaks), 1)
+        self.assertIn("Playing", peaks[0])
+
+    def test_a_second_report_replaces_the_first(self):
+        panel = BudgetsPanel()
+        panel.set_report(self._report())
+
+        panel.set_report(budgets_core.build_report("", ""))
+
+        self.assertEqual(panel.verdict_text("wram"), "BLOCKED")
+        self.assertEqual(panel.scene_rows(), [])
+
+    def test_the_stylesheet_colours_every_meter_status(self):
+        sheet = theme.build_stylesheet()
+
+        for status in ("pass", "warn", "fail", "blocked"):
+            self.assertIn(f'QProgressBar#budgets-meter[status="{status}"]', sheet)
+            self.assertIn(f'QLabel#budgets-verdict[status="{status}"]', sheet)
+
+
+class TestCompileBarBudgets(CompileBarFixture, unittest.TestCase):
+    """The compile bar reads the budgets out of what it just streamed, and
+    gates Emulicious on them (R12, R13).
+    """
+
+    def _print_command(self, text, label, target):
+        return make_runner.Command(
+            argv=(sys.executable, "-c", f"print({text!r})"), label=label, target=target
+        )
+
+    def test_a_build_also_runs_the_two_measuring_targets(self):
+        # R12 asks for budgets *after a compile*; a panel that only fills
+        # in when the user presses a second button is usually stale.
+        bar = self._bar()
+
+        with mock.patch.object(make_runner, "needs_clean_build", return_value=False):
+            with mock.patch.object(bar, "_start") as start:
+                bar.run_build()
+
+        self.assertEqual(
+            [c.target for c in start.call_args[0][0]],
+            ["build", "memory-check", "bank-post-build"],
+        )
+
+    def test_a_clean_build_runs_them_too(self):
+        bar = self._bar()
+
+        with mock.patch.object(bar, "_start") as start:
+            bar.run_clean_build()
+
+        self.assertEqual(
+            [c.target for c in start.call_args[0][0]],
+            ["clean", "build", "memory-check", "bank-post-build"],
+        )
+
+    def test_the_budgets_are_read_from_the_output_of_the_run(self):
+        bar = self._bar()
+        received = []
+        bar.budgets_read.connect(received.append)
+
+        self._run_and_wait(
+            bar,
+            [
+                self._print_command(
+                    MEMORY_CHECK_OUTPUT, "make memory-check", "memory-check"
+                ),
+                self._print_command(
+                    BANK_REPORT_OUTPUT, "make bank-post-build", "bank-post-build"
+                ),
+            ],
+        )
+
+        report = bar.budget_report
+        self.assertIsNotNone(report)
+        self.assertEqual(report.budget("wram").used, 1534)
+        self.assertEqual(report.budget("oam").status, budgets_core.WARN)
+        self.assertEqual(report.budget("rom-banks").hint, "busiest ROM_1 100%")
+        self.assertIn("budgets WARN", bar.status_text())
+        self.assertEqual(received, [report])
+
+    def test_a_run_that_measures_nothing_leaves_the_last_budgets_alone(self):
+        # A bare `make clean` says nothing about memory; replacing good
+        # numbers with blanks would be worse than keeping them.
+        bar = self._bar()
+        self._run_and_wait(
+            bar,
+            [
+                self._print_command(
+                    MEMORY_CHECK_OUTPUT, "make memory-check", "memory-check"
+                )
+            ],
+        )
+        first = bar.budget_report
+
+        self._run_and_wait(
+            bar, [self._print_command("cleaned", "make clean", "clean")]
+        )
+
+        self.assertIs(bar.budget_report, first)
+
+    def test_output_is_attributed_to_the_target_that_printed_it(self):
+        bar = self._bar()
+
+        self._run_and_wait(
+            bar,
+            [
+                self._print_command("from the build", "make", "build"),
+                self._print_command("from the check", "make memory-check", "memory-check"),
+            ],
+        )
+
+        self.assertIn("from the build", bar.output_for("build"))
+        self.assertNotIn("from the check", bar.output_for("build"))
+        self.assertIn("from the check", bar.output_for("memory-check"))
+
+
+class TestEmuliciousGateInThePanel(CompileBarFixture, unittest.TestCase):
+    """AC13: Garage does not start Emulicious when a memory budget result
+    is FAIL. Every test here would start a real emulator if the gate let
+    it through, so `emulicious.launch` is patched and its call count is the
+    assertion.
+    """
+
+    def _rom(self):
+        rom = self.worktree / "build" / "nuke-raider.gb"
+        rom.parent.mkdir(parents=True, exist_ok=True)
+        rom.write_bytes(b"\0")
+        return rom
+
+    def _jar(self):
+        jar = Path(self._tmp.name) / "Emulicious.jar"
+        jar.write_text("", encoding="utf-8")
+        return jar
+
+    def _bar_with(self, memory_text, bank_text=BANK_REPORT_OUTPUT):
+        bar = self._bar()
+        self._rom()
+        jar = self._jar()
+        bar.emulicious_jar = lambda: jar
+        bar._budget_report = budgets_core.build_report(memory_text, bank_text)
+        return bar
+
+    def test_a_failing_budget_does_not_start_the_emulator(self):
+        over = MEMORY_CHECK_OUTPUT.replace(
+            "WRAM:  1,534 / 8,192 bytes   (18%)  PASS",
+            "WRAM:  8,400 / 8,192 bytes   (103%)  FAIL",
+        )
+        bar = self._bar_with(over)
+
+        with mock.patch.object(emulicious, "launch") as launch:
+            refusal = bar.launch_emulicious()
+
+        launch.assert_not_called()
+        self.assertIn("WRAM", refusal)
+        self.assertIn("WRAM", bar.log_text())
+        self.assertIn("refused", bar.status_text())
+
+    def test_a_warn_build_does_start_the_emulator(self):
+        # The build that ships today is OAM 32/40 WARN.
+        bar = self._bar_with(MEMORY_CHECK_OUTPUT)
+
+        with mock.patch.object(emulicious, "launch") as launch:
+            refusal = bar.launch_emulicious()
+
+        self.assertIsNone(refusal)
+        launch.assert_called_once()
+        self.assertIn("Emulicious started", bar.status_text())
+        self.assertIn("-jar", bar.log_text())
+
+    def test_no_rom_does_not_start_the_emulator(self):
+        bar = self._bar()
+        jar = self._jar()
+        bar.emulicious_jar = lambda: jar
+
+        with mock.patch.object(emulicious, "launch") as launch:
+            refusal = bar.launch_emulicious()
+
+        launch.assert_not_called()
+        self.assertIn("Build first", refusal)
+
+    def test_the_gate_can_be_read_without_pressing_the_button(self):
+        over = MEMORY_CHECK_OUTPUT.replace(
+            "OAM:   32 / 40 sprites  (80%)  WARN", "OAM:   48 / 40 sprites  (120%)  FAIL"
+        )
+        bar = self._bar_with(over)
+
+        self.assertIn("OAM", bar.launch_refusal())
+
+    def test_a_failing_budget_is_stated_in_the_status_line_after_the_run(self):
+        # Before the user reaches for Launch and is told no.
+        bar = self._bar()
+        over = MEMORY_CHECK_OUTPUT.replace(
+            "WRAM:  1,534 / 8,192 bytes   (18%)  PASS",
+            "WRAM:  8,400 / 8,192 bytes   (103%)  FAIL",
+        )
+
+        self._run_and_wait(
+            bar,
+            [
+                make_runner.Command(
+                    argv=(sys.executable, "-c", f"print({over!r})"),
+                    label="make memory-check",
+                    target="memory-check",
+                )
+            ],
+        )
+
+        self.assertIn("launch blocked", bar.status_text())
 
 
 if __name__ == "__main__":

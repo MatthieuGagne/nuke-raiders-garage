@@ -22,6 +22,12 @@ names / dynamic properties the panels already expose for this purpose:
   cannot be selected by object name alone).
 - `#garage-toolchain-status` -- the one-line toolchain failure notice under
   the header (`tools/garage/app.py`), shown only when a check failed.
+- `#budgets-panel`, `#budgets-title`, `#budgets-status`, `#budgets-name`,
+  `#budgets-value`, `#budgets-meter`, `#budgets-verdict`, `#budgets-hint`,
+  `#budgets-scene`, `#budgets-scenes-title` -- the budgets aside
+  (`tools/garage/panels/budgets.py`). `[status="pass"|"warn"|"fail"|
+  "blocked"]` colours the meter's chunk and the verdict chip;
+  `[peak="true"]` marks the scene that decides the OAM verdict.
 - `#compile-controls`, `#compile-dot`, `#compile-status`, `#compile-log`
   and the `[role="primary"|"danger"]` buttons -- the compile bar
   (`tools/garage/panels/compile_bar.py`). `[state="busy"|"pass"|"fail"]` on
@@ -234,6 +240,89 @@ QLabel#garage-header {{
     background-color: {t['surface-2']};
     border-bottom: 1px solid {t['line']};
     padding: 8px 12px;
+}}
+
+/* ============================================================
+   Budgets aside (tools/garage/panels/budgets.py). The
+   prototype's meter: name and numbers, a 6px bar coloured by
+   result, then the verdict chip and a hint.
+   ============================================================ */
+QWidget#budgets-panel {{
+    background-color: {t['surface']};
+    border-left: 1px solid {t['line']};
+}}
+QLabel#budgets-title, QLabel#budgets-scenes-title {{
+    color: {t['text-3']};
+    font-weight: 600;
+    /* The prototype's section label: small, spaced, upper case. */
+    font-size: 10px;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+}}
+QLabel#budgets-status {{
+    color: {t['text-2']};
+}}
+QLabel#budgets-name {{
+    color: {t['text']};
+    font-weight: 600;
+}}
+QLabel#budgets-value, QLabel#budgets-hint {{
+    font-family: {FONT_MONO};
+    color: {t['text-3']};
+}}
+QProgressBar#budgets-meter {{
+    background-color: {t['surface-3']};
+    border: none;
+    border-radius: 3px;
+    max-height: 6px;
+    min-height: 6px;
+}}
+QProgressBar#budgets-meter::chunk {{
+    border-radius: 3px;
+    background-color: {t['text-3']};
+}}
+QProgressBar#budgets-meter[status="pass"]::chunk {{
+    background-color: {t['pass']};
+}}
+QProgressBar#budgets-meter[status="warn"]::chunk {{
+    background-color: {t['warn']};
+}}
+QProgressBar#budgets-meter[status="fail"]::chunk {{
+    background-color: {t['fail']};
+}}
+QProgressBar#budgets-meter[status="blocked"]::chunk {{
+    background-color: {t['line']};
+}}
+QLabel#budgets-verdict {{
+    font-family: {FONT_MONO};
+    font-size: 10px;
+    letter-spacing: 1px;
+    border-radius: 2px;
+    padding: 1px 6px;
+}}
+QLabel#budgets-verdict[status="pass"] {{
+    color: {t['pass']};
+    background-color: {t['pass-soft']};
+}}
+QLabel#budgets-verdict[status="warn"] {{
+    color: {t['warn']};
+    background-color: {t['warn-soft']};
+}}
+QLabel#budgets-verdict[status="fail"] {{
+    color: {t['fail']};
+    background-color: {t['fail-soft']};
+}}
+QLabel#budgets-verdict[status="blocked"] {{
+    color: {t['text-3']};
+    background-color: {t['surface-3']};
+}}
+QLabel#budgets-scene {{
+    font-family: {FONT_MONO};
+    color: {t['text-3']};
+}}
+QLabel#budgets-scene[peak="true"] {{
+    color: {t['warn']};
+    font-weight: 600;
 }}
 
 /* ============================================================

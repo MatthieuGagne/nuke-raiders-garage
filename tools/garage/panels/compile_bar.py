@@ -22,7 +22,8 @@ same thing in words.
 """
 from __future__ import annotations
 
-from typing import List, Optional
+import os
+from typing import Dict, List, Optional
 
 from PySide6.QtCore import QObject, QThread, Signal
 from PySide6.QtWidgets import (
@@ -34,7 +35,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from tools.garage.core import make_runner
+from tools.garage.core import budgets as budgets_core
+from tools.garage.core import doctor as doctor_core
+from tools.garage.core import emulicious, make_runner
 from tools.garage.core.project import Binding, BindingError
 
 # Height of the log, in lines of text. The prototype gives it a fixed
@@ -62,7 +65,7 @@ class _RunWorker(QObject):
     """
 
     line = Signal(str)
-    command_started = Signal(str)
+    command_started = Signal(str, str)  # label, target
     done = Signal(object)  # List[make_runner.RunResult]
 
     def __init__(
@@ -82,7 +85,9 @@ class _RunWorker(QObject):
             self._cwd,
             self.line.emit,
             self._cancellation,
-            on_command=lambda command: self.command_started.emit(command.label),
+            on_command=lambda command: self.command_started.emit(
+                command.label, command.target
+            ),
         )
         self.done.emit(results)
 
@@ -98,6 +103,7 @@ class CompileBar(QWidget):
     """
 
     ran = Signal(object)  # List[make_runner.RunResult]
+    budgets_read = Signal(object)  # budgets_core.BudgetReport | None
 
     def __init__(
         self,
@@ -118,6 +124,11 @@ class CompileBar(QWidget):
         # report says so, instead of leaving the user to read a
         # FileNotFoundError and re-derive what Garage knew at launch.
         self._doctor_report = None
+        # Output captured per make target, so the measuring targets can be
+        # parsed into budgets (R12) without a second run of anything.
+        self._output: Dict[str, List[str]] = {}
+        self._current_target = ""
+        self._budget_report: Optional[budgets_core.BudgetReport] = None
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -146,6 +157,10 @@ class CompileBar(QWidget):
             lambda: self.run_target("bank-post-build")
         )
         row.addWidget(self.bank_check_button)
+
+        self.launch_button = self._button("Launch in Emulicious", "compile-launch")
+        self.launch_button.clicked.connect(self.launch_emulicious)
+        row.addWidget(self.launch_button)
 
         self.stop_button = self._button("Stop", "compile-stop")
         self.stop_button.setProperty("role", "danger")
@@ -179,6 +194,7 @@ class CompileBar(QWidget):
             self.clean_build_button,
             self.memory_check_button,
             self.bank_check_button,
+            self.launch_button,
         ]
 
         if self.binding is None:
@@ -232,8 +248,21 @@ class CompileBar(QWidget):
     def run_target(self, target: str) -> None:
         """One of R11's four calls. An unknown target raises out of
         `make_runner.make_command` rather than running anything.
+
+        A build is followed by the two measuring targets, the way the
+        prototype's log shows them and the way the game repository's own
+        post-build hook runs them: R12 asks for the budgets *after a
+        compile*, and a budget panel that only fills in when the user
+        remembers to press a second button is a budget panel that is
+        usually stale. They cost about a second between them.
         """
-        self._start([make_runner.make_command(target)], expects_rom=target == "build")
+        commands = [make_runner.make_command(target)]
+        if target == "build":
+            commands += [
+                make_runner.make_command("memory-check"),
+                make_runner.make_command("bank-post-build"),
+            ]
+        self._start(commands, expects_rom=target == "build")
 
     def run_clean_build(self) -> None:
         """`make clean` then `make`, stopping if the clean fails -- the
@@ -241,9 +270,68 @@ class CompileBar(QWidget):
         repository's own workflow uses before a smoketest.
         """
         self._start(
-            [make_runner.make_command("clean"), make_runner.make_command("build")],
+            [
+                make_runner.make_command("clean"),
+                make_runner.make_command("build"),
+                make_runner.make_command("memory-check"),
+                make_runner.make_command("bank-post-build"),
+            ],
             expects_rom=True,
         )
+
+    def output_for(self, target: str) -> str:
+        """Everything the given make target printed during the last run,
+        as one string -- the input the budget parser reads (R12).
+        """
+        return "\n".join(self._output.get(target, []))
+
+    @property
+    def budget_report(self) -> Optional[budgets_core.BudgetReport]:
+        return self._budget_report
+
+    def emulicious_jar(self):
+        """Where the jar is, resolved exactly the way the Doctor resolves
+        it -- the gate and the toolchain report must never disagree about
+        which file they are talking about.
+        """
+        return doctor_core.resolve_emulicious_jar(
+            doctor_core.load_binding_settings(self.binding), os.environ
+        )
+
+    def launch_refusal(self) -> Optional[str]:
+        """Why pressing Launch would refuse, or None. Exposed so the gate
+        can be read without pressing it (R13/AC13).
+        """
+        if self.binding is None:
+            return self._binding_error_message()
+        return emulicious.refuse_reason(
+            self._budget_report,
+            make_runner.rom_path(self.binding.active_worktree.path),
+            self.emulicious_jar(),
+        )
+
+    def launch_emulicious(self) -> Optional[str]:
+        """Start the emulator on the ROM in the active worktree, unless a
+        refusal applies (R13). Returns the refusal, or None when it
+        started.
+
+        The refusal goes in the log rather than a dialog: it belongs with
+        the compile output that produced the numbers it is about, and a
+        modal would have to be dismissed before the user could read them.
+        """
+        refusal = self.launch_refusal()
+        if refusal is not None:
+            self._append_line(f"Emulicious not started — {refusal}")
+            self.status_label.setText("launch refused — see the log")
+            return refusal
+
+        jar = self.emulicious_jar()
+        rom = make_runner.rom_path(self.binding.active_worktree.path)
+        command = emulicious.launch_command(jar, rom)
+        self._append_line("$ " + " ".join(command))
+        emulicious.launch(jar, rom, cwd=self.binding.active_worktree.path)
+        self.status_label.setText("Emulicious started")
+        return None
 
     def stop(self) -> None:
         """Ask the running sequence to end. The process tree is killed
@@ -280,6 +368,10 @@ class CompileBar(QWidget):
 
         self._expects_rom = expects_rom
         self._cancellation = make_runner.Cancellation()
+        # One run, one set of outputs: budgets from the previous compile
+        # must never be mixed with this one's.
+        self._output = {}
+        self._current_target = ""
 
         self._worker = _RunWorker(
             commands, self.binding.active_worktree.path, self._cancellation
@@ -303,12 +395,18 @@ class CompileBar(QWidget):
         self.stop_button.setEnabled(running)
         self._set_state("busy" if running else self.state())
 
-    def _append_command(self, label: str) -> None:
+    def _append_command(self, label: str, target: str) -> None:
         # The prototype's log echoes each command as a shell line, so the
         # output underneath is attributable to the call that produced it.
+        # The target is remembered so the lines that follow can be handed
+        # to the budget parser as that target's output (R12).
+        self._current_target = target
+        self._output.setdefault(target, [])
         self._append_line(f"$ {label}")
 
     def _append_line(self, text: str) -> None:
+        if self._current_target:
+            self._output.setdefault(self._current_target, []).append(text)
         self.log_view.appendPlainText(text)
         scrollbar = self.log_view.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
@@ -324,11 +422,34 @@ class CompileBar(QWidget):
             )
 
         self._explain_failure(results)
+        self._read_budgets(results)
 
-        self.status_label.setText(self._outcome_text(results))
+        status = self._outcome_text(results)
+        if self._budget_report is not None:
+            status += " · " + self._budget_report.summary()
+            if self._budget_report.has_fail:
+                # R13's refusal, stated where the numbers are, before the
+                # user reaches for Launch and is told no.
+                status += " · launch blocked"
+        self.status_label.setText(status)
         self._set_state(self._outcome_state(results))
         self._set_running(False)
+        self.budgets_read.emit(self._budget_report)
         self.ran.emit(results)
+
+    def _read_budgets(self, results: List[make_runner.RunResult]) -> None:
+        """Turn what the measuring targets printed into the four budgets
+        R12 names. Only a run that actually ran one of them touches the
+        report: a bare `make clean` says nothing about memory, and
+        replacing good numbers with blanks would be worse than keeping
+        them.
+        """
+        ran = {r.command.target for r in results}
+        if not ran & {"memory-check", "bank-post-build"}:
+            return
+        self._budget_report = budgets_core.build_report(
+            self.output_for("memory-check"), self.output_for("bank-post-build")
+        )
 
     def _explain_failure(self, results: List[make_runner.RunResult]) -> None:
         """After a failed run, name the toolchain check that already
@@ -400,7 +521,16 @@ class CompileBar(QWidget):
                 f"{failed.command.label} — failed (exit {failed.exit_code}) "
                 f"after {total:.1f}s"
             )
-        return f"{' && '.join(r.command.label for r in results)} — ok in {total:.1f}s"
+        # The measuring targets are left out of a successful line: their
+        # result is the budget clause the caller appends, and spelling out
+        # "make clean && make && make memory-check && make bank-post-build"
+        # buries the one number the user is waiting for -- how long it took.
+        labels = [
+            r.command.label
+            for r in results
+            if r.command.target not in make_runner.ROM_DEPENDENT_TARGETS
+        ] or [r.command.label for r in results]
+        return f"{' && '.join(labels)} — ok in {total:.1f}s"
 
     # -- helpers ----------------------------------------------------------
 

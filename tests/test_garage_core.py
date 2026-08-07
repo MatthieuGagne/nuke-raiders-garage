@@ -22,9 +22,11 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from tools.garage.core import (  # noqa: E402
+    budgets,
     config_io,
     diff,
     doctor,
+    emulicious,
     make_runner,
     project,
 )
@@ -2132,6 +2134,247 @@ class TestRunSequence(unittest.TestCase):
         )
 
         self.assertEqual(results, [])
+
+
+# -- budgets (R12 / R13 / AC12 / AC13) ---------------------------------------
+#
+# The two fixtures below are verbatim output from a real build of the game
+# repository (a clone, full toolchain, GBDK 4.3 / romusage 1.3.2). AC12 is
+# "the budget panel shows the same numbers as `make memory-check`", so the
+# text those tools actually print is the only honest fixture: a paraphrase
+# would let the parser drift from the format it exists to read.
+
+MEMORY_CHECK_OUTPUT = """\
+python tools/memory_check.py .
+=== GB Memory Validation Report ===
+WRAM:  1,534 / 8,192 bytes   (18%)  PASS
+VRAM:  76 / 384 tiles   (19%)  PASS
+OAM:   32 / 40 sprites  (80%)  WARN  [busiest scene: Playing]
+       cross-check vs pool: PASS — pool MAX_SPRITES=32 matches busiest scene (Playing)
+       per-scene peak OAM:
+         Title      0 / 40   (—)
+         Overmap    1 / 40   (car=1)
+         Hub        1 / 40   (dialog_arrow=1)
+         Prerace    0 / 40   (—)
+         Playing   32 / 40   (player=4, projectiles=8, turrets=8, racers=8, patrol=4)
+         Results    0 / 40   (—)
+         GameOver   0 / 40   (—)
+
+WARN
+"""
+
+BANK_REPORT_OUTPUT = """\
+python tools/bank_post_build.py .
+=== Bank Post-Build Report ===
+ROM_0: 96%  [WARN]
+ROM_1: 100%  [WARN]
+ROM_2: 97%  [WARN]
+ROM_3: 36%  [PASS]
+ROM_31: 61%  [PASS]
+State symbols: OK — all within ROM capacity (32 banks)
+__bank_ symbols: OK
+ROM capacity: OK — 32 banks (cartridge header 0x148), highest bank in use 31
+
+[WARN]
+"""
+
+
+class TestParseMemoryCheck(unittest.TestCase):
+    def test_the_three_memory_budgets_match_the_tools_numbers(self):
+        # AC12, literally: these are the numbers `make memory-check` printed.
+        report = budgets.parse_memory_check(MEMORY_CHECK_OUTPUT)
+
+        wram = report.budget("wram")
+        self.assertEqual((wram.used, wram.limit, wram.unit), (1534, 8192, "bytes"))
+        self.assertEqual((wram.percent, wram.status), (18, budgets.PASS))
+        self.assertEqual(wram.value_text(), "1,534 / 8,192 bytes")
+
+        vram = report.budget("vram")
+        self.assertEqual((vram.used, vram.limit, vram.unit), (76, 384, "tiles"))
+        self.assertEqual(vram.status, budgets.PASS)
+
+        oam = report.budget("oam")
+        self.assertEqual((oam.used, oam.limit, oam.unit), (32, 40, "sprites"))
+        self.assertEqual((oam.percent, oam.status), (80, budgets.WARN))
+        self.assertEqual(oam.hint, "busiest scene: Playing")
+
+    def test_the_per_scene_oam_peaks_are_read(self):
+        report = budgets.parse_memory_check(MEMORY_CHECK_OUTPUT)
+
+        names = [s.name for s in report.scenes]
+        self.assertEqual(
+            names,
+            ["Title", "Overmap", "Hub", "Prerace", "Playing", "Results", "GameOver"],
+        )
+        peak = report.peak_scene()
+        self.assertEqual((peak.name, peak.used, peak.limit), ("Playing", 32, 40))
+        self.assertIn("projectiles=8", peak.detail)
+        # An em dash means "nothing on screen", not a detail worth showing.
+        self.assertEqual(report.scenes[0].detail, "")
+
+    def test_the_cross_check_line_is_not_read_as_a_budget(self):
+        report = budgets.parse_memory_check(MEMORY_CHECK_OUTPUT)
+
+        self.assertEqual(len(report.budgets), 3)
+
+    def test_output_that_is_not_a_report_yields_nothing_rather_than_guesses(self):
+        report = budgets.parse_memory_check("make: *** [Makefile:277] Error 1")
+
+        self.assertEqual(report.budgets, [])
+        self.assertEqual(report.scenes, [])
+
+
+class TestParseBankReport(unittest.TestCase):
+    def test_the_rom_bank_budget_takes_the_worst_bank_and_the_capacity(self):
+        banks = budgets.parse_bank_report(BANK_REPORT_OUTPUT)
+
+        # One bank at 100% is the problem, whatever the others do.
+        self.assertEqual(banks.status, budgets.WARN)
+        self.assertEqual(banks.hint, "busiest ROM_1 100%")
+        # The meter shows the cartridge, from the capacity line.
+        self.assertEqual((banks.used, banks.limit, banks.unit), (31, 32, "banks"))
+        self.assertEqual(banks.percent, 97)
+
+    def test_a_failing_bank_makes_the_budget_fail(self):
+        banks = budgets.parse_bank_report(
+            BANK_REPORT_OUTPUT.replace("ROM_1: 100%  [WARN]", "ROM_1: 100%  [FAIL]")
+        )
+
+        self.assertEqual(banks.status, budgets.FAIL)
+        self.assertEqual(banks.hint, "busiest ROM_1 100%")
+
+    def test_a_report_that_never_ran_is_not_a_budget(self):
+        self.assertIsNone(budgets.parse_bank_report("romusage not found on PATH"))
+        self.assertIsNone(budgets.parse_bank_report(""))
+
+
+class TestBuildReport(unittest.TestCase):
+    def test_the_four_budgets_r12_names_are_always_present(self):
+        report = budgets.build_report(MEMORY_CHECK_OUTPUT, BANK_REPORT_OUTPUT)
+
+        self.assertEqual(
+            [b.key for b in report.budgets], ["wram", "vram", "oam", "rom-banks"]
+        )
+        self.assertEqual(report.status, budgets.WARN)
+        self.assertFalse(report.has_fail)
+
+    def test_a_missing_report_is_blocked_not_absent(self):
+        # Dropping the row would read as "no ROM bank problem", which is
+        # exactly the silence R14 exists to end.
+        report = budgets.build_report(MEMORY_CHECK_OUTPUT, "")
+
+        banks = report.budget("rom-banks")
+        self.assertEqual(banks.status, budgets.BLOCKED)
+        self.assertEqual(banks.value_text(), "—")
+        self.assertFalse(report.has_fail)
+
+    def test_nothing_measured_at_all_still_lists_four_budgets(self):
+        report = budgets.build_report("", "")
+
+        self.assertEqual(len(report.budgets), 4)
+        self.assertTrue(all(b.status == budgets.BLOCKED for b in report.budgets))
+        self.assertEqual(report.status, budgets.BLOCKED)
+
+    def test_summary_names_the_worst_result(self):
+        self.assertEqual(
+            budgets.build_report(MEMORY_CHECK_OUTPUT, BANK_REPORT_OUTPUT).summary(),
+            "budgets WARN: OAM, ROM banks",
+        )
+        all_pass = MEMORY_CHECK_OUTPUT.replace(
+            "OAM:   32 / 40 sprites  (80%)  WARN", "OAM:   12 / 40 sprites  (30%)  PASS"
+        )
+        bank_pass = BANK_REPORT_OUTPUT.replace("[WARN]", "[PASS]")
+        self.assertEqual(
+            budgets.build_report(all_pass, bank_pass).summary(), "budgets all PASS"
+        )
+
+    def test_a_failing_budget_is_reported_as_a_failure(self):
+        over = MEMORY_CHECK_OUTPUT.replace(
+            "WRAM:  1,534 / 8,192 bytes   (18%)  PASS",
+            "WRAM:  8,400 / 8,192 bytes   (103%)  FAIL",
+        )
+
+        report = budgets.build_report(over, BANK_REPORT_OUTPUT)
+
+        self.assertTrue(report.has_fail)
+        self.assertEqual(report.status, budgets.FAIL)
+        self.assertEqual([b.name for b in report.failures], ["WRAM"])
+
+
+class TestEmuliciousGate(unittest.TestCase):
+    """AC13: Garage does not start Emulicious when a memory budget result
+    is FAIL. Nothing here starts a process -- the gate is a pure decision,
+    and that is the half that must never be wrong.
+    """
+
+    def _rig(self, tmp: str):
+        tmp_path = Path(tmp)
+        rom = tmp_path / "build" / "nuke-raider.gb"
+        rom.parent.mkdir(parents=True)
+        rom.write_bytes(b"\0")
+        jar = tmp_path / "Emulicious.jar"
+        jar.write_text("", encoding="utf-8")
+        return rom, jar
+
+    def test_a_warn_build_may_run(self):
+        # The build that ships today is OAM 32/40 WARN. A gate that stops
+        # that is a gate the user learns to route around.
+        with tempfile.TemporaryDirectory() as tmp:
+            rom, jar = self._rig(tmp)
+            report = budgets.build_report(MEMORY_CHECK_OUTPUT, BANK_REPORT_OUTPUT)
+
+            self.assertIsNone(emulicious.refuse_reason(report, rom, jar))
+
+    def test_a_failing_budget_refuses_and_names_the_numbers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rom, jar = self._rig(tmp)
+            over = MEMORY_CHECK_OUTPUT.replace(
+                "WRAM:  1,534 / 8,192 bytes   (18%)  PASS",
+                "WRAM:  8,400 / 8,192 bytes   (103%)  FAIL",
+            )
+            report = budgets.build_report(over, BANK_REPORT_OUTPUT)
+
+            reason = emulicious.refuse_reason(report, rom, jar)
+
+            self.assertIsNotNone(reason)
+            self.assertIn("WRAM", reason)
+            self.assertIn("8,400 / 8,192 bytes", reason)
+
+    def test_no_rom_refuses(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, jar = self._rig(tmp)
+            missing = Path(tmp) / "build" / "not-here.gb"
+
+            reason = emulicious.refuse_reason(None, missing, jar)
+
+            self.assertIn("no ROM", reason)
+            self.assertIn("Build first", reason)
+
+    def test_a_missing_jar_refuses_and_points_at_the_doctor(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rom, _ = self._rig(tmp)
+
+            reason = emulicious.refuse_reason(None, rom, Path(tmp) / "nope.jar")
+
+            self.assertIn("Toolchain", reason)
+
+    def test_an_unmeasured_budget_does_not_refuse(self):
+        # BLOCKED is "the check could not run", not "the ROM is broken".
+        with tempfile.TemporaryDirectory() as tmp:
+            rom, jar = self._rig(tmp)
+            report = budgets.build_report("", "")
+
+            self.assertIsNone(emulicious.refuse_reason(report, rom, jar))
+
+    def test_the_launch_command_is_java_dash_jar(self):
+        jar, rom = Path("C:/T/Emulicious.jar"), Path("C:/w/rom.gb")
+
+        # Native separators, and no shell: unlike GBDK_HOME in the
+        # Makefile, these arguments never pass through bash, so a
+        # backslash in them is a path and not an escape.
+        self.assertEqual(
+            emulicious.launch_command(jar, rom), ["java", "-jar", str(jar), str(rom)]
+        )
 
 
 if __name__ == "__main__":

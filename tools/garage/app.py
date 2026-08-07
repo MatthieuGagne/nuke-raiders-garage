@@ -8,6 +8,9 @@ approved: the Tuner is the whole window body again, the header states
 change *totals* only, and the full diff lives behind a menu action,
 closed until asked for (AC19, AC2).
 
+Iteration 8 adds the budgets aside (R12/AC12) and the Emulicious gate
+(R13/AC13): what a compile spent, beside the values that spend it.
+
 Iteration 7 adds the compile bar (R11/AC11): the four make calls, run in
 the active worktree, with their output as it arrives.
 
@@ -35,6 +38,7 @@ from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
+    QHBoxLayout,
     QLabel,
     QMainWindow,
     QVBoxLayout,
@@ -44,6 +48,7 @@ from PySide6.QtWidgets import (
 from tools.garage import theme
 from tools.garage.core import diff as diff_core
 from tools.garage.core.project import Binding, BindingError, bind
+from tools.garage.panels.budgets import BudgetsPanel
 from tools.garage.panels.compile_bar import CompileBar
 from tools.garage.panels.diff_view import DiffPanel
 from tools.garage.panels.doctor import DoctorPanel
@@ -204,9 +209,24 @@ class GarageWindow(QMainWindow):
         # The Tuner is the window body -- the tuning loop is what Garage
         # shows on launch (R19's redesign: the diff moved behind a menu,
         # see _build_menu / _open_diff below).
-        self.tuner_panel = TunerPanel(self.binding, self.binding_error, parent=central)
+        #
+        # Iteration 8 puts the budgets in a narrow column beside it, where
+        # the prototype's `<aside>` puts them: they are what a tuning edit
+        # is spent against, so they belong in view while the edit is made,
+        # not behind an action. The aside has a fixed width, so the Tuner
+        # takes every pixel a wider window offers.
+        body = QWidget(central)
+        body_layout = QHBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+
+        self.tuner_panel = TunerPanel(self.binding, self.binding_error, parent=body)
         self.tuner_panel.setObjectName("garage-tuner-panel")
-        layout.addWidget(self.tuner_panel, 1)
+        body_layout.addWidget(self.tuner_panel, 1)
+
+        self.budgets_panel = BudgetsPanel(parent=body)
+        body_layout.addWidget(self.budgets_panel)
+
+        layout.addWidget(body, 1)
 
         self.tuner_panel.written.connect(self._on_tuner_written)
 
@@ -217,6 +237,10 @@ class GarageWindow(QMainWindow):
         self.compile_bar = CompileBar(self.binding, self.binding_error, parent=central)
         self.compile_bar.setObjectName("garage-compile-bar")
         self.compile_bar.ran.connect(self._on_compile_ran)
+        # R12: the budgets are read from what the measuring targets printed
+        # during the run that just ended, and shown beside the values that
+        # spend them.
+        self.compile_bar.budgets_read.connect(self.budgets_panel.set_report)
         layout.addWidget(self.compile_bar)
 
         self.setCentralWidget(central)
