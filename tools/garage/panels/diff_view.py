@@ -62,6 +62,16 @@ class DiffPanel(QWidget):
 
         outer = QVBoxLayout(self)
 
+        # Which tree this is a diff *of*. Before worktrees could be
+        # switched (iteration 9), "against HEAD" was the whole answer;
+        # with several checkouts of the same repository open, a diff that
+        # does not name its worktree is a diff you have to take on trust.
+        self._subject_label = QLabel()
+        self._subject_label.setObjectName("diff-subject")
+        self._subject_label.setWordWrap(True)
+        self._subject_label.setText(self._subject_text())
+        outer.addWidget(self._subject_label)
+
         self._status_label = QLabel()
         self._status_label.setObjectName("diff-status")
         self._status_label.setWordWrap(True)
@@ -92,6 +102,20 @@ class DiffPanel(QWidget):
 
     def status_text(self) -> str:
         return self._status_label.text()
+
+    def subject_text(self) -> str:
+        return self._subject_label.text()
+
+    def _subject_text(self) -> str:
+        """The worktree this diff is of, and the branch it is on. Shown
+        whether or not there is anything to display, since "no changes" is
+        also a statement about a particular tree.
+        """
+        if self.binding is None:
+            return "No worktree is bound."
+        worktree = self.binding.active_worktree
+        branch = worktree.branch or "(detached HEAD)"
+        return f"{worktree.path}  [{branch}]  against HEAD"
 
     def file_paths(self) -> List[str]:
         return [f.path for f in self._diff.files] if self._diff else []

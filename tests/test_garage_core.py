@@ -23,6 +23,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from tools.garage.core import (  # noqa: E402
     budgets,
+    commit,
     config_io,
     diff,
     doctor,
@@ -2610,6 +2611,225 @@ class TestDescribeWorktree(WorktreeFixture):
 
         self.assertIn("1 changed", described)
         self.assertIn("1 untracked", described)
+
+
+# -- commit (R5 / R6 / AC5 / AC6) --------------------------------------------
+
+
+class CommitFixture(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp_path = Path(self._tmp.name)
+        self.garage_root = self.tmp_path / "nuke-raider-garage"
+        self.garage_root.mkdir()
+        self.game_repo = make_game_repo(self.tmp_path / "nuke-raider")
+        self.binding = project.bind(self.garage_root)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def on_branch(self, name="feat/tuning"):
+        _run_git(["checkout", "-q", "-b", name], self.game_repo)
+        return project.bind(self.garage_root)
+
+    def change_a_tracked_file(self):
+        (self.game_repo / "README.md").write_text("changed\n", encoding="utf-8")
+
+    def summary(self):
+        return diff.get_change_summary(self.binding.active_worktree.path)
+
+
+class TestCommitRefusals(CommitFixture):
+    def test_master_is_refused_and_says_why(self):
+        # AC5. The fixture starts on master, which is the point.
+        self.change_a_tracked_file()
+
+        reason = commit.refuse_reason(self.binding, "tune the gears", self.summary())
+
+        self.assertIsNotNone(reason)
+        self.assertIn("master", reason)
+        self.assertIn("branch", reason)
+
+    def test_the_branch_is_checked_before_the_message(self):
+        # A user on master cannot fix it by typing more, so that is the
+        # sentence they get.
+        reason = commit.refuse_reason(self.binding, "", self.summary())
+
+        self.assertIn("master", reason)
+
+    def test_an_empty_message_is_refused_on_a_branch(self):
+        binding = self.on_branch()
+        self.change_a_tracked_file()
+
+        reason = commit.refuse_reason(binding, "   ", diff.get_change_summary(
+            binding.active_worktree.path))
+
+        self.assertIn("message is required", reason)
+
+    def test_nothing_to_commit_is_refused(self):
+        binding = self.on_branch()
+
+        reason = commit.refuse_reason(binding, "a message", diff.get_change_summary(
+            binding.active_worktree.path))
+
+        self.assertIn("Nothing to commit", reason)
+
+    def test_untracked_only_is_refused_and_says_they_are_not_included(self):
+        binding = self.on_branch()
+        (self.game_repo / "new.txt").write_text("new\n", encoding="utf-8")
+
+        reason = commit.refuse_reason(binding, "a message", diff.get_change_summary(
+            binding.active_worktree.path))
+
+        self.assertIn("untracked", reason)
+        self.assertIn("terminal", reason)
+
+    def test_a_detached_head_is_refused(self):
+        _run_git(["checkout", "-q", "--detach"], self.game_repo)
+        binding = project.bind(self.garage_root)
+
+        reason = commit.refuse_reason(binding, "a message", None)
+
+        self.assertIn("detached HEAD", reason)
+
+    def test_a_branch_with_a_message_and_a_change_is_allowed(self):
+        binding = self.on_branch()
+        self.change_a_tracked_file()
+
+        self.assertIsNone(
+            commit.refuse_reason(binding, "tune the gears", diff.get_change_summary(
+                binding.active_worktree.path))
+        )
+
+
+class TestCommitCommand(CommitFixture):
+    def test_the_command_commits_tracked_changes_and_never_skips_the_hook(self):
+        command = commit.commit_command("tune the gears")
+
+        self.assertEqual(
+            list(command.argv), ["git", "commit", "-a", "-m", "tune the gears"]
+        )
+        self.assertNotIn("--no-verify", command.argv)
+        # The label must not echo the message back: it can be a paragraph.
+        self.assertEqual(command.label, "git commit -a")
+
+    def test_running_it_puts_the_commit_in_git_log(self):
+        # AC6, through the same runner the panel uses.
+        binding = self.on_branch()
+        self.change_a_tracked_file()
+        lines = []
+
+        result = make_runner.run(
+            commit.commit_command("tune the gears"),
+            binding.active_worktree.path,
+            lines.append,
+        )
+
+        self.assertTrue(result.ok, lines)
+        self.assertIn(
+            "tune the gears", commit.head_line(binding.active_worktree.path)
+        )
+        self.assertTrue(
+            any("tune the gears" in line for line in commit.log_lines(
+                binding.active_worktree.path))
+        )
+
+    def test_a_multiline_message_survives(self):
+        binding = self.on_branch()
+        self.change_a_tracked_file()
+
+        make_runner.run(
+            commit.commit_command("subject line\n\nA body paragraph."),
+            binding.active_worktree.path,
+            lambda line: None,
+        )
+
+        self.assertIn("subject line", commit.head_line(binding.active_worktree.path))
+        body = _run_git(["log", "-1", "--format=%b"], self.game_repo).stdout
+        self.assertIn("A body paragraph.", body)
+
+
+class TestStaleIndexLock(CommitFixture):
+    """Garage stops a run by killing the process tree, which is the one
+    exit git does not control: it leaves the index lock it was holding, and
+    every later git write in that worktree fails on it. Found by pressing
+    Stop and then Build.
+    """
+
+    def test_the_git_dir_of_a_linked_worktree_is_its_own(self):
+        worktree_root = self.tmp_path / "worktrees"
+        path = worktrees.create(self.game_repo, worktree_root, "feat/spike")
+
+        directory = commit.git_dir(path)
+
+        self.assertEqual(directory.name, "feat-spike")
+        self.assertEqual(directory.parent.name, "worktrees")
+        self.assertTrue(directory.is_dir())
+
+    def test_a_stale_lock_is_removed_and_the_removal_is_stated(self):
+        lock = commit.git_dir(self.game_repo) / "index.lock"
+        lock.write_bytes(b"stale")
+
+        message = commit.remove_stale_index_lock(self.game_repo)
+
+        self.assertFalse(lock.exists())
+        self.assertIn("index.lock", message)
+        self.assertIn("refuse every later write", message)
+
+    def test_a_lock_in_a_linked_worktree_is_found_where_git_keeps_it(self):
+        # Not in the repository's own .git, which is where a naive
+        # implementation would look and find nothing.
+        worktree_root = self.tmp_path / "worktrees"
+        path = worktrees.create(self.game_repo, worktree_root, "feat/spike")
+        lock = commit.git_dir(path) / "index.lock"
+        lock.write_bytes(b"stale")
+
+        message = commit.remove_stale_index_lock(path)
+
+        self.assertFalse(lock.exists())
+        self.assertIsNotNone(message)
+        self.assertFalse((self.game_repo / ".git" / "index.lock").exists())
+
+    def test_no_lock_means_nothing_to_say_and_nothing_removed(self):
+        self.assertIsNone(commit.remove_stale_index_lock(self.game_repo))
+
+    def test_a_path_that_is_not_a_repository_is_harmless(self):
+        self.assertIsNone(commit.remove_stale_index_lock(self.tmp_path))
+
+    def test_a_locked_index_blocks_git_until_it_is_removed(self):
+        # The failure the user hit, reproduced: with the lock in place git
+        # refuses to write, and removing it restores the worktree.
+        self.on_branch()
+        self.change_a_tracked_file()
+        lock = commit.git_dir(self.game_repo) / "index.lock"
+        lock.write_bytes(b"stale")
+
+        blocked = make_runner.run(
+            commit.commit_command("blocked"), self.game_repo, lambda line: None
+        )
+        self.assertFalse(blocked.ok)
+
+        commit.remove_stale_index_lock(self.game_repo)
+
+        allowed = make_runner.run(
+            commit.commit_command("allowed"), self.game_repo, lambda line: None
+        )
+        self.assertTrue(allowed.ok)
+        self.assertIn("allowed", commit.head_line(self.game_repo))
+
+
+class TestDescribePending(CommitFixture):
+    def test_it_states_the_totals_and_what_is_left_out(self):
+        self.change_a_tracked_file()
+        (self.game_repo / "new.txt").write_text("new\n", encoding="utf-8")
+
+        described = commit.describe_pending(self.summary())
+
+        self.assertIn("1 file", described)
+        self.assertIn("1 untracked file will not be included", described)
+
+    def test_a_clean_worktree_says_there_is_nothing(self):
+        self.assertIn("No tracked change", commit.describe_pending(self.summary()))
 
 
 if __name__ == "__main__":

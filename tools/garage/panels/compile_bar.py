@@ -9,10 +9,11 @@ instead.
 
 Threading: `tools.garage.core.make_runner` blocks on the subprocess pipe,
 which would freeze the window for the length of a compile, so the run
-happens on a `QThread` and reaches the widgets as signals. Everything that
-touches a widget below runs on the UI thread; the worker only emits. The
-core module knows nothing about any of this -- it takes callables, and the
-worker's callables happen to be `Signal.emit`.
+happens on a worker thread and reaches the widgets as signals, through
+`tools.garage.panels.runner.RunController`. Everything that touches a
+widget below runs on the UI thread. The core module knows nothing about
+any of this -- it takes callables, and the controller's callables happen
+to be `Signal.emit`.
 
 R18/AC18: no colour and no typeface here. The log is plain text and takes
 its monospace face from the stylesheet; the state of the run is exposed as
@@ -25,7 +26,7 @@ from __future__ import annotations
 import os
 from typing import Dict, List, Optional
 
-from PySide6.QtCore import QObject, QThread, Signal
+from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -39,6 +40,7 @@ from tools.garage.core import budgets as budgets_core
 from tools.garage.core import doctor as doctor_core
 from tools.garage.core import emulicious, make_runner
 from tools.garage.core.project import Binding, BindingError
+from tools.garage.panels.runner import RunController
 
 # Height of the log, in lines of text. The prototype gives it a fixed
 # strip at the bottom of the window; enough to watch a compile scroll past
@@ -52,44 +54,6 @@ CONFIG_CHANGED_NOTE = (
     "repository's Makefile carries no header dependency, so an incremental "
     "build would relink the old values — cleaning first."
 )
-
-# How long the window waits, on close, for a run it just cancelled to end
-# (milliseconds). The kill is already sent; this is only the time the
-# process needs to die and the pipe to close.
-STOP_TIMEOUT_MS = 5000
-
-
-class _RunWorker(QObject):
-    """Runs a sequence of commands on its own thread. It owns no widget;
-    every signal below is delivered to the panel on the UI thread.
-    """
-
-    line = Signal(str)
-    command_started = Signal(str, str)  # label, target
-    done = Signal(object)  # List[make_runner.RunResult]
-
-    def __init__(
-        self,
-        commands: List[make_runner.Command],
-        cwd,
-        cancellation: make_runner.Cancellation,
-    ):
-        super().__init__()
-        self._commands = commands
-        self._cwd = cwd
-        self._cancellation = cancellation
-
-    def run(self) -> None:
-        results = make_runner.run_sequence(
-            self._commands,
-            self._cwd,
-            self.line.emit,
-            self._cancellation,
-            on_command=lambda command: self.command_started.emit(
-                command.label, command.target
-            ),
-        )
-        self.done.emit(results)
 
 
 class CompileBar(QWidget):
@@ -115,9 +79,10 @@ class CompileBar(QWidget):
         self.binding = binding
         self.binding_error = binding_error
 
-        self._thread: Optional[QThread] = None
-        self._worker: Optional[_RunWorker] = None
-        self._cancellation: Optional[make_runner.Cancellation] = None
+        self._runs = RunController(self)
+        self._runs.line.connect(self._append_line)
+        self._runs.command_started.connect(self._append_command)
+        self._runs.finished.connect(self._on_done)
         self._expects_rom = False
         # The startup toolchain report, set by the window once the Doctor
         # has run. A failed target whose missing tool is already in that
@@ -219,7 +184,7 @@ class CompileBar(QWidget):
         self._doctor_report = report
 
     def is_running(self) -> bool:
-        return self._thread is not None
+        return self._runs.is_running()
 
     def status_text(self) -> str:
         return self.status_label.text()
@@ -342,10 +307,11 @@ class CompileBar(QWidget):
         immediately; the run reports itself finished once the pipe closes,
         through the same path a normal end takes.
         """
-        if self._cancellation is not None:
-            self._cancellation.cancel()
-            self.stop_button.setEnabled(False)
-            self.status_label.setText("stopping…")
+        if not self.is_running():
+            return
+        self._runs.stop()
+        self.stop_button.setEnabled(False)
+        self.status_label.setText("stopping…")
 
     def stop_and_wait(self) -> None:
         """Stop a run and wait for its thread, for the window to call on
@@ -353,13 +319,11 @@ class CompileBar(QWidget):
         crash, and a compile that outlives the window it reports to is
         invisible work in the user's worktree.
         """
-        if self._thread is None:
-            return
-        self.stop()
-        # Tear down here rather than waiting for the worker's `done`
-        # signal: that signal is queued to the UI thread, and on the way
-        # out of the window there is no event loop left to deliver it on.
-        self._teardown()
+        # The controller stops the process tree and joins the thread here
+        # rather than waiting for its `finished` signal: that signal is
+        # queued to the UI thread, and on the way out of the window there
+        # is no event loop left to deliver it on.
+        self._runs.stop_and_wait()
 
     # -- the run ----------------------------------------------------------
 
@@ -371,27 +335,18 @@ class CompileBar(QWidget):
             return
 
         self._expects_rom = expects_rom
-        self._cancellation = make_runner.Cancellation()
         # One run, one set of outputs: budgets from the previous compile
         # must never be mixed with this one's.
         self._output = {}
         self._current_target = ""
 
-        self._worker = _RunWorker(
-            commands, self.binding.active_worktree.path, self._cancellation
-        )
-        self._thread = QThread(self)
-        self._worker.moveToThread(self._thread)
-        self._thread.started.connect(self._worker.run)
-        self._worker.line.connect(self._append_line)
-        self._worker.command_started.connect(self._append_command)
-        self._worker.done.connect(self._on_done)
+        if not self._runs.start(commands, self.binding.active_worktree.path):
+            return
 
         self._set_running(True)
         self.status_label.setText(
             f"{' && '.join(c.label for c in commands)} — running…"
         )
-        self._thread.start()
 
     def _set_running(self, running: bool) -> None:
         for button in self._buttons:
@@ -416,8 +371,6 @@ class CompileBar(QWidget):
         scrollbar.setValue(scrollbar.maximum())
 
     def _on_done(self, results: List[make_runner.RunResult]) -> None:
-        self._teardown()
-
         if self._expects_rom and results and all(r.ok for r in results):
             # AC11: say whether the ROM is actually there, in the active
             # worktree, rather than inferring it from an exit code.
@@ -490,32 +443,6 @@ class CompileBar(QWidget):
         )
         for line in explanations:
             self._append_line(line)
-
-    def _teardown(self) -> None:
-        """End one run's thread and worker, and forget them. Called both
-        from `_on_done` (the run ended on its own) and from
-        `stop_and_wait` (the window is closing).
-
-        The worker's signals are disconnected first: after this, a queued
-        emission still in flight has nowhere to land, which is what keeps a
-        late line from reaching widgets that are on their way out. Qt
-        allows disconnecting during an emission, which is exactly the
-        `_on_done` case.
-        """
-        thread, worker = self._thread, self._worker
-        self._thread, self._worker, self._cancellation = None, None, None
-        if worker is not None:
-            for signal in (worker.line, worker.command_started, worker.done):
-                try:
-                    signal.disconnect()
-                except (RuntimeError, TypeError):
-                    pass
-        if thread is not None:
-            thread.quit()
-            thread.wait(STOP_TIMEOUT_MS)
-            thread.deleteLater()
-        if worker is not None:
-            worker.deleteLater()
 
     @staticmethod
     def _outcome_state(results: List[make_runner.RunResult]) -> str:

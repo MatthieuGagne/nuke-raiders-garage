@@ -8,6 +8,9 @@ approved: the Tuner is the whole window body again, the header states
 change *totals* only, and the full diff lives behind a menu action,
 closed until asked for (AC19, AC2).
 
+Iteration 10 adds the commit dialog (R5/R6, AC5/AC6): a message, the
+`master` refusal, and the pre-commit verification streamed while it runs.
+
 Iteration 9 adds the worktrees dialog (R3/R4, AC3/AC4). Activating one
 rebuilds the whole body through `_build_ui`, so no panel is left pointing
 at the tree Garage no longer means.
@@ -59,6 +62,7 @@ from tools.garage.core.project import (
     default_garage_root,
 )
 from tools.garage.panels.budgets import BudgetsPanel
+from tools.garage.panels.commit import CommitPanel
 from tools.garage.panels.compile_bar import CompileBar
 from tools.garage.panels.diff_view import DiffPanel
 from tools.garage.panels.doctor import DoctorPanel
@@ -307,12 +311,14 @@ class GarageWindow(QMainWindow):
         self.diff_panel.setObjectName("garage-diff-panel")
         self.diff_dialog = QDialog(self)
         self.diff_dialog.setObjectName("garage-diff-dialog")
-        self.diff_dialog.setWindowTitle("Diff against HEAD")
+        self.diff_dialog.setWindowTitle(self._diff_dialog_title())
         dialog_layout = QVBoxLayout(self.diff_dialog)
         dialog_layout.addWidget(self.diff_panel)
         self.diff_dialog.resize(900, 700)
         # QDialog starts hidden until show()/exec() is called -- closed at
         # launch is the default, nothing further needed for that.
+
+        self._build_commit()
 
         self._build_doctor()
         # A failed target whose tool the Doctor already reported missing
@@ -320,6 +326,34 @@ class GarageWindow(QMainWindow):
         self.compile_bar.set_doctor_report(self.doctor_panel.report)
 
         self._refresh_header()
+
+    def _build_commit(self) -> None:
+        """R5/R6 in a dialog: the message, the refusals, and the ninety
+        seconds of pre-commit verification streamed. Rebuilt with the body,
+        since what it commits to is the active worktree.
+        """
+        self.commit_panel = CommitPanel(self.binding, self.binding_error)
+        self.commit_panel.setObjectName("garage-commit-panel")
+        self.commit_panel.committed.connect(self._on_committed)
+        self.commit_dialog = QDialog(self)
+        self.commit_dialog.setObjectName("garage-commit-dialog")
+        self.commit_dialog.setWindowTitle("Commit")
+        layout = QVBoxLayout(self.commit_dialog)
+        layout.addWidget(self.commit_panel)
+        self.commit_dialog.resize(900, 700)
+
+    def open_commit(self) -> None:
+        self.commit_panel.refresh()
+        self.commit_dialog.show()
+        self.commit_dialog.raise_()
+        self.commit_dialog.activateWindow()
+
+    def _on_committed(self, head_line: str) -> None:
+        """A commit changes what the worktree holds, so the header totals
+        and any open diff are re-read."""
+        self._refresh_header()
+        if self.diff_dialog.isVisible():
+            self.diff_panel.refresh()
 
     def _build_worktrees(self) -> None:
         """R3's list, create, delete and activate, in a dialog like the
@@ -360,7 +394,7 @@ class GarageWindow(QMainWindow):
         self._rebind()
 
         # The dialogs hold panels bound to the old worktree; they go with it.
-        for dialog in (self.diff_dialog, self.doctor_dialog):
+        for dialog in (self.diff_dialog, self.doctor_dialog, self.commit_dialog):
             dialog.close()
             dialog.deleteLater()
 
@@ -429,7 +463,7 @@ class GarageWindow(QMainWindow):
     def _build_menu(self) -> None:
         menu_bar = self.menuBar()
         view_menu = menu_bar.addMenu("&View")
-        self.show_diff_action = QAction("&Diff Against HEAD…", self)
+        self.show_diff_action = QAction("&Diff of the Active Worktree…", self)
         self.show_diff_action.setObjectName("garage-action-show-diff")
         self.show_diff_action.triggered.connect(self.open_diff)
         view_menu.addAction(self.show_diff_action)
@@ -438,6 +472,11 @@ class GarageWindow(QMainWindow):
         self.show_doctor_action.setObjectName("garage-action-show-doctor")
         self.show_doctor_action.triggered.connect(self.open_doctor)
         view_menu.addAction(self.show_doctor_action)
+
+        self.show_commit_action = QAction("&Commit…", self)
+        self.show_commit_action.setObjectName("garage-action-show-commit")
+        self.show_commit_action.triggered.connect(self.open_commit)
+        view_menu.addAction(self.show_commit_action)
 
         self.show_worktrees_action = QAction("&Worktrees…", self)
         self.show_worktrees_action.setObjectName("garage-action-show-worktrees")
@@ -452,6 +491,17 @@ class GarageWindow(QMainWindow):
         self.doctor_dialog.show()
         self.doctor_dialog.raise_()
         self.doctor_dialog.activateWindow()
+
+    def _diff_dialog_title(self) -> str:
+        """The dialog names the worktree it is a diff of. With several
+        checkouts of one repository open (R3), "Diff against HEAD" alone
+        does not say against which tree's HEAD.
+        """
+        if self.binding is None:
+            return "Diff against HEAD"
+        worktree = self.binding.active_worktree
+        branch = worktree.branch or "(detached HEAD)"
+        return f"Diff — {worktree.path.name} [{branch}] against HEAD"
 
     def open_diff(self) -> None:
         """Show the diff dialog, re-reading git first so it reflects
@@ -511,6 +561,7 @@ class GarageWindow(QMainWindow):
         """
         self.tuner_panel.flush_pending_writes()
         self.compile_bar.stop_and_wait()
+        self.commit_panel.stop_and_wait()
         super().closeEvent(event)
 
 

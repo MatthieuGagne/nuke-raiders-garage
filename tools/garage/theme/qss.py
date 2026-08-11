@@ -22,6 +22,8 @@ names / dynamic properties the panels already expose for this purpose:
   cannot be selected by object name alone).
 - `#garage-toolchain-status` -- the one-line toolchain failure notice under
   the header (`tools/garage/app.py`), shown only when a check failed.
+- `#commit-message`, `#commit-log`, `#commit-pending`, `#commit-status`
+  -- the commit panel (`tools/garage/panels/commit.py`).
 - `#worktrees-row`, `#worktrees-row-label`, `#worktrees-status`,
   `#worktrees-branch-field` -- the worktrees panel
   (`tools/garage/panels/worktrees.py`); `[active="true"]` is the active
@@ -244,6 +246,33 @@ QLabel#garage-header {{
     background-color: {t['surface-2']};
     border-bottom: 1px solid {t['line']};
     padding: 8px 12px;
+}}
+
+/* ============================================================
+   Commit panel (tools/garage/panels/commit.py).
+   ============================================================ */
+QPlainTextEdit#commit-message {{
+    background-color: {t['surface']};
+    color: {t['text']};
+    border: 1px solid {t['line']};
+    border-radius: 3px;
+    padding: 6px 8px;
+    font-family: {FONT_MONO};
+}}
+QPlainTextEdit#commit-message:focus {{
+    border-color: {t['accent']};
+}}
+QPlainTextEdit#commit-log {{
+    background-color: {t['bg']};
+    color: {t['text-2']};
+    font-family: {FONT_MONO};
+    border: 1px solid {t['line']};
+    border-radius: 3px;
+    padding: 6px 8px;
+}}
+QLabel#commit-pending, QLabel#commit-status {{
+    color: {t['text-2']};
+    font-family: {FONT_MONO};
 }}
 
 /* ============================================================
@@ -593,6 +622,14 @@ QPushButton[role="tuner-revert"]:hover {{
 /* ============================================================
    Diff panel (tools/garage/panels/diff_view.py).
    ============================================================ */
+QLabel#diff-subject {{
+    font-family: {FONT_MONO};
+    color: {t['text']};
+    background-color: {t['surface-2']};
+    border: 1px solid {t['line']};
+    border-radius: 4px;
+    padding: 6px 10px;
+}}
 QLabel#diff-status {{
     color: {t['text-2']};
 }}

@@ -31,6 +31,7 @@ from tools.garage import theme
 from tools.garage.app import GarageWindow, format_header, format_header_html
 from tools.garage.core import (
     budgets as budgets_core,
+    commit as commit_core,
     config_io,
     diff as diff_core,
     doctor as doctor_core,
@@ -41,6 +42,7 @@ from tools.garage.core import (
 )
 from tools.garage.core.schema import Schema
 from tools.garage.panels.budgets import BudgetsPanel
+from tools.garage.panels.commit import CommitPanel
 from tools.garage.panels.compile_bar import CompileBar
 from tools.garage.panels.diff_view import DiffPanel
 from tools.garage.panels.doctor import DoctorPanel
@@ -795,6 +797,60 @@ class TestDiffPanel(unittest.TestCase):
             panel.refresh()
 
             self.assertEqual(panel.untracked_files(), ["new.txt"])
+
+
+class TestDiffNamesItsWorktree(unittest.TestCase):
+    """With several checkouts of one repository open (R3), a diff that does
+    not name its worktree is a diff the user has to take on trust.
+    """
+
+    def _window(self, tmp_path):
+        garage_root = tmp_path / "nuke-raider-garage"
+        garage_root.mkdir()
+        make_game_repo_with_config(tmp_path / "nuke-raider", PANEL_CONFIG_TEXT)
+        window = GarageWindow(garage_root=garage_root)
+        self.addCleanup(window.close)
+        return window
+
+    def test_the_panel_names_the_worktree_and_branch_it_is_diffing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            window = self._window(Path(tmp))
+
+            subject = window.diff_panel.subject_text()
+
+            self.assertIn(str(window.binding.active_worktree.path), subject)
+            self.assertIn("master", subject)
+            self.assertIn("against HEAD", subject)
+
+    def test_the_dialog_title_names_it_too(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            window = self._window(Path(tmp))
+
+            title = window.diff_dialog.windowTitle()
+
+            self.assertIn("nuke-raider", title)
+            self.assertIn("master", title)
+
+    def test_the_menu_action_says_which_tree_it_opens(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            window = self._window(Path(tmp))
+
+            self.assertIn("Active Worktree", window.show_diff_action.text())
+
+    def test_both_follow_a_worktree_switch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            window = self._window(Path(tmp))
+            window.worktrees_panel.create_worktree("feat/other")
+            spike = next(
+                w for w in window.worktrees_panel.worktrees()
+                if w.branch == "feat/other"
+            )
+
+            window.activate_worktree(spike)
+
+            self.assertIn(str(spike.path), window.diff_panel.subject_text())
+            self.assertIn("feat/other", window.diff_panel.subject_text())
+            self.assertIn("feat-other", window.diff_dialog.windowTitle())
 
 
 class TestFormatHeader(unittest.TestCase):
@@ -2754,6 +2810,318 @@ class TestGarageWindowWorktreeSwitch(WorktreePanelFixture, unittest.TestCase):
             self.binding.active_worktree.path,
         )
         window.compile_bar.stop_and_wait()
+
+
+class CommitPanelFixture:
+    """A real repo on a branch, with one tracked change ready to commit.
+    No pre-commit hook is installed here: the hook is the game
+    repository's, it takes ninety seconds, and what these tests cover is
+    the panel around it -- the refusals, the streaming and the result.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp_path = Path(self._tmp.name)
+        self.garage_root = self.tmp_path / "nuke-raider-garage"
+        self.garage_root.mkdir()
+        self.game_repo = make_game_repo_with_config(
+            self.tmp_path / "nuke-raider", PANEL_CONFIG_TEXT
+        )
+        self.binding = project.bind(self.garage_root)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def on_branch(self, name="feat/tuning"):
+        _run_git(["checkout", "-q", "-b", name], self.game_repo)
+        self.binding = project.bind(self.garage_root)
+        return self.binding
+
+    def change_config(self):
+        path = self.game_repo / "src" / "config.h"
+        path.write_text(
+            PANEL_CONFIG_TEXT.replace("GEAR1_MAX_SPEED        2u", "GEAR1_MAX_SPEED        7u"),
+            encoding="utf-8",
+        )
+
+    def panel(self):
+        panel = CommitPanel(self.binding)
+        self.addCleanup(panel.stop_and_wait)
+        return panel
+
+    @staticmethod
+    def wait_until(predicate, timeout_ms=20000):
+        waited = 0
+        while waited < timeout_ms and not predicate():
+            QTest.qWait(20)
+            waited += 20
+        return predicate()
+
+    def git_log(self):
+        return _run_git(["log", "--format=%s"], self.game_repo).stdout
+
+
+class TestCommitPanelRefusals(CommitPanelFixture, unittest.TestCase):
+    def test_master_is_refused_and_the_button_says_so_before_it_is_pressed(self):
+        # AC5: it refuses, and states the reason.
+        self.change_config()
+        panel = self.panel()
+        panel.set_message("tune the gears")
+
+        self.assertIn("master", panel.refusal())
+        self.assertFalse(panel.commit_button.isEnabled())
+        self.assertIn("master", panel.status_text())
+        self.assertIn("master", panel.commit_button.toolTip())
+
+    def test_pressing_commit_on_master_commits_nothing(self):
+        self.change_config()
+        panel = self.panel()
+        panel.set_message("tune the gears")
+        before = self.git_log()
+
+        refusal = panel.commit()
+
+        self.assertIn("master", refusal)
+        self.assertFalse(panel.is_running())
+        self.assertEqual(self.git_log(), before)
+
+    def test_an_empty_message_disables_the_button_on_a_branch(self):
+        self.on_branch()
+        self.change_config()
+        panel = self.panel()
+
+        self.assertIn("message is required", panel.refusal())
+        self.assertFalse(panel.commit_button.isEnabled())
+
+        panel.set_message("tune the gears")
+
+        self.assertIsNone(panel.refusal())
+        self.assertTrue(panel.commit_button.isEnabled())
+        self.assertIn("ready to commit", panel.status_text())
+
+    def test_it_states_what_the_commit_would_carry(self):
+        self.on_branch()
+        self.change_config()
+        (self.game_repo / "scratch.txt").write_text("notes", encoding="utf-8")
+        panel = self.panel()
+
+        self.assertIn("1 file", panel.pending_text())
+        self.assertIn("1 untracked file will not be included", panel.pending_text())
+
+
+class TestCommitPanelCommitting(CommitPanelFixture, unittest.TestCase):
+    def test_a_commit_made_in_garage_appears_in_git_log(self):
+        # AC6, through the panel, with the real git.
+        self.on_branch()
+        self.change_config()
+        panel = self.panel()
+        panel.set_message("tune the gears")
+        received = []
+        panel.committed.connect(received.append)
+
+        panel.commit()
+
+        self.assertTrue(self.wait_until(lambda: not panel.is_running()))
+        self.assertIn("tune the gears", self.git_log())
+        self.assertIn("tune the gears", panel.status_text())
+        self.assertEqual(len(received), 1)
+        self.assertIn("tune the gears", received[0])
+
+    def test_the_message_is_cleared_and_the_panel_re_reads_the_worktree(self):
+        self.on_branch()
+        self.change_config()
+        panel = self.panel()
+        panel.set_message("tune the gears")
+
+        panel.commit()
+        self.assertTrue(self.wait_until(lambda: not panel.is_running()))
+
+        self.assertEqual(panel.message(), "")
+        self.assertIn("No tracked change", panel.pending_text())
+        # The message is empty again, so that is the refusal now -- the
+        # branch/message/nothing-to-commit order puts it first.
+        self.assertIn("message is required", panel.refusal())
+        self.assertFalse(panel.commit_button.isEnabled())
+
+    def test_the_command_is_echoed_and_gits_output_is_shown(self):
+        # R6: the verification's output arrives in the log. Here the hook
+        # is absent, so what is proven is that git's own output lands
+        # there, through the path the hook's output takes.
+        self.on_branch()
+        self.change_config()
+        panel = self.panel()
+        panel.set_message("tune the gears")
+
+        panel.commit()
+        self.assertTrue(self.wait_until(lambda: not panel.is_running()))
+
+        self.assertIn("$ git commit -a", panel.log_text())
+        self.assertIn("1 file changed", panel.log_text())
+
+    def test_a_commit_git_rejects_is_reported_and_nothing_is_committed(self):
+        self.on_branch()
+        panel = self.panel()
+        # Nothing changed, so git exits 1. The panel's own refusal would
+        # normally catch this first; bypassing it exercises the failure
+        # path a pre-commit hook takes when it rejects the commit.
+        panel.set_message("nothing here")
+        panel._summary = None
+        before = self.git_log()
+
+        panel.commit()
+
+        self.assertTrue(self.wait_until(lambda: not panel.is_running()))
+        self.assertIn("refused by git", panel.status_text())
+        self.assertEqual(self.git_log(), before)
+
+    def test_the_buttons_swap_while_the_verification_runs(self):
+        self.on_branch()
+        self.change_config()
+        panel = self.panel()
+        panel.set_message("tune the gears")
+
+        panel.commit()
+
+        # Between start and finish the message is read-only: it is the
+        # message git is already using.
+        if panel.is_running():
+            self.assertFalse(panel.commit_button.isEnabled())
+            self.assertTrue(panel.stop_button.isEnabled())
+            self.assertTrue(panel.message_edit.isReadOnly())
+        self.assertTrue(self.wait_until(lambda: not panel.is_running()))
+        self.assertFalse(panel.stop_button.isEnabled())
+        self.assertFalse(panel.message_edit.isReadOnly())
+
+
+class TestCommitPanelStopLeavesTheWorktreeUsable(
+    CommitPanelFixture, unittest.TestCase
+):
+    """The sequence the user hit: Stop during the verification, then
+    Build. Garage kills the process tree, git never gets to release the
+    index lock it took while staging, and every later git write in that
+    worktree fails with "Another git process seems to be running".
+    """
+
+    # Long enough that the stop lands mid-verification, short enough that
+    # the test cannot outlive it: killing git does not always close the
+    # pipe that its hook's children inherited, so the reader can stay
+    # blocked until the hook itself exits.
+    SLOW_HOOK = "#!/bin/sh\nsleep 5\n"
+
+    def install_slow_hook(self):
+        hooks = self.game_repo / ".git" / "hooks"
+        hooks.mkdir(parents=True, exist_ok=True)
+        hook = hooks / "pre-commit"
+        hook.write_text(self.SLOW_HOOK, encoding="utf-8")
+        return hook
+
+    def test_stopping_a_commit_leaves_no_lock_behind(self):
+        self.on_branch()
+        self.change_config()
+        hook = self.install_slow_hook()
+        panel = self.panel()
+        panel.set_message("tune the gears")
+
+        lock = commit_core.git_dir(self.game_repo) / "index.lock"
+        panel.commit()
+        # Wait for git to actually take the lock -- it stages the -a
+        # changes into index.lock *before* running the hook, and stopping
+        # earlier than that would prove nothing about the cleanup.
+        self.assertTrue(
+            self.wait_until(lambda: lock.exists(), 15000),
+            "git never took the index lock",
+        )
+        panel.stop()
+        self.assertTrue(self.wait_until(lambda: not panel.is_running()))
+
+        self.assertIn("stopped", panel.status_text())
+        self.assertFalse(lock.exists(), "the killed commit left its index lock")
+        self.assertIn("index.lock", panel.log_text())
+
+        # The real proof: git can write again. Without the cleanup this
+        # fails with "Unable to create ... index.lock: File exists".
+        hook.unlink()
+        after = make_runner.run(
+            commit_core.commit_command("after the stop"),
+            self.game_repo,
+            lambda line: None,
+        )
+        self.assertTrue(after.ok)
+        self.assertIn("after the stop", self.git_log())
+
+    def test_nothing_is_committed_by_the_stopped_run(self):
+        self.on_branch()
+        self.change_config()
+        self.install_slow_hook()
+        panel = self.panel()
+        panel.set_message("tune the gears")
+        before = self.git_log()
+
+        lock = commit_core.git_dir(self.game_repo) / "index.lock"
+        panel.commit()
+        self.assertTrue(self.wait_until(lambda: lock.exists(), 15000))
+        panel.stop()
+        self.assertTrue(self.wait_until(lambda: not panel.is_running()))
+
+        self.assertEqual(self.git_log(), before)
+
+    def test_closing_the_window_mid_commit_cleans_up_too(self):
+        # `_on_done` never runs on this path -- its signal is queued to an
+        # event loop that is going away -- so the cleanup has to happen in
+        # stop_and_wait as well.
+        self.on_branch()
+        self.change_config()
+        self.install_slow_hook()
+        panel = CommitPanel(self.binding)
+        panel.set_message("tune the gears")
+
+        lock = commit_core.git_dir(self.game_repo) / "index.lock"
+        panel.commit()
+        self.assertTrue(self.wait_until(lambda: lock.exists(), 15000))
+
+        panel.stop_and_wait()
+
+        self.assertFalse(lock.exists())
+
+
+class TestGarageWindowCommitIntegration(CommitPanelFixture, unittest.TestCase):
+    def _window(self):
+        window = GarageWindow(garage_root=self.garage_root)
+        self.addCleanup(window.close)
+        return window
+
+    def test_the_dialog_is_closed_at_launch_and_opens_from_the_menu(self):
+        window = self._window()
+
+        self.assertFalse(window.commit_dialog.isVisible())
+        window.show_commit_action.trigger()
+        self.assertTrue(window.commit_dialog.isVisible())
+        window.commit_dialog.close()
+
+    def test_a_commit_refreshes_the_header(self):
+        window = self._window()
+
+        with mock.patch.object(window, "_refresh_header") as refresh:
+            window.commit_panel.committed.emit("abc1234 tune the gears")
+
+        refresh.assert_called_once()
+
+    def test_the_commit_panel_follows_a_worktree_switch(self):
+        window = self._window()
+        window.worktrees_panel.create_worktree("feat/other")
+        spike = next(
+            w for w in window.worktrees_panel.worktrees() if w.branch == "feat/other"
+        )
+
+        window.activate_worktree(spike)
+
+        self.assertEqual(
+            window.commit_panel.binding.active_worktree.path, spike.path
+        )
+        # And on a branch that is not master, it is no longer refused for
+        # that reason.
+        window.commit_panel.set_message("a message")
+        self.assertNotIn("master", window.commit_panel.refusal() or "")
 
 
 if __name__ == "__main__":
