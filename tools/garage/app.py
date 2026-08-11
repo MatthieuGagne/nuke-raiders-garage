@@ -8,6 +8,10 @@ approved: the Tuner is the whole window body again, the header states
 change *totals* only, and the full diff lives behind a menu action,
 closed until asked for (AC19, AC2).
 
+Iteration 9 adds the worktrees dialog (R3/R4, AC3/AC4). Activating one
+rebuilds the whole body through `_build_ui`, so no panel is left pointing
+at the tree Garage no longer means.
+
 Iteration 8 adds the budgets aside (R12/AC12) and the Emulicious gate
 (R13/AC13): what a compile spent, beside the values that spend it.
 
@@ -47,12 +51,19 @@ from PySide6.QtWidgets import (
 
 from tools.garage import theme
 from tools.garage.core import diff as diff_core
-from tools.garage.core.project import Binding, BindingError, bind
+from tools.garage.core import worktrees as worktrees_core
+from tools.garage.core.project import (
+    Binding,
+    BindingError,
+    bind,
+    default_garage_root,
+)
 from tools.garage.panels.budgets import BudgetsPanel
 from tools.garage.panels.compile_bar import CompileBar
 from tools.garage.panels.diff_view import DiffPanel
 from tools.garage.panels.doctor import DoctorPanel
 from tools.garage.panels.tuner import TunerPanel
+from tools.garage.panels.worktrees import WorktreesPanel
 from tools.garage.theme.tokens import FONT_MONO, TOKENS
 
 
@@ -176,13 +187,46 @@ class GarageWindow(QMainWindow):
         super().__init__(parent)
         self.setWindowTitle("Garage")
 
+        # Kept because a worktree switch re-binds from the same root
+        # (R3: "make one active"), and `bind` needs it again.
+        self.garage_root = (
+            Path(garage_root) if garage_root is not None else default_garage_root()
+        )
+
         self.binding: Optional[Binding] = None
         self.binding_error: Optional[BindingError] = None
+        self._rebind()
+
+        self._build_ui()
+
+        # Built once, and deliberately not rebuilt: it is the panel that
+        # triggers a rebuild, and a widget that deletes itself while
+        # handling its own signal is a crash.
+        self._build_worktrees()
+        self._build_menu()
+
+        # The verification has already run (in the panel's constructor);
+        # this states its result in the window. Opening the Doctor over the
+        # window is deferred to the first showEvent, so it appears over a
+        # window that exists rather than before one does.
+        self._toolchain_reported = False
+        self._report_toolchain()
+
+    def _rebind(self) -> None:
         try:
-            self.binding = bind(garage_root)
+            self.binding = bind(self.garage_root)
+            self.binding_error = None
         except BindingError as exc:
+            self.binding = None
             self.binding_error = exc
 
+    def _build_ui(self) -> None:
+        """Everything that resolves against the active worktree. Called
+        again, whole, when that worktree changes: every panel below holds a
+        binding, and rebuilding them is both shorter and safer than
+        threading a new one through each -- there is no path where half of
+        the window still points at the old tree.
+        """
         central = QWidget(self)
         layout = QVBoxLayout(central)
 
@@ -275,16 +319,61 @@ class GarageWindow(QMainWindow):
         # says so in the compile log -- see CompileBar._explain_failure.
         self.compile_bar.set_doctor_report(self.doctor_panel.report)
 
-        self._build_menu()
-
         self._refresh_header()
 
-        # The verification has already run (in the panel's constructor);
-        # this states its result in the window. Opening the Doctor over the
-        # window is deferred to the first showEvent, so it appears over a
-        # window that exists rather than before one does.
-        self._toolchain_reported = False
+    def _build_worktrees(self) -> None:
+        """R3's list, create, delete and activate, in a dialog like the
+        diff and the Doctor. Switching worktrees is something done between
+        sessions of tuning, not while tuning.
+        """
+        self.worktrees_panel = WorktreesPanel(self.binding, self.binding_error)
+        self.worktrees_panel.setObjectName("garage-worktrees-panel")
+        self.worktrees_panel.activated.connect(self.activate_worktree)
+        self.worktrees_dialog = QDialog(self)
+        self.worktrees_dialog.setObjectName("garage-worktrees-dialog")
+        self.worktrees_dialog.setWindowTitle("Worktrees")
+        layout = QVBoxLayout(self.worktrees_dialog)
+        layout.addWidget(self.worktrees_panel)
+        self.worktrees_dialog.resize(860, 560)
+
+    def open_worktrees(self) -> None:
+        self.worktrees_panel.refresh()
+        self.worktrees_dialog.show()
+        self.worktrees_dialog.raise_()
+        self.worktrees_dialog.activateWindow()
+
+    def activate_worktree(self, worktree) -> Optional[str]:
+        """Make `worktree` the active one and point the whole window at it
+        (R3). Returns a refusal, or None.
+
+        A compile in flight refuses the switch: it is running `make` in the
+        tree Garage is about to stop pointing at, and its output would land
+        in a window describing a different worktree.
+        """
+        if self.compile_bar.is_running():
+            return self.worktrees_panel._set_status(
+                "A compile is running in the current worktree. Stop it before "
+                "switching."
+            )
+
+        worktrees_core.activate(self.garage_root, worktree)
+        self._rebind()
+
+        # The dialogs hold panels bound to the old worktree; they go with it.
+        for dialog in (self.diff_dialog, self.doctor_dialog):
+            dialog.close()
+            dialog.deleteLater()
+
+        self._build_ui()
         self._report_toolchain()
+
+        self.worktrees_panel.binding = self.binding
+        self.worktrees_panel.binding_error = self.binding_error
+        self.worktrees_panel.refresh()
+        self.worktrees_panel._set_status(
+            f"Active worktree is now {worktree.path}"
+        )
+        return None
 
     def _build_doctor(self) -> None:
         """The Doctor lives in its own dialog, for the same reasons the
@@ -349,6 +438,11 @@ class GarageWindow(QMainWindow):
         self.show_doctor_action.setObjectName("garage-action-show-doctor")
         self.show_doctor_action.triggered.connect(self.open_doctor)
         view_menu.addAction(self.show_doctor_action)
+
+        self.show_worktrees_action = QAction("&Worktrees…", self)
+        self.show_worktrees_action.setObjectName("garage-action-show-worktrees")
+        self.show_worktrees_action.triggered.connect(self.open_worktrees)
+        view_menu.addAction(self.show_worktrees_action)
 
     def open_doctor(self) -> None:
         """Show the Doctor. The checks are not re-run here: they read the

@@ -22,6 +22,10 @@ names / dynamic properties the panels already expose for this purpose:
   cannot be selected by object name alone).
 - `#garage-toolchain-status` -- the one-line toolchain failure notice under
   the header (`tools/garage/app.py`), shown only when a check failed.
+- `#worktrees-row`, `#worktrees-row-label`, `#worktrees-status`,
+  `#worktrees-branch-field` -- the worktrees panel
+  (`tools/garage/panels/worktrees.py`); `[active="true"]` is the active
+  row's accent stripe.
 - `#budgets-panel`, `#budgets-title`, `#budgets-status`, `#budgets-name`,
   `#budgets-value`, `#budgets-meter`, `#budgets-verdict`, `#budgets-hint`,
   `#budgets-scene`, `#budgets-scenes-title` -- the budgets aside
@@ -240,6 +244,42 @@ QLabel#garage-header {{
     background-color: {t['surface-2']};
     border-bottom: 1px solid {t['line']};
     padding: 8px 12px;
+}}
+
+/* ============================================================
+   Worktrees panel (tools/garage/panels/worktrees.py). One row
+   per worktree, the active one carrying the prototype's left
+   accent stripe (`table.grid tr.active-wt`).
+   ============================================================ */
+QFrame#worktrees-row {{
+    background-color: {t['surface']};
+    border: 1px solid {t['line-soft']};
+    border-radius: 4px;
+}}
+QFrame#worktrees-row[active="true"] {{
+    background-color: {t['accent-soft']};
+    border-left: 3px solid {t['accent']};
+}}
+QLabel#worktrees-row-label {{
+    font-family: {FONT_MONO};
+    color: {t['text-2']};
+}}
+QFrame#worktrees-row[active="true"] QLabel#worktrees-row-label {{
+    color: {t['text']};
+}}
+QLabel#worktrees-status {{
+    color: {t['text-2']};
+}}
+QLineEdit#worktrees-branch-field {{
+    background-color: {t['surface']};
+    color: {t['text']};
+    border: 1px solid {t['line']};
+    border-radius: 3px;
+    padding: 4px 8px;
+    font-family: {FONT_MONO};
+}}
+QLineEdit#worktrees-branch-field:focus {{
+    border-color: {t['accent']};
 }}
 
 /* ============================================================

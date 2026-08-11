@@ -29,6 +29,7 @@ from tools.garage.core import (  # noqa: E402
     emulicious,
     make_runner,
     project,
+    worktrees,
 )
 from tools.garage.core.schema import Schema, SchemaError  # noqa: E402
 
@@ -2395,6 +2396,220 @@ class TestEmuliciousGate(unittest.TestCase):
         self.assertEqual(
             emulicious.launch_command(jar, rom), ["java", "-jar", str(jar), str(rom)]
         )
+
+
+# -- worktrees (R3 / R4 / AC3 / AC4) -----------------------------------------
+#
+# Real repositories throughout: `git worktree add` and `git worktree
+# remove` are what is being tested, and a mocked git would prove only that
+# the mock agrees with itself. AC3 is literally "appears in `git worktree
+# list`", so that is what the assertion reads.
+
+
+class WorktreeFixture(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp_path = Path(self._tmp.name)
+        self.garage_root = self.tmp_path / "nuke-raider-garage"
+        self.garage_root.mkdir()
+        self.game_repo = make_game_repo(self.tmp_path / "nuke-raider")
+        self.worktree_root = self.tmp_path / "worktrees"
+        self.binding = project.bind(self.garage_root)
+        self.main = self.binding.active_worktree
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def git_worktree_list(self):
+        """`git worktree list` output, as git writes it. It prints forward
+        slashes on Windows, so a caller comparing a Path must compare
+        `as_posix()` -- `str(path)` would never match, which would make an
+        assertNotIn pass whether the worktree was removed or not.
+        """
+        return _run_git(["worktree", "list"], self.game_repo).stdout
+
+    def add_worktree(self, branch="feat/spike"):
+        path = worktrees.create(self.game_repo, self.worktree_root, branch)
+        listed = project.list_worktrees(self.game_repo)
+        return next(w for w in listed if project._same_path(w.path, path))
+
+
+class TestCreateWorktree(WorktreeFixture):
+    def test_a_created_worktree_appears_in_git_worktree_list(self):
+        # AC3, in the words of the criterion.
+        path = worktrees.create(self.game_repo, self.worktree_root, "feat/spike")
+
+        self.assertTrue(path.is_dir())
+        self.assertIn(path.as_posix(), self.git_worktree_list())
+
+    def test_a_branch_name_with_a_slash_gets_a_flat_directory(self):
+        path = worktrees.create(self.game_repo, self.worktree_root, "feat/garage-p1")
+
+        self.assertEqual(path.name, "feat-garage-p1")
+        self.assertEqual(path.parent, self.worktree_root)
+
+    def test_a_new_branch_is_created_and_checked_out(self):
+        worktrees.create(self.game_repo, self.worktree_root, "feat/spike")
+
+        self.assertTrue(worktrees.branch_exists(self.game_repo, "feat/spike"))
+        listed = project.list_worktrees(self.game_repo)
+        self.assertIn("feat/spike", [w.branch for w in listed])
+
+    def test_an_existing_branch_is_checked_out_rather_than_recreated(self):
+        _run_git(["branch", "already-here"], self.game_repo)
+
+        path = worktrees.create(self.game_repo, self.worktree_root, "already-here")
+
+        listed = project.list_worktrees(self.game_repo)
+        branch = next(
+            w.branch for w in listed if project._same_path(w.path, path)
+        )
+        self.assertEqual(branch, "already-here")
+
+    def test_an_invalid_branch_name_is_refused_before_anything_is_created(self):
+        with self.assertRaises(worktrees.WorktreeError) as raised:
+            worktrees.create(self.game_repo, self.worktree_root, "feat/..bad")
+
+        self.assertIn("not a valid branch name", str(raised.exception))
+        self.assertFalse(self.worktree_root.exists())
+
+    def test_an_empty_branch_name_is_refused(self):
+        with self.assertRaises(worktrees.WorktreeError):
+            worktrees.create(self.game_repo, self.worktree_root, "   ")
+
+    def test_an_occupied_directory_is_refused_rather_than_overwritten(self):
+        occupied = self.worktree_root / "taken"
+        occupied.mkdir(parents=True)
+        (occupied / "keep.txt").write_text("mine\n", encoding="utf-8")
+
+        with self.assertRaises(worktrees.WorktreeError) as raised:
+            worktrees.create(self.game_repo, self.worktree_root, "taken")
+
+        self.assertIn("already exists", str(raised.exception))
+        self.assertTrue((occupied / "keep.txt").is_file())
+
+
+class TestDeleteWorktree(WorktreeFixture):
+    """AC4: Garage refuses to delete the active worktree, and refuses to
+    delete a worktree that holds uncommitted changes, stating the reason in
+    both cases.
+    """
+
+    def test_the_active_worktree_is_refused_with_its_reason(self):
+        reason = worktrees.refuse_delete_reason(self.main, self.main)
+
+        self.assertIsNotNone(reason)
+        self.assertIn("active worktree", reason)
+        with self.assertRaises(worktrees.WorktreeError):
+            worktrees.delete(self.game_repo, self.main, self.main, self.main.path.name)
+
+    def test_a_worktree_with_uncommitted_changes_is_refused_with_its_reason(self):
+        spike = self.add_worktree()
+        (spike.path / "README.md").write_text("edited\n", encoding="utf-8")
+
+        reason = worktrees.refuse_delete_reason(spike, self.main)
+
+        self.assertIn("uncommitted work", reason)
+        self.assertIn("1 file", reason)
+        with self.assertRaises(worktrees.WorktreeError):
+            worktrees.delete(self.game_repo, spike, self.main, spike.path.name)
+        self.assertTrue(spike.path.is_dir())
+
+    def test_a_worktree_with_only_untracked_files_is_refused_too(self):
+        # Stricter than R4's letter, on purpose: git will not stop for an
+        # untracked file, and the removal destroys it. It exists nowhere
+        # else.
+        spike = self.add_worktree()
+        (spike.path / "notes.txt").write_text("scratch\n", encoding="utf-8")
+
+        reason = worktrees.refuse_delete_reason(spike, self.main)
+
+        self.assertIn("untracked", reason)
+        self.assertIn("no copy", reason)
+
+    def test_the_main_working_tree_is_refused_even_when_it_is_not_active(self):
+        # With `spike` active, the main tree is no longer refused for being
+        # active -- and must still be refused for being the main one.
+        spike = self.add_worktree()
+        listed = project.list_worktrees(self.game_repo)
+
+        reason = worktrees.refuse_delete_reason(self.main, spike, listed)
+
+        self.assertIn("main working tree", reason)
+
+    def test_the_name_must_be_typed_back_exactly(self):
+        spike = self.add_worktree()
+
+        with self.assertRaises(worktrees.WorktreeError) as raised:
+            worktrees.delete(self.game_repo, spike, self.main, "feat-spik")
+
+        self.assertIn("type its name exactly", str(raised.exception))
+        self.assertTrue(spike.path.is_dir())
+
+    def test_a_clean_worktree_with_the_name_typed_is_removed(self):
+        spike = self.add_worktree()
+
+        worktrees.delete(self.game_repo, spike, self.main, spike.path.name)
+
+        # Prove the listing really does name a worktree that exists, so
+        # the assertNotIn below is not vacuously true.
+        self.assertNotIn(spike.path.as_posix(), self.git_worktree_list())
+        self.assertIn(self.main.path.as_posix(), self.git_worktree_list())
+        self.assertFalse(spike.path.is_dir())
+
+    def test_the_branch_survives_the_worktree(self):
+        # R4: "It must never delete a branch." The work is on the branch;
+        # the worktree is only where it was checked out.
+        spike = self.add_worktree("feat/keep-me")
+
+        worktrees.delete(self.game_repo, spike, self.main, spike.path.name)
+
+        self.assertTrue(worktrees.branch_exists(self.game_repo, "feat/keep-me"))
+
+
+class TestActivateWorktree(WorktreeFixture):
+    def test_activating_records_the_path_and_binds_to_it(self):
+        spike = self.add_worktree()
+
+        worktrees.activate(self.garage_root, spike)
+
+        rebound = project.bind(self.garage_root)
+        self.assertTrue(
+            project._same_path(rebound.active_worktree.path, spike.path)
+        )
+        self.assertEqual(rebound.active_source, "recorded")
+
+    def test_activating_leaves_every_other_setting_alone(self):
+        settings = project.load_settings(self.garage_root)
+        settings["emulicious_jar"] = "C:/Tools/Emulicious/Emulicious.jar"
+        project.save_settings(self.garage_root, settings)
+        spike = self.add_worktree()
+
+        worktrees.activate(self.garage_root, spike)
+
+        after = project.load_settings(self.garage_root)
+        self.assertEqual(after["emulicious_jar"], "C:/Tools/Emulicious/Emulicious.jar")
+        self.assertEqual(after["game_repo"], settings["game_repo"])
+
+
+class TestDescribeWorktree(WorktreeFixture):
+    def test_a_clean_worktree_reads_clean(self):
+        spike = self.add_worktree("feat/clean")
+
+        self.assertEqual(worktrees.describe(spike, self.main), "feat/clean — clean")
+
+    def test_the_active_one_says_so_first(self):
+        self.assertIn("active", worktrees.describe(self.main, self.main))
+
+    def test_a_dirty_worktree_states_its_totals(self):
+        spike = self.add_worktree()
+        (spike.path / "README.md").write_text("edited\n", encoding="utf-8")
+        (spike.path / "new.txt").write_text("new\n", encoding="utf-8")
+
+        described = worktrees.describe(spike, self.main)
+
+        self.assertIn("1 changed", described)
+        self.assertIn("1 untracked", described)
 
 
 if __name__ == "__main__":

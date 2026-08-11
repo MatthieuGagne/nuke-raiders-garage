@@ -21,6 +21,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
     QApplication,
     QLabel,
+    QPushButton,
     QSpinBox,
     QStyle,
     QStyleOptionSpinBox,
@@ -36,6 +37,7 @@ from tools.garage.core import (
     emulicious,
     make_runner,
     project,
+    worktrees as worktrees_core,
 )
 from tools.garage.core.schema import Schema
 from tools.garage.panels.budgets import BudgetsPanel
@@ -43,6 +45,7 @@ from tools.garage.panels.compile_bar import CompileBar
 from tools.garage.panels.diff_view import DiffPanel
 from tools.garage.panels.doctor import DoctorPanel
 from tools.garage.panels.tuner import TunerPanel, compute_derived_dependents
+from tools.garage.panels.worktrees import WorktreesPanel
 
 GAME_REPO_REMOTE_URL = "https://github.com/MatthieuGagne/gmb-nuke-raider.git"
 
@@ -2559,6 +2562,198 @@ class TestEmuliciousGateInThePanel(CompileBarFixture, unittest.TestCase):
         )
 
         self.assertIn("launch blocked", bar.status_text())
+
+
+class WorktreePanelFixture:
+    """A real game repo with a second worktree, so the panel is exercised
+    against `git worktree list` rather than a stand-in."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp_path = Path(self._tmp.name)
+        self.garage_root = self.tmp_path / "nuke-raider-garage"
+        self.garage_root.mkdir()
+        self.game_repo = make_game_repo_with_config(
+            self.tmp_path / "nuke-raider", PANEL_CONFIG_TEXT
+        )
+        self.binding = project.bind(self.garage_root)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def panel(self):
+        return WorktreesPanel(self.binding)
+
+    def spike(self, panel, branch="feat/spike"):
+        panel.create_worktree(branch)
+        return next(
+            w for w in panel.worktrees() if w.branch == branch
+        )
+
+
+class TestWorktreesPanel(WorktreePanelFixture, unittest.TestCase):
+    def test_it_lists_the_worktrees_of_the_game_repository(self):
+        panel = self.panel()
+
+        self.assertEqual(panel.row_paths(), [str(self.binding.game_repo)])
+        self.assertTrue(any("master" in row for row in panel.rows()))
+
+    def test_a_created_worktree_appears_in_the_list_and_in_git(self):
+        # AC3, through the panel the user actually presses.
+        panel = self.panel()
+
+        refusal = panel.create_worktree("feat/spike")
+
+        self.assertIsNone(refusal)
+        self.assertEqual(len(panel.row_paths()), 2)
+        listed = subprocess.run(
+            ["git", "-C", str(self.game_repo), "worktree", "list"],
+            capture_output=True, text=True, check=True,
+        ).stdout
+        self.assertIn("feat-spike", listed)
+
+    def test_an_invalid_branch_name_is_refused_in_the_status_line(self):
+        panel = self.panel()
+
+        refusal = panel.create_worktree("feat/..bad")
+
+        self.assertIn("not a valid branch name", refusal)
+        self.assertIn("not a valid branch name", panel.status_text())
+        self.assertEqual(len(panel.row_paths()), 1)
+
+    def test_deleting_the_active_worktree_is_refused_with_its_reason(self):
+        # AC4, first half.
+        panel = self.panel()
+        active = self.binding.active_worktree
+
+        refusal = panel.delete_worktree(active, active.path.name)
+
+        self.assertIn("active worktree", refusal)
+        self.assertIn("active worktree", panel.status_text())
+        self.assertTrue(active.path.is_dir())
+
+    def test_deleting_a_dirty_worktree_is_refused_with_its_reason(self):
+        # AC4, second half.
+        panel = self.panel()
+        spike = self.spike(panel)
+        (spike.path / "src" / "config.h").write_text(
+            "#define A 1\n", encoding="utf-8"
+        )
+
+        refusal = panel.delete_worktree(spike, spike.path.name)
+
+        self.assertIn("uncommitted work", refusal)
+        self.assertTrue(spike.path.is_dir())
+
+    def test_the_delete_button_is_disabled_before_it_is_pressed(self):
+        # The refusal is computed while the row is built, so a button that
+        # cannot act says so rather than failing on click.
+        panel = self.panel()
+        buttons = [
+            b for b in panel.findChildren(QPushButton)
+            if b.objectName() == "worktrees-delete"
+        ]
+        self.assertEqual(len(buttons), 1)  # the active/main worktree only
+        self.assertFalse(buttons[0].isEnabled())
+        self.assertIn("active worktree", buttons[0].toolTip())
+
+    def test_the_name_must_be_typed_back(self):
+        panel = self.panel()
+        spike = self.spike(panel)
+
+        refusal = panel.delete_worktree(spike, "wrong")
+
+        self.assertIn("type its name exactly", refusal)
+        self.assertTrue(spike.path.is_dir())
+
+    def test_a_clean_worktree_is_deleted_and_its_branch_survives(self):
+        panel = self.panel()
+        spike = self.spike(panel, "feat/keep-me")
+
+        refusal = panel.delete_worktree(spike, spike.path.name)
+
+        self.assertIsNone(refusal)
+        self.assertFalse(spike.path.is_dir())
+        self.assertTrue(worktrees_core.branch_exists(self.game_repo, "feat/keep-me"))
+        self.assertIn("branch is untouched", panel.status_text())
+
+    def test_activating_emits_the_worktree(self):
+        panel = self.panel()
+        spike = self.spike(panel)
+        received = []
+        panel.activated.connect(received.append)
+
+        panel.activate_worktree(spike)
+
+        self.assertEqual(received, [spike])
+
+
+class TestGarageWindowWorktreeSwitch(WorktreePanelFixture, unittest.TestCase):
+    def _window(self):
+        window = GarageWindow(garage_root=self.garage_root)
+        self.addCleanup(window.close)
+        return window
+
+    def test_the_dialog_is_closed_at_launch_and_opens_from_the_menu(self):
+        window = self._window()
+
+        self.assertFalse(window.worktrees_dialog.isVisible())
+        window.show_worktrees_action.trigger()
+        self.assertTrue(window.worktrees_dialog.isVisible())
+        window.worktrees_dialog.close()
+
+    def test_activating_points_every_panel_at_the_new_worktree(self):
+        window = self._window()
+        spike = self.spike(window.worktrees_panel)
+
+        window.activate_worktree(spike)
+
+        for panel in (window.tuner_panel, window.diff_panel, window.compile_bar):
+            self.assertEqual(panel.binding.active_worktree.path, spike.path)
+        self.assertIn(str(spike.path), window.header_label.text())
+
+    def test_the_choice_survives_a_restart(self):
+        window = self._window()
+        spike = self.spike(window.worktrees_panel)
+
+        window.activate_worktree(spike)
+        window.close()
+
+        reopened = GarageWindow(garage_root=self.garage_root)
+        self.addCleanup(reopened.close)
+        self.assertEqual(
+            reopened.binding.active_worktree.path, spike.path
+        )
+
+    def test_a_compile_in_flight_refuses_the_switch(self):
+        # `make` is running in the tree Garage is about to stop pointing
+        # at; its output would land in a window describing another one.
+        window = self._window()
+        spike = self.spike(window.worktrees_panel)
+        window.compile_bar._start(
+            [
+                make_runner.Command(
+                    argv=(
+                        sys.executable,
+                        "-c",
+                        "import time\n"
+                        "print('x', flush=True)\n"
+                        "while True: time.sleep(0.05)\n",
+                    ),
+                    label="make",
+                )
+            ],
+            expects_rom=False,
+        )
+
+        refusal = window.activate_worktree(spike)
+
+        self.assertIn("compile is running", refusal)
+        self.assertEqual(
+            window.compile_bar.binding.active_worktree.path,
+            self.binding.active_worktree.path,
+        )
+        window.compile_bar.stop_and_wait()
 
 
 if __name__ == "__main__":
