@@ -42,7 +42,11 @@ FAIL = "FAIL"
 # emulator on FAIL, and a check that could not run has not failed.
 BLOCKED = "BLOCKED"
 
-_SEVERITY = {PASS: 0, WARN: 1, BLOCKED: 1, FAIL: 2}
+# BLOCKED sits below WARN on purpose. A measured WARN is a fact about the
+# ROM; BLOCKED is the absence of a fact. When one line has to name the worst
+# thing, "OAM is at 80%" beats "three rows were not measured" -- and the
+# unmeasured ones are counted separately rather than dropped (see summary).
+_SEVERITY = {PASS: 0, BLOCKED: 1, WARN: 2, FAIL: 3}
 
 # "WRAM:  1,534 / 8,192 bytes   (18%)  PASS" and the OAM line's trailing
 # "[busiest scene: Playing]".
@@ -139,16 +143,32 @@ class BudgetReport:
         return max(self.scenes, key=lambda s: s.used, default=None)
 
     def summary(self) -> str:
-        """One clause for the compile bar's status line: the worst result,
-        named, or "all PASS".
+        """One clause for the compile bar's status line and the aside's
+        heading: the worst *measured* result, named, plus a count of the
+        rows nothing measured.
+
+        Measured and unmeasured are reported separately because they answer
+        different questions. Rolling them together let a run that measured
+        one budget report only the ones it had not measured -- pressing
+        Bank check said "budgets BLOCKED: WRAM, VRAM, OAM" and never
+        mentioned the banks it had just read.
         """
         if not self.budgets:
             return "budgets unknown"
-        worst = self.status
+        measured = [b for b in self.budgets if b.status != BLOCKED]
+        unmeasured = [b for b in self.budgets if b.status == BLOCKED]
+        if not measured:
+            return "budgets not measured yet"
+
+        worst = max((b.status for b in measured), key=lambda s: _SEVERITY.get(s, 0))
         if worst == PASS:
-            return "budgets all PASS"
-        named = [b.name for b in self.budgets if b.status == worst]
-        return f"budgets {worst}: {', '.join(named)}"
+            clause = "budgets all PASS"
+        else:
+            named = [b.name for b in measured if b.status == worst]
+            clause = f"budgets {worst}: {', '.join(named)}"
+        if unmeasured:
+            clause += f" · {len(unmeasured)} not measured"
+        return clause
 
 
 def parse_memory_check(text: str) -> BudgetReport:

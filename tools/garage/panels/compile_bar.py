@@ -129,6 +129,10 @@ class CompileBar(QWidget):
         self._output: Dict[str, List[str]] = {}
         self._current_target = ""
         self._budget_report: Optional[budgets_core.BudgetReport] = None
+        # What each measuring target last printed, kept *across* runs: a
+        # run of one of them must not blank the rows the other owns. See
+        # _read_budgets.
+        self._measured: Dict[str, str] = {}
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -439,16 +443,34 @@ class CompileBar(QWidget):
 
     def _read_budgets(self, results: List[make_runner.RunResult]) -> None:
         """Turn what the measuring targets printed into the four budgets
-        R12 names. Only a run that actually ran one of them touches the
-        report: a bare `make clean` says nothing about memory, and
-        replacing good numbers with blanks would be worse than keeping
-        them.
+        R12 names.
+
+        Each measuring target owns its own rows and only its own. Pressing
+        Bank check measures the ROM banks and says nothing whatever about
+        WRAM, VRAM or OAM -- so it must leave those rows as the run that
+        did measure them left them. Blanking them would report "not
+        measured" about numbers Garage is holding and could show, which is
+        worse than saying nothing: a BLOCKED row reads as a check that
+        could not run.
+
+        A compile invalidates all of it: the moment `make` (or `make
+        clean`) runs, every earlier measurement describes a ROM that no
+        longer exists. Build chains both measuring targets, so the cleared
+        rows are refilled in the same run.
         """
         ran = {r.command.target for r in results}
-        if not ran & {"memory-check", "bank-post-build"}:
+        if ran & {"build", "clean"}:
+            self._measured.clear()
+
+        measured_now = ran & set(make_runner.ROM_DEPENDENT_TARGETS)
+        if not measured_now:
             return
+        for target in measured_now:
+            self._measured[target] = self.output_for(target)
+
         self._budget_report = budgets_core.build_report(
-            self.output_for("memory-check"), self.output_for("bank-post-build")
+            self._measured.get("memory-check"),
+            self._measured.get("bank-post-build"),
         )
 
     def _explain_failure(self, results: List[make_runner.RunResult]) -> None:

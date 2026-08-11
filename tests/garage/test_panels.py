@@ -2370,6 +2370,87 @@ class TestCompileBarBudgets(CompileBarFixture, unittest.TestCase):
 
         self.assertIs(bar.budget_report, first)
 
+    def test_a_bank_check_alone_leaves_the_memory_budgets_it_never_measured(self):
+        # Found by pressing Bank check: the three memory rows came back
+        # BLOCKED, reporting "could not be measured" about numbers the
+        # panel was holding and could have shown.
+        bar = self._bar()
+        self._run_and_wait(
+            bar,
+            [
+                self._print_command(
+                    MEMORY_CHECK_OUTPUT, "make memory-check", "memory-check"
+                )
+            ],
+        )
+
+        self._run_and_wait(
+            bar,
+            [
+                self._print_command(
+                    BANK_REPORT_OUTPUT, "make bank-post-build", "bank-post-build"
+                )
+            ],
+        )
+
+        report = bar.budget_report
+        self.assertEqual(report.budget("wram").used, 1534)
+        self.assertEqual(report.budget("oam").status, budgets_core.WARN)
+        self.assertEqual(report.budget("rom-banks").used, 31)
+
+    def test_a_memory_check_alone_leaves_the_rom_banks_it_never_measured(self):
+        bar = self._bar()
+        self._run_and_wait(
+            bar,
+            [
+                self._print_command(
+                    BANK_REPORT_OUTPUT, "make bank-post-build", "bank-post-build"
+                )
+            ],
+        )
+
+        self._run_and_wait(
+            bar,
+            [
+                self._print_command(
+                    MEMORY_CHECK_OUTPUT, "make memory-check", "memory-check"
+                )
+            ],
+        )
+
+        self.assertEqual(bar.budget_report.budget("rom-banks").used, 31)
+        self.assertEqual(bar.budget_report.budget("wram").used, 1534)
+
+    def test_a_compile_invalidates_every_earlier_measurement(self):
+        # Those numbers describe a ROM that no longer exists. Build chains
+        # both measuring targets, so in the normal flow the cleared rows
+        # are refilled by the same run -- here only one of them is, and the
+        # other must read BLOCKED rather than stale.
+        bar = self._bar()
+        self._run_and_wait(
+            bar,
+            [
+                self._print_command(
+                    BANK_REPORT_OUTPUT, "make bank-post-build", "bank-post-build"
+                )
+            ],
+        )
+
+        self._run_and_wait(
+            bar,
+            [
+                self._print_command("built", "make", "build"),
+                self._print_command(
+                    MEMORY_CHECK_OUTPUT, "make memory-check", "memory-check"
+                ),
+            ],
+        )
+
+        self.assertEqual(bar.budget_report.budget("wram").used, 1534)
+        self.assertEqual(
+            bar.budget_report.budget("rom-banks").status, budgets_core.BLOCKED
+        )
+
     def test_output_is_attributed_to_the_target_that_printed_it(self):
         bar = self._bar()
 

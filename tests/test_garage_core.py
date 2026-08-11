@@ -2275,6 +2275,26 @@ class TestBuildReport(unittest.TestCase):
         self.assertTrue(all(b.status == budgets.BLOCKED for b in report.budgets))
         self.assertEqual(report.status, budgets.BLOCKED)
 
+    def test_summary_names_a_measured_result_over_an_unmeasured_one(self):
+        # Found by pressing Bank check on a fresh window: the summary said
+        # "budgets BLOCKED: WRAM, VRAM, OAM" and never mentioned the bank
+        # result it had just read. A measured WARN is a fact about the ROM;
+        # BLOCKED is the absence of one, and belongs in its own count.
+        report = budgets.build_report("", BANK_REPORT_OUTPUT)
+
+        self.assertEqual(report.summary(), "budgets WARN: ROM banks · 3 not measured")
+
+    def test_summary_counts_the_unmeasured_beside_a_pass(self):
+        passing = BANK_REPORT_OUTPUT.replace("[WARN]", "[PASS]")
+
+        self.assertEqual(
+            budgets.build_report("", passing).summary(),
+            "budgets all PASS · 3 not measured",
+        )
+
+    def test_summary_when_nothing_was_measured_at_all(self):
+        self.assertEqual(budgets.build_report("", "").summary(), "budgets not measured yet")
+
     def test_summary_names_the_worst_result(self):
         self.assertEqual(
             budgets.build_report(MEMORY_CHECK_OUTPUT, BANK_REPORT_OUTPUT).summary(),
