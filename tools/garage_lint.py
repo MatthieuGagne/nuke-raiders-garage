@@ -26,25 +26,21 @@ from typing import List
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tools.garage.core import config_io, project
-from tools.garage.core.schema import Schema, SchemaError
-
-
-@dataclass
-class DriftReport:
-    unclassified: List[str]  # in config.h, not classified in tunables.json
-    stale: List[str]  # in tunables.json, no longer in config.h
-
-    @property
-    def clean(self) -> bool:
-        return not self.unclassified and not self.stale
+from tools.garage.core.schema import (
+    DriftReport,
+    Schema,
+    SchemaError,
+    find_drift as schema_drift,
+)
 
 
 def find_drift(schema: Schema, config: config_io.ConfigFile) -> DriftReport:
-    header_names = set(config.defines.keys())
-    schema_names = set(schema.names())
-    unclassified = sorted(header_names - schema_names)
-    stale = sorted(schema_names - header_names)
-    return DriftReport(unclassified=unclassified, stale=stale)
+    """The comparison itself lives in `tools.garage.core.schema`, so the
+    Doctor reports at startup exactly what this check fails the suite over
+    (R8). This wrapper keeps the script's own signature, which takes the
+    parsed header.
+    """
+    return schema_drift(schema, config.defines.keys())
 
 
 def run(garage_root: Path = None, schema_path: Path = None) -> int:

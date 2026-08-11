@@ -159,10 +159,12 @@ def refuse_delete_reason(
             f"so it will not delete it."
         )
     if summary.dirty:
-        files = "file" if summary.changed_file_count == 1 else "files"
+        one = summary.changed_file_count == 1
         return (
-            f"'{worktree.path}' holds uncommitted work: {summary.changed_file_count} "
-            f"{files} differ from HEAD (+{summary.added_lines} −{summary.removed_lines}). "
+            f"'{worktree.path}' holds uncommitted work: "
+            f"{summary.changed_file_count} {'file' if one else 'files'} "
+            f"{'differs' if one else 'differ'} from HEAD "
+            f"(+{summary.added_lines} −{summary.removed_lines}). "
             f"Commit or discard it first."
         )
     if summary.untracked_count:

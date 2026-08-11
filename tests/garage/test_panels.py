@@ -799,6 +799,45 @@ class TestDiffPanel(unittest.TestCase):
             self.assertEqual(panel.untracked_files(), ["new.txt"])
 
 
+class TestDriftIsReportedAtStartup(unittest.TestCase):
+    """AC9's second half, in the window: a `#define` the classification
+    file does not place makes Garage say so when it starts, without the
+    user opening anything.
+
+    The fixture repository's config.h deliberately does not match the
+    tunables.json this repository ships, which is exactly the drifted
+    state -- so the Doctor's real check has something true to report.
+    """
+
+    def _window(self, tmp_path):
+        garage_root = tmp_path / "nuke-raider-garage"
+        garage_root.mkdir()
+        make_game_repo_with_config(tmp_path / "nuke-raider", PANEL_CONFIG_TEXT)
+        window = GarageWindow(garage_root=garage_root)
+        self.addCleanup(window.close)
+        return window
+
+    def test_the_doctor_carries_a_classification_row(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            window = self._window(Path(tmp))
+
+            self.assertIn("classification", window.doctor_panel.check_keys())
+            self.assertEqual(window.doctor_panel.verdict_of("classification"), "fail")
+            self.assertIn(
+                "GEAR1_MAX_SPEED", window.doctor_panel.detail_of("classification")
+            )
+            self.assertIn(
+                "tunables.json", window.doctor_panel.prevents_of("classification")
+            )
+
+    def test_the_window_states_it_without_anything_being_opened(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            window = self._window(Path(tmp))
+
+            self.assertTrue(window.toolchain_label.isVisibleTo(window))
+            self.assertIn("classification", window.toolchain_label.text())
+
+
 class TestDiffNamesItsWorktree(unittest.TestCase):
     """With several checkouts of one repository open (R3), a diff that does
     not name its worktree is a diff the user has to take on trust.

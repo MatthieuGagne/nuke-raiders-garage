@@ -288,7 +288,24 @@ class TestBindingPathHelpers(unittest.TestCase):
 
 
 REAL_TUNABLES_PATH = REPO_ROOT / "tools" / "garage" / "tunables.json"
-REAL_CONFIG_H_PATH = Path("C:/Code/nuke-raider/src/config.h")
+def _bound_config_h():
+    """The bound game repository's `src/config.h`, or None when this
+    checkout has no game repository beside it.
+
+    Resolved through the binding rather than hardcoded: a path spelled out
+    here is a path that exists on exactly one machine, and every test using
+    it would fail — not skip — in CI, where this repository is checked out
+    alone. AC15 asks the default target to succeed there.
+    """
+    try:
+        return project.bind().config_h
+    except project.BindingError:
+        return None
+
+
+REAL_CONFIG_H_PATH = _bound_config_h()
+NO_GAME_REPO = REAL_CONFIG_H_PATH is None
+NO_GAME_REPO_REASON = "no game repository is bound beside this checkout"
 
 SAMPLE_TUNABLES = {
     "_shape": "test fixture",
@@ -327,6 +344,7 @@ class TestSchemaValidation(unittest.TestCase):
         self.assertEqual(schema.classify("LOADER_BG_START"), "derived")
         self.assertEqual(schema.classify("CONFIG_H"), "marker")
 
+    @unittest.skipIf(NO_GAME_REPO, NO_GAME_REPO_REASON)
     def test_real_tunables_json_classifies_every_config_h_define(self):
         text = REAL_CONFIG_H_PATH.read_text(encoding="utf-8")
         schema = Schema.load(REAL_TUNABLES_PATH)
@@ -613,6 +631,7 @@ def make_game_repo_with_config(path: Path, config_text: str) -> Path:
 
 
 class TestConfigIOReadWrite(unittest.TestCase):
+    @unittest.skipIf(NO_GAME_REPO, NO_GAME_REPO_REASON)
     def test_zero_change_write_is_byte_identical_against_real_config_h(self):
         real_bytes = REAL_CONFIG_H_PATH.read_bytes()
         with tempfile.TemporaryDirectory() as tmp:
@@ -1344,6 +1363,7 @@ class TestDoctorChecksEverythingR14Names(unittest.TestCase):
                 [c.key for c in report.checks],
                 [
                     "game-repo",
+                    "classification",
                     "make",
                     "gcc",
                     "gbdk-home",
@@ -1365,8 +1385,13 @@ class TestDoctorChecksEverythingR14Names(unittest.TestCase):
 
             report = run_doctor(which, environ, settings, binding=binding)
 
-            self.assertTrue(report.ok, [c.detail for c in report.failures])
-            self.assertEqual(report.summary(), "8 of 8 checks passing")
+            # The classification check reads the bound repository's
+            # src/config.h; this fixture repo has none, so that one row is
+            # expected to fail and every other must pass.
+            self.assertEqual(
+                [c.key for c in report.failures], ["classification"]
+            )
+            self.assertEqual(report.summary(), "8 of 9 checks passing · failing: classification")
 
     def test_every_failure_names_what_it_prevents(self):
         # The general form of AC14: no check may report a failure without
@@ -1378,13 +1403,82 @@ class TestDoctorChecksEverythingR14Names(unittest.TestCase):
                 {}, {"EMULICIOUS_JAR": str(Path(tmp) / "nowhere.jar")}, None
             )
 
-            self.assertEqual(len(report.failures), 8)
+            self.assertEqual(len(report.failures), 9)
             for check in report.failures:
                 self.assertTrue(
                     check.prevents.strip(),
                     f"{check.key} failed without naming what it prevents",
                 )
                 self.assertTrue(check.detail.strip(), f"{check.key} gave no detail")
+
+
+class TestDoctorClassification(unittest.TestCase):
+    """R8/AC9's second half: Garage reports the drift when it starts. The
+    first half — the same drift failing this repository's test suite —
+    lives in tests/test_garage_lint.py.
+    """
+
+    def _bound(self, tmp_path, config_text):
+        garage_root = tmp_path / "nuke-raider-garage"
+        garage_root.mkdir()
+        make_game_repo_with_config(tmp_path / "nuke-raider", config_text)
+        return project.bind(garage_root)
+
+    def test_a_header_that_matches_the_classification_passes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            binding = self._bound(tmp_path, SAMPLE_CONFIG_TEXT)
+            schema = Schema.load(
+                write_json(tmp_path / "t.json", SAMPLE_TUNABLES_FOR_CONFIG_IO)
+            )
+
+            check = doctor.check_classification(binding, schema)
+
+            self.assertEqual(check.status, doctor.PASS)
+            self.assertIn("all classified", check.detail)
+
+    def test_an_unclassified_define_is_reported_by_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            drifted = SAMPLE_CONFIG_TEXT.replace(
+                "#endif /* CONFIG_H */",
+                "#define NEW_UNCLASSIFIED_DEFINE 3u\n\n#endif /* CONFIG_H */",
+            )
+            binding = self._bound(tmp_path, drifted)
+            schema = Schema.load(
+                write_json(tmp_path / "t.json", SAMPLE_TUNABLES_FOR_CONFIG_IO)
+            )
+
+            check = doctor.check_classification(binding, schema)
+
+            self.assertEqual(check.status, doctor.FAIL)
+            self.assertIn("NEW_UNCLASSIFIED_DEFINE", check.detail)
+            self.assertIn("unclassified", check.detail)
+            self.assertIn("tunables.json", check.prevents)
+            self.assertEqual(check.tag, "1 unclassified")
+
+    def test_a_classification_entry_the_header_dropped_is_reported_too(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            binding = self._bound(tmp_path, SAMPLE_CONFIG_TEXT)
+            extended = json.loads(json.dumps(SAMPLE_TUNABLES_FOR_CONFIG_IO))
+            extended["entries"]["GONE_FROM_HEADER"] = {
+                "class": "structural",
+                "reason": "removed from the header",
+            }
+            schema = Schema.load(write_json(tmp_path / "t.json", extended))
+
+            check = doctor.check_classification(binding, schema)
+
+            self.assertEqual(check.status, doctor.FAIL)
+            self.assertIn("GONE_FROM_HEADER", check.detail)
+            self.assertIn("gone from src/config.h", check.detail)
+
+    def test_without_a_binding_it_says_it_cannot_check(self):
+        check = doctor.check_classification(None)
+
+        self.assertEqual(check.status, doctor.FAIL)
+        self.assertIn("no game repository is bound", check.detail)
 
 
 class TestDoctorRomusage(unittest.TestCase):
@@ -1417,7 +1511,9 @@ class TestDoctorRomusage(unittest.TestCase):
 
             self.assertFalse(report.ok)
             self.assertIn("romusage", report.summary())
-            self.assertIn("7 of 8 checks passing", report.summary())
+            # The stub binding names no real repository, so the
+            # classification row fails alongside romusage.
+            self.assertIn("7 of 9 checks passing", report.summary())
 
     def test_detail_names_the_gbdk_bin_directory_that_ships_it(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2511,7 +2607,7 @@ class TestDeleteWorktree(WorktreeFixture):
         reason = worktrees.refuse_delete_reason(spike, self.main)
 
         self.assertIn("uncommitted work", reason)
-        self.assertIn("1 file", reason)
+        self.assertIn("1 file differs from HEAD", reason)
         with self.assertRaises(worktrees.WorktreeError):
             worktrees.delete(self.game_repo, spike, self.main, spike.path.name)
         self.assertTrue(spike.path.is_dir())

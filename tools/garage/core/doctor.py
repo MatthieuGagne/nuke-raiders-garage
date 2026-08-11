@@ -38,8 +38,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, List, Optional
 
-from tools.garage.core import project
+from tools.garage.core import config_io, project
 from tools.garage.core.project import Binding, BindingError
+from tools.garage.core.schema import Schema, SchemaError, find_drift
 
 PASS = "PASS"
 FAIL = "FAIL"
@@ -181,6 +182,80 @@ def check_binding(
             "directory to run in."
         ),
         tag="blocked",
+    )
+
+
+def check_classification(
+    binding: Optional[Binding], schema: Optional[Schema] = None
+) -> CheckResult:
+    """R8/AC9: the classification file is the single source of truth, and
+    Garage reports its drift when it starts.
+
+    The same comparison fails this repository's test suite
+    (`tools/garage_lint.py`), which is the half that catches drift in CI.
+    This half catches it in the one place the user is standing when it
+    matters — a `#define` added to the game repository since Garage last
+    ran is a value the Tuner silently does not offer, and silence is
+    exactly what R8 exists to end.
+    """
+    name = "tunables.json — the classification of src/config.h"
+    if binding is None:
+        return CheckResult(
+            key="classification",
+            name=name,
+            status=FAIL,
+            detail="no game repository is bound, so the header cannot be read",
+            prevents=(
+                "The drift check. Garage cannot tell whether tunables.json "
+                "still describes src/config.h."
+            ),
+            tag="blocked",
+        )
+    try:
+        # `schema` is a seam for the tests: a real run reads the one
+        # classification file this repository ships.
+        schema = schema if schema is not None else Schema.load()
+        config = config_io.read(binding, schema)
+    except (SchemaError, config_io.ConfigIOError, OSError) as exc:
+        return CheckResult(
+            key="classification",
+            name=name,
+            status=FAIL,
+            detail=str(exc),
+            prevents=(
+                "Every tunable. The Tuner has no classification to work "
+                "from, so it can offer nothing."
+            ),
+            tag="blocked",
+        )
+
+    drift = find_drift(schema, config.defines.keys())
+    if drift.clean:
+        return CheckResult(
+            key="classification",
+            name=name,
+            status=PASS,
+            detail=f"{len(config.defines)} #defines, all classified",
+            tag="in step",
+        )
+
+    details = []
+    if drift.unclassified:
+        details.append("unclassified in tunables.json: " + ", ".join(drift.unclassified))
+    if drift.stale:
+        details.append("gone from src/config.h: " + ", ".join(drift.stale))
+    return CheckResult(
+        key="classification",
+        name=name,
+        status=FAIL,
+        detail=" · ".join(details),
+        prevents=(
+            "The Tuner does not offer an unclassified #define, and says "
+            "nothing about it — the drift has to be fixed in tunables.json "
+            "before that value can be tuned. This repository's test suite "
+            "fails until it is."
+        ),
+        tag=drift.summary(),
     )
 
 
@@ -460,6 +535,7 @@ def run_checks(
     return Report(
         checks=[
             check_binding(binding, binding_error),
+            check_classification(binding),
             check_make(which, probe),
             check_gcc(which, probe),
             check_gbdk_home(environ),

@@ -14,6 +14,8 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from tools import garage_lint  # noqa: E402
+from tools.garage.core import config_io, project  # noqa: E402
+from tools.garage.core.schema import Schema, find_drift  # noqa: E402
 
 SAMPLE_CONFIG = """\
 #ifndef CONFIG_H
@@ -69,6 +71,54 @@ def write_tunables(path: Path, data: dict) -> Path:
     tunables_path = path / "tunables.json"
     tunables_path.write_text(json.dumps(data), encoding="utf-8")
     return tunables_path
+
+
+class TestTheBoundGameRepositoryIsInStep(unittest.TestCase):
+    """AC9's first half: a `#define` added to the game repository's
+    `src/config.h` with no classification makes *this repository's* test
+    suite fail.
+
+    Every other test in this file drives the check with fixtures, which
+    proves the comparison but never looks at the real header — so real
+    drift would pass a green suite. This one runs the check exactly as
+    `python tools/garage_lint.py` runs it, against whatever this checkout
+    is bound to.
+
+    It skips when no game repository is bound. That is the CI case (this
+    repository is checked out alone), and R8 asks the drift to fail the
+    suite, not the absence of a checkout to fail it.
+    """
+
+    def test_the_classification_matches_the_headers_defines(self):
+        try:
+            binding = project.bind()
+        except project.BindingError as exc:
+            self.skipTest(f"no game repository bound: {exc}")
+
+        schema = Schema.load()
+        config = config_io.read(binding, schema)
+        drift = find_drift(schema, config.defines.keys())
+
+        self.assertTrue(
+            drift.clean,
+            "tools/garage/tunables.json has drifted from "
+            f"{binding.config_h}:\n"
+            + "".join(
+                f"  - '{name}' is in src/config.h and classified nowhere; add "
+                f"it as tunable/structural/derived/marker.\n"
+                for name in drift.unclassified
+            )
+            + "".join(
+                f"  - '{name}' is classified in tunables.json but is no "
+                f"longer in src/config.h; remove it.\n"
+                for name in drift.stale
+            ),
+        )
+
+    def test_the_drift_check_script_agrees_with_it(self):
+        # The script is what a developer and CI run by hand; this keeps it
+        # from drifting away from the test above.
+        self.assertEqual(garage_lint.run(), 0)
 
 
 class TestGarageLint(unittest.TestCase):

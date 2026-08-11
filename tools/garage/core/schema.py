@@ -203,3 +203,41 @@ class Schema:
         if value > entry.max:
             return entry.max
         return value
+
+
+@dataclass
+class DriftReport:
+    """How `tunables.json` and the game repository's `src/config.h`
+    disagree (R8). Lives here rather than in `tools/garage_lint.py` so the
+    Doctor can report the same drift at startup that the drift check fails
+    the test suite over -- one comparison, two consumers.
+    """
+
+    unclassified: List[str]  # in config.h, classified nowhere
+    stale: List[str]  # in tunables.json, no longer in config.h
+
+    @property
+    def clean(self) -> bool:
+        return not self.unclassified and not self.stale
+
+    def summary(self) -> str:
+        parts = []
+        if self.unclassified:
+            parts.append(f"{len(self.unclassified)} unclassified")
+        if self.stale:
+            parts.append(f"{len(self.stale)} stale")
+        return ", ".join(parts) if parts else "no drift"
+
+
+def find_drift(schema: "Schema", define_names) -> DriftReport:
+    """Compare a schema against the `#define` names a header holds.
+
+    Takes names rather than a ConfigFile so this module keeps its single
+    responsibility -- it classifies, it does not parse C.
+    """
+    header_names = set(define_names)
+    schema_names = set(schema.names())
+    return DriftReport(
+        unclassified=sorted(header_names - schema_names),
+        stale=sorted(schema_names - header_names),
+    )
