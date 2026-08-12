@@ -2588,7 +2588,7 @@ class TestEmuliciousGate(unittest.TestCase):
 class WorktreeFixture(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
-        self.tmp_path = Path(self._tmp.name)
+        self.tmp_path = tmp_root(self._tmp.name)
         self.garage_root = self.tmp_path / "nuke-raider-garage"
         self.garage_root.mkdir()
         self.game_repo = make_game_repo(self.tmp_path / "nuke-raider")
@@ -2797,7 +2797,7 @@ class TestDescribeWorktree(WorktreeFixture):
 class CommitFixture(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
-        self.tmp_path = Path(self._tmp.name)
+        self.tmp_path = tmp_root(self._tmp.name)
         self.garage_root = self.tmp_path / "nuke-raider-garage"
         self.garage_root.mkdir()
         self.game_repo = make_game_repo(self.tmp_path / "nuke-raider")

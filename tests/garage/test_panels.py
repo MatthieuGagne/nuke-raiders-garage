@@ -1893,7 +1893,7 @@ class CompileBarFixture:
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
-        tmp_path = Path(self._tmp.name)
+        tmp_path = tmp_root(self._tmp.name)
         garage_root = tmp_path / "nuke-raider-garage"
         garage_root.mkdir()
         make_game_repo(tmp_path / "nuke-raider")
@@ -2588,7 +2588,7 @@ class TestEmuliciousGateInThePanel(CompileBarFixture, unittest.TestCase):
         return rom
 
     def _jar(self):
-        jar = Path(self._tmp.name) / "Emulicious.jar"
+        jar = tmp_root(self._tmp.name) / "Emulicious.jar"
         jar.write_text("", encoding="utf-8")
         return jar
 
@@ -2674,7 +2674,7 @@ class WorktreePanelFixture:
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
-        self.tmp_path = Path(self._tmp.name)
+        self.tmp_path = tmp_root(self._tmp.name)
         self.garage_root = self.tmp_path / "nuke-raider-garage"
         self.garage_root.mkdir()
         self.game_repo = make_game_repo_with_config(
@@ -2869,7 +2869,7 @@ class CommitPanelFixture:
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
-        self.tmp_path = Path(self._tmp.name)
+        self.tmp_path = tmp_root(self._tmp.name)
         self.garage_root = self.tmp_path / "nuke-raider-garage"
         self.garage_root.mkdir()
         self.game_repo = make_game_repo_with_config(
