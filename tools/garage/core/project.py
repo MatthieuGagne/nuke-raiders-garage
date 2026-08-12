@@ -230,9 +230,33 @@ def _worktree_from_record(record: dict) -> Worktree:
 
 
 def _same_path(a: Path, b: Path) -> bool:
+    """Do two paths name the same directory? Compared after `resolve()`,
+    because Windows spells one directory several ways: the long form and
+    the short 8.3 form (`C:\\Users\\runneradmin\\...` and
+    `C:\\Users\\RUNNER~1\\...`) name the same place and share almost no
+    characters, and a junction or a substituted drive names it a third
+    way. A textual comparison says those are different directories, so a
+    recorded `active` spelled one way and a `git worktree list` entry
+    spelled the other stop matching -- and R2's active worktree silently
+    becomes the main one, which is Garage targeting a worktree the user
+    did not choose. Found by the first Windows CI run this repository
+    had: the runner's temp directory is `RUNNER~1`, git reports
+    `runneradmin`, and the recorded active worktree stopped resolving.
+
+    `resolve()` is best-effort on a path that no longer exists, which is
+    what a deleted worktree looks like, and raises on some malformed UNC
+    paths -- hence the textual comparison as a fallback rather than as
+    the rule.
+    """
     import os
 
-    return os.path.normcase(os.path.normpath(str(a))) == os.path.normcase(os.path.normpath(str(b)))
+    def canonical(p: Path) -> str:
+        try:
+            return os.path.normcase(str(p.resolve()))
+        except OSError:
+            return os.path.normcase(os.path.normpath(str(p)))
+
+    return canonical(a) == canonical(b)
 
 
 def resolve_active_worktree(

@@ -39,6 +39,20 @@ GAME_REPO_REMOTE_URL = "https://github.com/MatthieuGagne/gmb-nuke-raider.git"
 WRONG_REMOTE_URL = "https://github.com/someone/unrelated-repo.git"
 
 
+def tmp_root(tmp: str) -> Path:
+    """A temporary directory, spelled the way Garage spells it.
+
+    Windows gives `tempfile` the short 8.3 form of a long user name --
+    `C:\\Users\\RUNNER~1\\...` on a GitHub runner -- while git and every
+    path that has been through `resolve()` come back as the long form. A
+    raw `Path(tmp)` therefore compares unequal to everything Garage
+    reports about the very directory the test just created. Canonicalize
+    once, here, so a test asserts about spelling only when that is the
+    point of the test.
+    """
+    return Path(tmp).resolve()
+
+
 def _run_git(args, cwd):
     return subprocess.run(
         ["git"] + args,
@@ -66,7 +80,7 @@ def make_game_repo(path: Path, remote_url=GAME_REPO_REMOTE_URL) -> Path:
 class TestFindDefaultGameRepo(unittest.TestCase):
     def test_detect_success(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             garage_root = tmp_path / "nuke-raider-garage"
             garage_root.mkdir()
             game_repo = make_game_repo(tmp_path / "nuke-raider")
@@ -77,7 +91,7 @@ class TestFindDefaultGameRepo(unittest.TestCase):
 
     def test_wrong_remote_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             garage_root = tmp_path / "nuke-raider-garage"
             garage_root.mkdir()
             make_game_repo(tmp_path / "nuke-raider", remote_url=WRONG_REMOTE_URL)
@@ -89,7 +103,7 @@ class TestFindDefaultGameRepo(unittest.TestCase):
 
     def test_missing_sibling_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             garage_root = tmp_path / "nuke-raider-garage"
             garage_root.mkdir()
             # No sibling "nuke-raider" directory created.
@@ -102,7 +116,7 @@ class TestFindDefaultGameRepo(unittest.TestCase):
 class TestBind(unittest.TestCase):
     def test_first_run_writes_settings(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             garage_root = tmp_path / "nuke-raider-garage"
             garage_root.mkdir()
             game_repo = make_game_repo(tmp_path / "nuke-raider")
@@ -130,7 +144,7 @@ class TestBind(unittest.TestCase):
 
     def test_missing_recorded_path_is_a_failure(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             garage_root = tmp_path / "nuke-raider-garage"
             garage_root.mkdir()
             # game_repo sibling deliberately absent; recorded path points
@@ -155,7 +169,7 @@ class TestBind(unittest.TestCase):
 
     def test_recorded_path_with_wrong_checkout_is_a_failure(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             garage_root = tmp_path / "nuke-raider-garage"
             garage_root.mkdir()
             wrong_repo = make_game_repo(tmp_path / "other-repo", remote_url=WRONG_REMOTE_URL)
@@ -178,7 +192,7 @@ class TestBind(unittest.TestCase):
 
     def test_stale_active_falls_back_to_main(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             garage_root = tmp_path / "nuke-raider-garage"
             garage_root.mkdir()
             game_repo = make_game_repo(tmp_path / "nuke-raider")
@@ -203,7 +217,7 @@ class TestBind(unittest.TestCase):
 
     def test_recorded_active_worktree_is_used(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             garage_root = tmp_path / "nuke-raider-garage"
             garage_root.mkdir()
             game_repo = make_game_repo(tmp_path / "nuke-raider")
@@ -229,10 +243,67 @@ class TestBind(unittest.TestCase):
             self.assertEqual(binding.active_worktree.branch, "feat")
 
 
+class TestRecordedActiveSpelling(unittest.TestCase):
+    """R2. The recorded `active` is a path a human may type into
+    garage.local.json, and one directory has more than one spelling. When
+    the spelling differs from the one `git worktree list` prints, Garage
+    must still resolve it -- falling back to the main worktree would mean
+    every path, every make call and every emulator start silently
+    targeting a worktree the user did not choose.
+    """
+
+    def _bind_with_recorded_active(self, recorded: Path, tmp_path: Path):
+        garage_root = tmp_path / "nuke-raider-garage"
+        garage_root.mkdir()
+        game_repo = make_game_repo(tmp_path / "nuke-raider")
+        wt_path = tmp_path / "worktrees" / "feat"
+        _run_git(["worktree", "add", "-b", "feat", str(wt_path)], game_repo)
+        (garage_root / "garage.local.json").write_text(
+            json.dumps(
+                {
+                    "game_repo": game_repo.as_posix(),
+                    "worktree_root": (tmp_path / "worktrees").as_posix(),
+                    "active": Path(recorded).as_posix(),
+                }
+            ),
+            encoding="utf-8",
+        )
+        return project.bind(garage_root), wt_path
+
+    def test_a_second_spelling_of_the_active_worktree_still_resolves(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = tmp_root(tmp)
+            (tmp_path / "worktrees").mkdir()
+            link = tmp_path / "worktrees" / "feat-link"
+            try:
+                link.symlink_to(tmp_path / "worktrees" / "feat", True)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"this platform cannot create a symlink: {exc}")
+
+            binding, wt_path = self._bind_with_recorded_active(link, tmp_path)
+
+            # The recorded path is not the string git prints, and it names
+            # the same directory, so it is the active worktree.
+            self.assertEqual(binding.active_source, "recorded")
+            self.assertEqual(binding.active_worktree.branch, "feat")
+
+    def test_a_path_that_is_a_different_directory_still_falls_back(self):
+        # The guard on the test above: a resolve() that collapsed
+        # everything to one value would pass it and break this.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = tmp_root(tmp)
+
+            binding, _ = self._bind_with_recorded_active(
+                tmp_path / "worktrees" / "not-a-worktree", tmp_path
+            )
+
+            self.assertEqual(binding.active_source, "main-fallback")
+
+
 class TestListWorktrees(unittest.TestCase):
     def test_parses_main_and_linked_worktrees(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             game_repo = make_game_repo(tmp_path / "nuke-raider")
             wt_path = tmp_path / "worktrees" / "feat"
             _run_git(["worktree", "add", "-b", "feat", str(wt_path)], game_repo)
@@ -251,7 +322,7 @@ class TestListWorktrees(unittest.TestCase):
 
     def test_detached_head_does_not_crash(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             game_repo = make_game_repo(tmp_path / "nuke-raider")
             head_sha = _run_git(["rev-parse", "HEAD"], game_repo).stdout.strip()
             wt_path = tmp_path / "worktrees" / "detached"
@@ -270,7 +341,7 @@ class TestListWorktrees(unittest.TestCase):
 class TestBindingPathHelpers(unittest.TestCase):
     def test_config_h_and_build_dir_resolve_inside_active_worktree(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             garage_root = tmp_path / "nuke-raider-garage"
             garage_root.mkdir()
             game_repo = make_game_repo(tmp_path / "nuke-raider")
@@ -371,7 +442,7 @@ class TestSchemaValidation(unittest.TestCase):
 
     def test_valid_sample_loads(self):
         with tempfile.TemporaryDirectory() as tmp:
-            path = write_json(Path(tmp) / "tunables.json", SAMPLE_TUNABLES)
+            path = write_json(tmp_root(tmp) / "tunables.json", SAMPLE_TUNABLES)
             schema = Schema.load(path)
             self.assertTrue(schema.is_tunable("GEAR1_MAX_SPEED"))
             self.assertFalse(schema.is_tunable("MAX_SPRITES"))
@@ -380,7 +451,7 @@ class TestSchemaValidation(unittest.TestCase):
         data = json.loads(json.dumps(SAMPLE_TUNABLES))
         data["entries"]["BAD_ONE"] = {"class": "wat", "reason": "x"}
         with tempfile.TemporaryDirectory() as tmp:
-            path = write_json(Path(tmp) / "tunables.json", data)
+            path = write_json(tmp_root(tmp) / "tunables.json", data)
             with self.assertRaises(SchemaError) as ctx:
                 Schema.load(path)
             self.assertIn("BAD_ONE", str(ctx.exception))
@@ -389,7 +460,7 @@ class TestSchemaValidation(unittest.TestCase):
         data = json.loads(json.dumps(SAMPLE_TUNABLES))
         del data["entries"]["GEAR1_MAX_SPEED"]["min"]
         with tempfile.TemporaryDirectory() as tmp:
-            path = write_json(Path(tmp) / "tunables.json", data)
+            path = write_json(tmp_root(tmp) / "tunables.json", data)
             with self.assertRaises(SchemaError) as ctx:
                 Schema.load(path)
             self.assertIn("GEAR1_MAX_SPEED", str(ctx.exception))
@@ -398,7 +469,7 @@ class TestSchemaValidation(unittest.TestCase):
         data = json.loads(json.dumps(SAMPLE_TUNABLES))
         data["entries"]["GEAR1_MAX_SPEED"]["min"] = 20
         with tempfile.TemporaryDirectory() as tmp:
-            path = write_json(Path(tmp) / "tunables.json", data)
+            path = write_json(tmp_root(tmp) / "tunables.json", data)
             with self.assertRaises(SchemaError) as ctx:
                 Schema.load(path)
             self.assertIn("GEAR1_MAX_SPEED", str(ctx.exception))
@@ -407,7 +478,7 @@ class TestSchemaValidation(unittest.TestCase):
         data = json.loads(json.dumps(SAMPLE_TUNABLES))
         data["entries"]["MAX_SPRITES"]["min"] = 1
         with tempfile.TemporaryDirectory() as tmp:
-            path = write_json(Path(tmp) / "tunables.json", data)
+            path = write_json(tmp_root(tmp) / "tunables.json", data)
             with self.assertRaises(SchemaError) as ctx:
                 Schema.load(path)
             self.assertIn("MAX_SPRITES", str(ctx.exception))
@@ -416,7 +487,7 @@ class TestSchemaValidation(unittest.TestCase):
         data = json.loads(json.dumps(SAMPLE_TUNABLES))
         del data["entries"]["MAX_SPRITES"]["reason"]
         with tempfile.TemporaryDirectory() as tmp:
-            path = write_json(Path(tmp) / "tunables.json", data)
+            path = write_json(tmp_root(tmp) / "tunables.json", data)
             with self.assertRaises(SchemaError) as ctx:
                 Schema.load(path)
             self.assertIn("MAX_SPRITES", str(ctx.exception))
@@ -645,7 +716,7 @@ class TestConfigIOReadWrite(unittest.TestCase):
     def test_zero_change_write_is_byte_identical_against_real_config_h(self):
         real_bytes = REAL_CONFIG_H_PATH.read_bytes()
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             garage_root = tmp_path / "nuke-raider-garage"
             garage_root.mkdir()
             game_repo = make_game_repo_with_config(
@@ -661,7 +732,7 @@ class TestConfigIOReadWrite(unittest.TestCase):
 
     def test_write_updates_target_value_and_preserves_rest(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             garage_root = tmp_path / "nuke-raider-garage"
             garage_root.mkdir()
             game_repo = make_game_repo_with_config(tmp_path / "nuke-raider", SAMPLE_CONFIG_TEXT)
@@ -679,7 +750,7 @@ class TestConfigIOReadWrite(unittest.TestCase):
 
     def test_write_refuses_structural_and_leaves_file_untouched(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             garage_root = tmp_path / "nuke-raider-garage"
             garage_root.mkdir()
             game_repo = make_game_repo_with_config(tmp_path / "nuke-raider", SAMPLE_CONFIG_TEXT)
@@ -696,7 +767,7 @@ class TestConfigIOReadWrite(unittest.TestCase):
 
     def test_read_value_at_head_returns_committed_value(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             garage_root = tmp_path / "nuke-raider-garage"
             garage_root.mkdir()
             game_repo = make_game_repo_with_config(tmp_path / "nuke-raider", SAMPLE_CONFIG_TEXT)
@@ -720,7 +791,7 @@ class TestConfigIOReadWrite(unittest.TestCase):
 
     def test_read_value_at_head_raises_for_derived_define(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             garage_root = tmp_path / "nuke-raider-garage"
             garage_root.mkdir()
             make_game_repo_with_config(tmp_path / "nuke-raider", SAMPLE_CONFIG_TEXT)
@@ -742,7 +813,7 @@ class TestConfigIOReadConfigAtHead(unittest.TestCase):
 
     def test_returns_whole_parsed_file_from_one_call(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             garage_root = tmp_path / "nuke-raider-garage"
             garage_root.mkdir()
             game_repo = make_game_repo_with_config(tmp_path / "nuke-raider", SAMPLE_CONFIG_TEXT)
@@ -776,7 +847,7 @@ class TestConfigIOReadConfigAtHead(unittest.TestCase):
 
     def test_read_value_at_head_still_works_built_on_shared_helper(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             garage_root = tmp_path / "nuke-raider-garage"
             garage_root.mkdir()
             make_game_repo_with_config(tmp_path / "nuke-raider", SAMPLE_CONFIG_TEXT)
@@ -791,7 +862,7 @@ class TestConfigIOReadConfigAtHead(unittest.TestCase):
 
     def test_no_commits_yet_raises_explanatory_error(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             garage_root = tmp_path / "nuke-raider-garage"
             garage_root.mkdir()
             game_repo = tmp_path / "nuke-raider"
@@ -821,7 +892,7 @@ class TestConfigIOReadConfigAtHead(unittest.TestCase):
 
     def test_missing_config_h_at_head_raises_explanatory_error(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             garage_root = tmp_path / "nuke-raider-garage"
             garage_root.mkdir()
             game_repo = make_game_repo(tmp_path / "nuke-raider")  # no src/config.h at all
@@ -1018,7 +1089,7 @@ class TestParseDiffTextPure(unittest.TestCase):
 class TestGetDiff(unittest.TestCase):
     def test_clean_worktree_has_no_files_and_no_untracked(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             game_repo = make_committed_game_repo(
                 tmp_path / "nuke-raider", {"src/config.h": "#define X 1\n"}
             )
@@ -1032,7 +1103,7 @@ class TestGetDiff(unittest.TestCase):
 
     def test_modified_file_appears_as_removed_and_added_line(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             game_repo = make_committed_game_repo(
                 tmp_path / "nuke-raider", {"src/config.h": "#define GEAR1_MAX_SPEED 2u\n"}
             )
@@ -1053,7 +1124,7 @@ class TestGetDiff(unittest.TestCase):
 
     def test_staged_and_unstaged_changes_both_appear_in_one_diff(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             game_repo = make_committed_game_repo(
                 tmp_path / "nuke-raider",
                 {"a.txt": "a\n", "b.txt": "b\n"},
@@ -1069,7 +1140,7 @@ class TestGetDiff(unittest.TestCase):
 
     def test_deleted_file_shows_as_deleted(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             game_repo = make_committed_game_repo(
                 tmp_path / "nuke-raider", {"gone.txt": "bye\n"}
             )
@@ -1083,7 +1154,7 @@ class TestGetDiff(unittest.TestCase):
 
     def test_untracked_file_listed_by_name_not_diffed(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             game_repo = make_committed_game_repo(
                 tmp_path / "nuke-raider", {"src/config.h": "#define X 1\n"}
             )
@@ -1098,7 +1169,7 @@ class TestGetDiff(unittest.TestCase):
 
     def test_binary_file_change_reports_binary_without_crashing(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             game_repo = make_committed_game_repo(
                 tmp_path / "nuke-raider", {"art.bin": "\x00\x01\x02"}
             )
@@ -1113,7 +1184,7 @@ class TestGetDiff(unittest.TestCase):
 
     def test_no_commits_yet_still_diffs_staged_content(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             game_repo = make_bare_game_repo(tmp_path / "nuke-raider")
             (game_repo / "src").mkdir()
             (game_repo / "src" / "config.h").write_text("#define X 1\n", encoding="utf-8")
@@ -1128,7 +1199,7 @@ class TestGetDiff(unittest.TestCase):
 
     def test_no_commits_yet_with_no_staged_content_is_clean_with_untracked(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             game_repo = make_bare_game_repo(tmp_path / "nuke-raider")
             (game_repo / "README.md").write_text("hi\n", encoding="utf-8")
             binding = bind_over(tmp_path, game_repo)
@@ -1140,7 +1211,7 @@ class TestGetDiff(unittest.TestCase):
 
     def test_normal_refresh_uses_two_subprocess_calls(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             game_repo = make_committed_game_repo(
                 tmp_path / "nuke-raider", {"src/config.h": "#define X 1\n"}
             )
@@ -1163,7 +1234,7 @@ class TestGetChangeSummary(unittest.TestCase):
 
     def test_clean_worktree_is_not_dirty(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             game_repo = make_committed_game_repo(
                 tmp_path / "nuke-raider", {"src/config.h": "#define X 1\n"}
             )
@@ -1181,7 +1252,7 @@ class TestGetChangeSummary(unittest.TestCase):
         # one modified tracked file and one untracked file must read as
         # changed_file_count=1, untracked_count=1, never changed_file_count=2.
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             game_repo = make_committed_game_repo(
                 tmp_path / "nuke-raider", {"a.txt": "a\n", "b.txt": "b\n"}
             )
@@ -1196,7 +1267,7 @@ class TestGetChangeSummary(unittest.TestCase):
 
     def test_added_and_removed_line_totals(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             game_repo = make_committed_game_repo(
                 tmp_path / "nuke-raider", {"a.txt": "one\ntwo\nthree\n"}
             )
@@ -1210,7 +1281,7 @@ class TestGetChangeSummary(unittest.TestCase):
 
     def test_multiple_changed_files_sum_across_files(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             game_repo = make_committed_game_repo(
                 tmp_path / "nuke-raider", {"a.txt": "a\n", "b.txt": "b\nc\n"}
             )
@@ -1225,7 +1296,7 @@ class TestGetChangeSummary(unittest.TestCase):
 
     def test_no_commits_yet_counts_staged_content(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             game_repo = make_bare_game_repo(tmp_path / "nuke-raider")
             (game_repo / "src").mkdir()
             (game_repo / "src" / "config.h").write_text("#define X 1\n", encoding="utf-8")
@@ -1243,7 +1314,7 @@ class TestGetChangeSummary(unittest.TestCase):
         # HEAD. An untracked file is counted (untracked_count == 1) but
         # must not raise `dirty` on its own -- real temp git repo, no mock.
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             game_repo = make_committed_game_repo(
                 tmp_path / "nuke-raider", {"src/config.h": "#define X 1\n"}
             )
@@ -1257,7 +1328,7 @@ class TestGetChangeSummary(unittest.TestCase):
 
     def test_ac20_tracked_change_alone_is_dirty(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             game_repo = make_committed_game_repo(
                 tmp_path / "nuke-raider", {"a.txt": "a\n"}
             )
@@ -1271,7 +1342,7 @@ class TestGetChangeSummary(unittest.TestCase):
 
     def test_ac20_tracked_change_and_untracked_together_is_dirty(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             game_repo = make_committed_game_repo(
                 tmp_path / "nuke-raider", {"a.txt": "a\n"}
             )
@@ -1365,7 +1436,7 @@ def run_doctor(which_map, environ, settings, binding=None, binding_error=None):
 class TestDoctorChecksEverythingR14Names(unittest.TestCase):
     def test_report_covers_every_required_item(self):
         with tempfile.TemporaryDirectory() as tmp:
-            which, environ, settings = make_toolchain(Path(tmp))
+            which, environ, settings = make_toolchain(tmp_root(tmp))
 
             report = run_doctor(which, environ, settings)
 
@@ -1386,7 +1457,7 @@ class TestDoctorChecksEverythingR14Names(unittest.TestCase):
 
     def test_a_complete_machine_passes_every_check(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             which, environ, settings = make_toolchain(tmp_path)
             garage_root = tmp_path / "nuke-raider-garage"
             garage_root.mkdir()
@@ -1410,7 +1481,7 @@ class TestDoctorChecksEverythingR14Names(unittest.TestCase):
             # An explicit jar path that does not exist: the default install
             # path may well be present on the machine running this.
             report = run_doctor(
-                {}, {"EMULICIOUS_JAR": str(Path(tmp) / "nowhere.jar")}, None
+                {}, {"EMULICIOUS_JAR": str(tmp_root(tmp) / "nowhere.jar")}, None
             )
 
             self.assertEqual(len(report.failures), 9)
@@ -1436,7 +1507,7 @@ class TestDoctorClassification(unittest.TestCase):
 
     def test_a_header_that_matches_the_classification_passes(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             binding = self._bound(tmp_path, SAMPLE_CONFIG_TEXT)
             schema = Schema.load(
                 write_json(tmp_path / "t.json", SAMPLE_TUNABLES_FOR_CONFIG_IO)
@@ -1449,7 +1520,7 @@ class TestDoctorClassification(unittest.TestCase):
 
     def test_an_unclassified_define_is_reported_by_name(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             drifted = SAMPLE_CONFIG_TEXT.replace(
                 "#endif /* CONFIG_H */",
                 "#define NEW_UNCLASSIFIED_DEFINE 3u\n\n#endif /* CONFIG_H */",
@@ -1469,7 +1540,7 @@ class TestDoctorClassification(unittest.TestCase):
 
     def test_a_classification_entry_the_header_dropped_is_reported_too(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             binding = self._bound(tmp_path, SAMPLE_CONFIG_TEXT)
             extended = json.loads(json.dumps(SAMPLE_TUNABLES_FOR_CONFIG_IO))
             extended["entries"]["GONE_FROM_HEADER"] = {
@@ -1498,7 +1569,7 @@ class TestDoctorRomusage(unittest.TestCase):
 
     def test_absent_from_path_is_a_failure_naming_bank_post_build(self):
         with tempfile.TemporaryDirectory() as tmp:
-            which, environ, settings = make_toolchain(Path(tmp))
+            which, environ, settings = make_toolchain(tmp_root(tmp))
             del which["romusage"]
 
             report = run_doctor(which, environ, settings)
@@ -1511,7 +1582,7 @@ class TestDoctorRomusage(unittest.TestCase):
 
     def test_failure_shows_in_the_summary(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             which, environ, settings = make_toolchain(tmp_path)
             del which["romusage"]
 
@@ -1527,7 +1598,7 @@ class TestDoctorRomusage(unittest.TestCase):
 
     def test_detail_names_the_gbdk_bin_directory_that_ships_it(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             which, environ, settings = make_toolchain(tmp_path)
             del which["romusage"]
 
@@ -1538,7 +1609,7 @@ class TestDoctorRomusage(unittest.TestCase):
 
     def test_detail_omits_the_hint_when_gbdk_home_does_not_hold_it(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             which, environ, settings = make_toolchain(tmp_path)
             del which["romusage"]
             (tmp_path / "gbdk" / "bin" / "romusage.exe").unlink()
@@ -1550,7 +1621,7 @@ class TestDoctorRomusage(unittest.TestCase):
 
     def test_present_reports_its_resolved_path(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             which, environ, settings = make_toolchain(tmp_path)
 
             report = run_doctor(which, environ, settings)
@@ -1564,7 +1635,7 @@ class TestDoctorRomusage(unittest.TestCase):
 class TestDoctorBuildChain(unittest.TestCase):
     def test_make_absent_is_a_failure_naming_the_targets(self):
         with tempfile.TemporaryDirectory() as tmp:
-            which, environ, settings = make_toolchain(Path(tmp))
+            which, environ, settings = make_toolchain(tmp_root(tmp))
             del which["make"]
 
             check = {c.key: c for c in run_doctor(which, environ, settings).checks}["make"]
@@ -1574,7 +1645,7 @@ class TestDoctorBuildChain(unittest.TestCase):
 
     def test_gcc_absent_is_a_failure_naming_the_host_tests(self):
         with tempfile.TemporaryDirectory() as tmp:
-            which, environ, settings = make_toolchain(Path(tmp))
+            which, environ, settings = make_toolchain(tmp_root(tmp))
             del which["gcc"]
 
             check = {c.key: c for c in run_doctor(which, environ, settings).checks}["gcc"]
@@ -1584,7 +1655,7 @@ class TestDoctorBuildChain(unittest.TestCase):
 
     def test_gbdk_home_unset_is_a_failure(self):
         with tempfile.TemporaryDirectory() as tmp:
-            which, environ, settings = make_toolchain(Path(tmp))
+            which, environ, settings = make_toolchain(tmp_root(tmp))
             environ.pop("GBDK_HOME")
 
             report = run_doctor(which, environ, settings)
@@ -1596,7 +1667,7 @@ class TestDoctorBuildChain(unittest.TestCase):
 
     def test_gbdk_home_without_lcc_is_a_failure_that_says_so(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             which, environ, settings = make_toolchain(tmp_path)
             (tmp_path / "gbdk" / "bin" / "lcc.exe").unlink()
 
@@ -1613,7 +1684,7 @@ class TestDoctorBuildChain(unittest.TestCase):
         # passes, and no source file compiles. The Makefile expands it into
         # a bash recipe, where `\g` is an escape and the path is mangled.
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             which, environ, settings = make_toolchain(tmp_path)
             environ["GBDK_HOME"] = str(tmp_path / "gbdk").replace("/", "\\")
 
@@ -1629,7 +1700,7 @@ class TestDoctorBuildChain(unittest.TestCase):
 
     def test_gbdk_home_holding_lcc_passes_and_reports_it(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             which, environ, settings = make_toolchain(tmp_path)
 
             check = {
@@ -1641,7 +1712,7 @@ class TestDoctorBuildChain(unittest.TestCase):
 
     def test_git_unix_tools_missing_bash_is_a_failure_naming_bash(self):
         with tempfile.TemporaryDirectory() as tmp:
-            which, environ, settings = make_toolchain(Path(tmp))
+            which, environ, settings = make_toolchain(tmp_root(tmp))
             del which["bash"]
 
             check = {
@@ -1655,7 +1726,7 @@ class TestDoctorBuildChain(unittest.TestCase):
 
     def test_git_unix_tools_reports_both_directories_once_each(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             which, environ, settings = make_toolchain(tmp_path)
 
             check = {
@@ -1668,7 +1739,7 @@ class TestDoctorBuildChain(unittest.TestCase):
 
     def test_git_unix_tools_in_one_directory_is_not_repeated(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             which, environ, settings = make_toolchain(tmp_path)
             which["sed"] = str(Path(which["bash"]).parent / "sed.exe")
 
@@ -1682,7 +1753,7 @@ class TestDoctorBuildChain(unittest.TestCase):
 class TestDoctorEmulator(unittest.TestCase):
     def test_java_absent_prevents_the_emulator(self):
         with tempfile.TemporaryDirectory() as tmp:
-            which, environ, settings = make_toolchain(Path(tmp))
+            which, environ, settings = make_toolchain(tmp_root(tmp))
             del which["java"]
 
             check = {c.key: c for c in run_doctor(which, environ, settings).checks}["java"]
@@ -1692,7 +1763,7 @@ class TestDoctorEmulator(unittest.TestCase):
 
     def test_missing_jar_is_a_failure_naming_the_settings_key(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             which, environ, settings = make_toolchain(tmp_path)
             (tmp_path / "Emulicious" / "Emulicious.jar").unlink()
 
@@ -1706,7 +1777,7 @@ class TestDoctorEmulator(unittest.TestCase):
 
     def test_jar_path_comes_from_settings_first_then_env_then_the_default(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             recorded = tmp_path / "recorded.jar"
             from_env = tmp_path / "env.jar"
 
@@ -1734,7 +1805,7 @@ class TestDoctorBinding(unittest.TestCase):
 
     def test_a_resolved_binding_passes_and_shows_the_active_worktree(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             garage_root = tmp_path / "nuke-raider-garage"
             garage_root.mkdir()
             game_repo = make_game_repo(tmp_path / "nuke-raider")
@@ -1757,7 +1828,7 @@ class TestDoctorBinding(unittest.TestCase):
 
     def test_settings_default_to_the_bound_repositorys_own_file(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             garage_root = tmp_path / "nuke-raider-garage"
             garage_root.mkdir()
             make_game_repo(tmp_path / "nuke-raider")
@@ -1882,7 +1953,7 @@ class TestMakeCommands(unittest.TestCase):
 
     def test_describe_rom_reports_the_written_rom_and_its_size(self):
         with tempfile.TemporaryDirectory() as tmp:
-            worktree = Path(tmp)
+            worktree = tmp_root(tmp)
             (worktree / "build").mkdir()
             (worktree / "build" / "nuke-raider.gb").write_bytes(b"\0" * 524288)
 
@@ -1896,14 +1967,14 @@ class TestMakeCommands(unittest.TestCase):
         # incremental make would relink the old objects and hand back a ROM
         # that does not carry the edited value.
         with tempfile.TemporaryDirectory() as tmp:
-            worktree = _worktree_with_objects(Path(tmp))
+            worktree = _worktree_with_objects(tmp_root(tmp))
             _touch_newer(worktree / "src" / "config.h", worktree / "build" / "obj")
 
             self.assertTrue(make_runner.needs_clean_build(worktree))
 
     def test_objects_compiled_after_the_last_edit_need_no_clean(self):
         with tempfile.TemporaryDirectory() as tmp:
-            worktree = _worktree_with_objects(Path(tmp))
+            worktree = _worktree_with_objects(tmp_root(tmp))
             _touch_newer(worktree / "build" / "obj" / "main.o", worktree / "src")
 
             self.assertFalse(make_runner.needs_clean_build(worktree))
@@ -1912,7 +1983,7 @@ class TestMakeCommands(unittest.TestCase):
         # Nothing to relink: a build with no objects compiles everything,
         # and cleaning would only delete an empty directory.
         with tempfile.TemporaryDirectory() as tmp:
-            worktree = Path(tmp)
+            worktree = tmp_root(tmp)
             (worktree / "src").mkdir()
             (worktree / "src" / "config.h").write_text("#define A 1\n", encoding="utf-8")
 
@@ -1925,7 +1996,7 @@ class TestMakeCommands(unittest.TestCase):
         # A make that exits 0 without writing the ROM must not read as a
         # successful build.
         with tempfile.TemporaryDirectory() as tmp:
-            self.assertIn("was not written", make_runner.describe_rom(Path(tmp)))
+            self.assertIn("was not written", make_runner.describe_rom(tmp_root(tmp)))
 
 
 class TestExplainFailure(unittest.TestCase):
@@ -1998,7 +2069,7 @@ class TestExplainFailure(unittest.TestCase):
         # raises a TypeError out of the game repository's own script,
         # because it formats a None. "Run Build first" is the content.
         with tempfile.TemporaryDirectory() as tmp:
-            lines = make_runner.explain_missing_rom("memory-check", Path(tmp))
+            lines = make_runner.explain_missing_rom("memory-check", tmp_root(tmp))
 
             self.assertTrue(lines)
             self.assertIn("Run Build first", lines[0])
@@ -2006,7 +2077,7 @@ class TestExplainFailure(unittest.TestCase):
 
     def test_a_measuring_target_with_a_rom_present_explains_nothing(self):
         with tempfile.TemporaryDirectory() as tmp:
-            worktree = Path(tmp)
+            worktree = tmp_root(tmp)
             (worktree / "build").mkdir()
             (worktree / "build" / "nuke-raider.gb").write_bytes(b"\0")
 
@@ -2016,8 +2087,8 @@ class TestExplainFailure(unittest.TestCase):
 
     def test_a_build_target_is_never_told_to_build_first(self):
         with tempfile.TemporaryDirectory() as tmp:
-            self.assertEqual(make_runner.explain_missing_rom("build", Path(tmp)), [])
-            self.assertEqual(make_runner.explain_missing_rom("clean", Path(tmp)), [])
+            self.assertEqual(make_runner.explain_missing_rom("build", tmp_root(tmp)), [])
+            self.assertEqual(make_runner.explain_missing_rom("clean", tmp_root(tmp)), [])
 
     def test_no_report_and_no_target_are_both_harmless(self):
         self.assertEqual(make_runner.explain_failure("build", None), [])
@@ -2102,12 +2173,12 @@ class TestRun(unittest.TestCase):
 
             make_runner.run(
                 python_command("import os; print(os.getcwd())"),
-                Path(tmp),
+                tmp_root(tmp),
                 lines.append,
             )
 
             self.assertEqual(
-                Path(lines[0]).resolve(), Path(tmp).resolve()
+                Path(lines[0]).resolve(), tmp_root(tmp).resolve()
             )
 
     def test_a_missing_executable_is_a_result_not_a_crash(self):
@@ -2437,7 +2508,7 @@ class TestEmuliciousGate(unittest.TestCase):
     """
 
     def _rig(self, tmp: str):
-        tmp_path = Path(tmp)
+        tmp_path = tmp_root(tmp)
         rom = tmp_path / "build" / "nuke-raider.gb"
         rom.parent.mkdir(parents=True)
         rom.write_bytes(b"\0")
@@ -2472,7 +2543,7 @@ class TestEmuliciousGate(unittest.TestCase):
     def test_no_rom_refuses(self):
         with tempfile.TemporaryDirectory() as tmp:
             _, jar = self._rig(tmp)
-            missing = Path(tmp) / "build" / "not-here.gb"
+            missing = tmp_root(tmp) / "build" / "not-here.gb"
 
             reason = emulicious.refuse_reason(None, missing, jar)
 
@@ -2483,7 +2554,7 @@ class TestEmuliciousGate(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             rom, _ = self._rig(tmp)
 
-            reason = emulicious.refuse_reason(None, rom, Path(tmp) / "nope.jar")
+            reason = emulicious.refuse_reason(None, rom, tmp_root(tmp) / "nope.jar")
 
             self.assertIn("Toolchain", reason)
 

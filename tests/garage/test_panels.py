@@ -55,7 +55,14 @@ GAME_REPO_REMOTE_URL = "https://github.com/MatthieuGagne/gmb-nuke-raider.git"
 # copied: two fixtures that could drift apart would let the panel be tested
 # against text `make memory-check` never prints.
 sys.path.insert(0, str(REPO_ROOT / "tests"))
-from test_garage_core import BANK_REPORT_OUTPUT, MEMORY_CHECK_OUTPUT  # noqa: E402
+from test_garage_core import (  # noqa: E402
+    BANK_REPORT_OUTPUT,
+    MEMORY_CHECK_OUTPUT,
+    NO_GAME_REPO,
+    NO_GAME_REPO_REASON,
+    REAL_CONFIG_H_PATH,
+    tmp_root,
+)
 
 _app = QApplication.instance() or QApplication([])
 
@@ -154,8 +161,8 @@ def write_json(path: Path, data: dict) -> Path:
 
 def make_panel_binding(tmp_path: Path):
     """Build a real Binding over a throwaway game repo carrying
-    PANEL_CONFIG_TEXT, plus the matching Schema. Never touches
-    C:/Code/nuke-raider.
+    PANEL_CONFIG_TEXT, plus the matching Schema. Never touches the
+    bound game repository.
     """
     garage_root = tmp_path / "nuke-raider-garage"
     garage_root.mkdir()
@@ -205,7 +212,7 @@ def make_wide_panel_binding(tmp_path: Path):
 class TestGarageWindow(unittest.TestCase):
     def test_window_builds_and_header_shows_active_worktree_and_branch(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             garage_root = tmp_path / "nuke-raider-garage"
             garage_root.mkdir()
             game_repo = make_game_repo(tmp_path / "nuke-raider")
@@ -226,13 +233,14 @@ class TestGarageWindow(unittest.TestCase):
             self.assertIsInstance(window.tuner_panel, TunerPanel)
             self.assertEqual(window.tuner_panel._rows, {})
 
+    @unittest.skipIf(NO_GAME_REPO, NO_GAME_REPO_REASON)
     def test_window_wires_real_tuner_panel_against_real_schema(self):
         # Uses the real game repo's src/config.h (read-only) copied into a
         # throwaway worktree, exercised against the real tunables.json --
-        # never writes to C:/Code/nuke-raider.
-        real_config_text = Path("C:/Code/nuke-raider/src/config.h").read_text(encoding="utf-8")
+        # never writes to the bound game repository.
+        real_config_text = REAL_CONFIG_H_PATH.read_text(encoding="utf-8")
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             garage_root = tmp_path / "nuke-raider-garage"
             garage_root.mkdir()
             make_game_repo_with_config(tmp_path / "nuke-raider", real_config_text)
@@ -247,7 +255,7 @@ class TestGarageWindow(unittest.TestCase):
 
     def test_window_shows_failure_and_does_not_crash_on_bad_binding(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             garage_root = tmp_path / "nuke-raider-garage"
             garage_root.mkdir()
             settings_path = garage_root / "garage.local.json"
@@ -281,7 +289,7 @@ class TestGarageWindow(unittest.TestCase):
 class TestComputeDerivedDependents(unittest.TestCase):
     def test_racer_hp_dependent_found_from_header_text_not_a_hardcoded_list(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             binding, schema = make_panel_binding(tmp_path)
             config = config_io.read(binding, schema)
 
@@ -291,9 +299,10 @@ class TestComputeDerivedDependents(unittest.TestCase):
             # A tunable with no derived reader has no entry (or an empty list).
             self.assertFalse(dependents.get("PLAYER_ARMOR"))
 
+    @unittest.skipIf(NO_GAME_REPO, NO_GAME_REPO_REASON)
     def test_real_config_racer_hp_drives_patrol_hp(self):
         # Same check against the real header/schema (read-only).
-        real_config_text = Path("C:/Code/nuke-raider/src/config.h").read_text(encoding="utf-8")
+        real_config_text = REAL_CONFIG_H_PATH.read_text(encoding="utf-8")
         schema = Schema.load()
         config = config_io.parse(real_config_text, schema=schema)
 
@@ -305,7 +314,7 @@ class TestComputeDerivedDependents(unittest.TestCase):
 class TestTunerPanel(unittest.TestCase):
     def test_panel_lists_only_tunables_grouped_by_category(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             binding, schema = make_panel_binding(tmp_path)
 
             panel = TunerPanel(binding, schema=schema)
@@ -316,7 +325,7 @@ class TestTunerPanel(unittest.TestCase):
 
     def test_ac8_max_sprites_absent(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             binding, schema = make_panel_binding(tmp_path)
 
             panel = TunerPanel(binding, schema=schema)
@@ -327,7 +336,7 @@ class TestTunerPanel(unittest.TestCase):
 
     def test_editor_clamps_at_both_ends(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             binding, schema = make_panel_binding(tmp_path)
 
             panel = TunerPanel(binding, schema=schema)
@@ -341,7 +350,7 @@ class TestTunerPanel(unittest.TestCase):
 
     def test_editor_range_is_visible_without_trial_and_error(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             binding, schema = make_panel_binding(tmp_path)
 
             panel = TunerPanel(binding, schema=schema)
@@ -354,7 +363,7 @@ class TestTunerPanel(unittest.TestCase):
 
     def test_reason_reachable_as_tooltip(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             binding, schema = make_panel_binding(tmp_path)
 
             panel = TunerPanel(binding, schema=schema)
@@ -364,7 +373,7 @@ class TestTunerPanel(unittest.TestCase):
 
     def test_racer_hp_row_shows_its_derived_dependent(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             binding, schema = make_panel_binding(tmp_path)
 
             panel = TunerPanel(binding, schema=schema)
@@ -379,10 +388,10 @@ class TestTunerPanel(unittest.TestCase):
         # spinbox's editingFinished signal -- Enter or focus-out) writes
         # config.h at once.
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             binding, schema = make_panel_binding(tmp_path)
             config_path = binding.config_h
-            self.assertNotEqual(config_path, Path("C:/Code/nuke-raider/src/config.h"))
+            self.assertNotEqual(config_path, REAL_CONFIG_H_PATH)
 
             panel = TunerPanel(binding, schema=schema)
             row = panel._rows["GEAR1_MAX_SPEED"]
@@ -403,7 +412,7 @@ class TestTunerPanel(unittest.TestCase):
 
     def test_committing_the_value_already_on_disk_does_not_rewrite(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             binding, schema = make_panel_binding(tmp_path)
 
             panel = TunerPanel(binding, schema=schema)
@@ -421,7 +430,7 @@ class TestTunerPanel(unittest.TestCase):
         # then 100 -- only editingFinished (Enter, here) writes, and only
         # the final value.
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             binding, schema = make_wide_panel_binding(tmp_path)
 
             panel = TunerPanel(binding, schema=schema)
@@ -465,7 +474,7 @@ class TestTunerPanel(unittest.TestCase):
 
     def test_missing_config_h_shows_explanation_without_crashing(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             garage_root = tmp_path / "nuke-raider-garage"
             garage_root.mkdir()
             make_game_repo(tmp_path / "nuke-raider")  # no src/config.h at all
@@ -485,7 +494,7 @@ class TestTunerPanelRevert(unittest.TestCase):
         # Case 1: the file was hand-edited (or a previous session saved) --
         # this must show up on launch, not only after an in-session edit.
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             binding, schema = make_panel_binding(tmp_path)
             binding.config_h.write_text(
                 PANEL_CONFIG_TEXT.replace(
@@ -507,7 +516,7 @@ class TestTunerPanelRevert(unittest.TestCase):
 
     def test_row_matching_head_hides_head_value_and_revert(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             binding, schema = make_panel_binding(tmp_path)
 
             panel = TunerPanel(binding, schema=schema)
@@ -519,7 +528,7 @@ class TestTunerPanelRevert(unittest.TestCase):
 
     def test_editing_then_editing_back_to_head_value_hides_head_display_again(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             binding, schema = make_panel_binding(tmp_path)
             panel = TunerPanel(binding, schema=schema)
             row = panel._rows["GEAR1_MAX_SPEED"]
@@ -537,7 +546,7 @@ class TestTunerPanelRevert(unittest.TestCase):
         # session) differs from HEAD from launch. Revert restores it and
         # writes it -- there is no "pending" state to clear first.
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             binding, schema = make_panel_binding(tmp_path)
             binding.config_h.write_text(
                 PANEL_CONFIG_TEXT.replace(
@@ -562,7 +571,7 @@ class TestTunerPanelRevert(unittest.TestCase):
 
     def test_revert_all_restores_every_differing_row_in_one_write(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             binding, schema = make_panel_binding(tmp_path)
             panel = TunerPanel(binding, schema=schema)
 
@@ -591,7 +600,7 @@ class TestTunerPanelRevert(unittest.TestCase):
 
     def test_revert_all_is_a_no_op_when_nothing_differs_from_head(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             binding, schema = make_panel_binding(tmp_path)
             panel = TunerPanel(binding, schema=schema)
 
@@ -604,7 +613,7 @@ class TestTunerPanelRevert(unittest.TestCase):
 
     def test_revert_all_button_wired_to_revert_all(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             binding, schema = make_panel_binding(tmp_path)
             panel = TunerPanel(binding, schema=schema)
             panel._rows["GEAR1_MAX_SPEED"].spin.setValue(9)
@@ -620,7 +629,7 @@ class TestTunerPanelRevert(unittest.TestCase):
 
     def test_per_row_revert_button_wired_to_revert_row(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             binding, schema = make_panel_binding(tmp_path)
             panel = TunerPanel(binding, schema=schema)
             row = panel._rows["GEAR1_MAX_SPEED"]
@@ -637,7 +646,7 @@ class TestTunerPanelRevert(unittest.TestCase):
 
     def test_head_values_read_once_per_refresh_not_once_per_row(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             binding, schema = make_panel_binding(tmp_path)
 
             with mock.patch(
@@ -651,7 +660,7 @@ class TestTunerPanelRevert(unittest.TestCase):
 
     def test_no_head_available_does_not_crash_and_explains(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             garage_root = tmp_path / "nuke-raider-garage"
             garage_root.mkdir()
             game_repo = tmp_path / "nuke-raider"
@@ -696,7 +705,7 @@ class TestTunerPanelRevert(unittest.TestCase):
 
     def test_config_h_missing_at_head_does_not_crash_and_explains(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             garage_root = tmp_path / "nuke-raider-garage"
             garage_root.mkdir()
             game_repo = make_game_repo(tmp_path / "nuke-raider")  # commit has no src/config.h
@@ -722,7 +731,7 @@ class TestTunerPanelRevert(unittest.TestCase):
 class TestDiffPanel(unittest.TestCase):
     def test_clean_worktree_shows_clean_message(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             binding, _schema = make_panel_binding(tmp_path)
 
             panel = DiffPanel(binding)
@@ -733,7 +742,7 @@ class TestDiffPanel(unittest.TestCase):
 
     def test_modified_file_shows_hunks_and_lines(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             binding, _schema = make_panel_binding(tmp_path)
             binding.config_h.write_text(
                 PANEL_CONFIG_TEXT.replace(
@@ -762,7 +771,7 @@ class TestDiffPanel(unittest.TestCase):
 
     def test_untracked_file_listed_separately(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             binding, _schema = make_panel_binding(tmp_path)
             (binding.game_repo / "assets" / "sprites").mkdir(parents=True)
             (binding.game_repo / "assets" / "sprites" / "car-2.xcf").write_bytes(b"\x00\x01")
@@ -787,7 +796,7 @@ class TestDiffPanel(unittest.TestCase):
 
     def test_refresh_picks_up_new_untracked_file(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             binding, _schema = make_panel_binding(tmp_path)
 
             panel = DiffPanel(binding)
@@ -819,7 +828,7 @@ class TestDriftIsReportedAtStartup(unittest.TestCase):
 
     def test_the_doctor_carries_a_classification_row(self):
         with tempfile.TemporaryDirectory() as tmp:
-            window = self._window(Path(tmp))
+            window = self._window(tmp_root(tmp))
 
             self.assertIn("classification", window.doctor_panel.check_keys())
             self.assertEqual(window.doctor_panel.verdict_of("classification"), "fail")
@@ -832,7 +841,7 @@ class TestDriftIsReportedAtStartup(unittest.TestCase):
 
     def test_the_window_states_it_without_anything_being_opened(self):
         with tempfile.TemporaryDirectory() as tmp:
-            window = self._window(Path(tmp))
+            window = self._window(tmp_root(tmp))
 
             self.assertTrue(window.toolchain_label.isVisibleTo(window))
             self.assertIn("classification", window.toolchain_label.text())
@@ -853,7 +862,7 @@ class TestDiffNamesItsWorktree(unittest.TestCase):
 
     def test_the_panel_names_the_worktree_and_branch_it_is_diffing(self):
         with tempfile.TemporaryDirectory() as tmp:
-            window = self._window(Path(tmp))
+            window = self._window(tmp_root(tmp))
 
             subject = window.diff_panel.subject_text()
 
@@ -863,7 +872,7 @@ class TestDiffNamesItsWorktree(unittest.TestCase):
 
     def test_the_dialog_title_names_it_too(self):
         with tempfile.TemporaryDirectory() as tmp:
-            window = self._window(Path(tmp))
+            window = self._window(tmp_root(tmp))
 
             title = window.diff_dialog.windowTitle()
 
@@ -872,13 +881,13 @@ class TestDiffNamesItsWorktree(unittest.TestCase):
 
     def test_the_menu_action_says_which_tree_it_opens(self):
         with tempfile.TemporaryDirectory() as tmp:
-            window = self._window(Path(tmp))
+            window = self._window(tmp_root(tmp))
 
             self.assertIn("Active Worktree", window.show_diff_action.text())
 
     def test_both_follow_a_worktree_switch(self):
         with tempfile.TemporaryDirectory() as tmp:
-            window = self._window(Path(tmp))
+            window = self._window(tmp_root(tmp))
             window.worktrees_panel.create_worktree("feat/other")
             spike = next(
                 w for w in window.worktrees_panel.worktrees()
@@ -908,7 +917,7 @@ class TestFormatHeader(unittest.TestCase):
 
     def test_clean_shows_no_changes_and_no_mark(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             binding = self._binding_on(tmp_path, "feat")
             summary = diff_core.ChangeSummary(
                 changed_file_count=0, untracked_count=0, added_lines=0, removed_lines=0
@@ -922,7 +931,7 @@ class TestFormatHeader(unittest.TestCase):
 
     def test_one_file_singular_with_line_counts(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             binding = self._binding_on(tmp_path, "feat")
             summary = diff_core.ChangeSummary(
                 changed_file_count=1, untracked_count=0, added_lines=5, removed_lines=5
@@ -938,7 +947,7 @@ class TestFormatHeader(unittest.TestCase):
 
     def test_several_files_plural_with_line_counts(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             binding = self._binding_on(tmp_path, "feat")
             summary = diff_core.ChangeSummary(
                 changed_file_count=12, untracked_count=0, added_lines=847, removed_lines=203
@@ -952,7 +961,7 @@ class TestFormatHeader(unittest.TestCase):
 
     def test_untracked_present_appended_after_file_totals(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             binding = self._binding_on(tmp_path, "feat")
             summary = diff_core.ChangeSummary(
                 changed_file_count=1, untracked_count=1, added_lines=5, removed_lines=5
@@ -964,7 +973,7 @@ class TestFormatHeader(unittest.TestCase):
 
     def test_untracked_absent_omits_the_untracked_clause(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             binding = self._binding_on(tmp_path, "feat")
             summary = diff_core.ChangeSummary(
                 changed_file_count=1, untracked_count=0, added_lines=5, removed_lines=5
@@ -976,7 +985,7 @@ class TestFormatHeader(unittest.TestCase):
 
     def test_master_appends_commit_blocked_clause(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             binding = self._binding_on(tmp_path, "master")
             summary = diff_core.ChangeSummary(
                 changed_file_count=0, untracked_count=0, added_lines=0, removed_lines=0
@@ -988,7 +997,7 @@ class TestFormatHeader(unittest.TestCase):
 
     def test_off_master_omits_commit_blocked_clause(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             binding = self._binding_on(tmp_path, "feat")
             summary = diff_core.ChangeSummary(
                 changed_file_count=1, untracked_count=0, added_lines=1, removed_lines=1
@@ -1000,7 +1009,7 @@ class TestFormatHeader(unittest.TestCase):
 
     def test_dirty_master_still_shows_mark_and_commit_blocked(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             binding = self._binding_on(tmp_path, "master")
             summary = diff_core.ChangeSummary(
                 changed_file_count=1, untracked_count=0, added_lines=1, removed_lines=1
@@ -1015,7 +1024,7 @@ class TestFormatHeader(unittest.TestCase):
 class TestGarageWindowDiffIntegration(unittest.TestCase):
     def test_diff_dialog_is_closed_on_launch(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             garage_root = tmp_path / "nuke-raider-garage"
             garage_root.mkdir()
             make_game_repo(tmp_path / "nuke-raider")
@@ -1027,7 +1036,7 @@ class TestGarageWindowDiffIntegration(unittest.TestCase):
 
     def test_menu_action_opens_diff_dialog_and_it_can_be_closed_and_reopened(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             garage_root = tmp_path / "nuke-raider-garage"
             garage_root.mkdir()
             make_game_repo(tmp_path / "nuke-raider")
@@ -1058,7 +1067,7 @@ class TestGarageWindowDiffIntegration(unittest.TestCase):
         # differing from HEAD, so it must not appear here; "no changes"
         # names the tracked state, "2 untracked" the rest.
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             garage_root = tmp_path / "nuke-raider-garage"
             garage_root.mkdir()
             game_repo = make_game_repo(tmp_path / "nuke-raider")
@@ -1074,7 +1083,7 @@ class TestGarageWindowDiffIntegration(unittest.TestCase):
 
     def test_header_shows_dirty_mark_for_a_tracked_change(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             garage_root = tmp_path / "nuke-raider-garage"
             garage_root.mkdir()
             game_repo = make_game_repo(tmp_path / "nuke-raider")
@@ -1089,7 +1098,7 @@ class TestGarageWindowDiffIntegration(unittest.TestCase):
 
     def test_header_states_commit_blocked_on_master(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             garage_root = tmp_path / "nuke-raider-garage"
             garage_root.mkdir()
             make_game_repo(tmp_path / "nuke-raider")
@@ -1100,7 +1109,7 @@ class TestGarageWindowDiffIntegration(unittest.TestCase):
 
     def test_tuner_write_refreshes_header_totals(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             garage_root = tmp_path / "nuke-raider-garage"
             garage_root.mkdir()
             game_repo = make_game_repo_with_config(tmp_path / "nuke-raider", PANEL_CONFIG_TEXT)
@@ -1130,7 +1139,7 @@ class TestGarageWindowDiffIntegration(unittest.TestCase):
 
     def test_tuner_write_refreshes_open_diff_dialog(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             garage_root = tmp_path / "nuke-raider-garage"
             garage_root.mkdir()
             game_repo = make_game_repo_with_config(tmp_path / "nuke-raider", PANEL_CONFIG_TEXT)
@@ -1248,7 +1257,7 @@ class TestTunerChangedRowStyling(unittest.TestCase):
 
     def test_changed_property_set_on_differing_row_and_not_on_equal_row(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             binding, schema = make_panel_binding(tmp_path)
             panel = TunerPanel(binding, schema=schema)
             row = panel._rows["GEAR1_MAX_SPEED"]
@@ -1270,7 +1279,7 @@ class TestTunerChangedRowStyling(unittest.TestCase):
 
     def test_reverting_clears_the_changed_property(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             binding, schema = make_panel_binding(tmp_path)
             panel = TunerPanel(binding, schema=schema)
             row = panel._rows["GEAR1_MAX_SPEED"]
@@ -1294,7 +1303,7 @@ class TestDiffLineDistinctRoles(unittest.TestCase):
 
     def test_added_and_removed_lines_carry_different_diffkind_and_colour(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             binding, _schema = make_panel_binding(tmp_path)
             binding.config_h.write_text(
                 PANEL_CONFIG_TEXT.replace(
@@ -1339,7 +1348,7 @@ class TestHeaderRichText(unittest.TestCase):
 
     def test_header_html_carries_the_same_words_as_the_plain_header(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             game_repo = make_game_repo(tmp_path / "nuke-raider")
             garage_root = tmp_path / "nuke-raider-garage"
             garage_root.mkdir()
@@ -1360,7 +1369,7 @@ class TestHeaderRichText(unittest.TestCase):
 
     def test_master_warning_uses_the_warn_token(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             make_game_repo(tmp_path / "nuke-raider")
             garage_root = tmp_path / "nuke-raider-garage"
             garage_root.mkdir()
@@ -1392,7 +1401,7 @@ class TestHeaderRichText(unittest.TestCase):
 class TestTunerPanelStepping(unittest.TestCase):
     def test_stepup_writes_after_the_debounce_with_the_stepped_value(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             binding, schema = make_panel_binding(tmp_path)
             panel = TunerPanel(binding, schema=schema)
             row = panel._rows["GEAR1_MAX_SPEED"]
@@ -1421,7 +1430,7 @@ class TestTunerPanelStepping(unittest.TestCase):
 
     def test_rapid_steps_produce_one_write_carrying_the_final_value(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             binding, schema = make_panel_binding(tmp_path)
             panel = TunerPanel(binding, schema=schema)
             row = panel._rows["GEAR1_MAX_SPEED"]
@@ -1447,7 +1456,7 @@ class TestTunerPanelStepping(unittest.TestCase):
 
     def test_typing_still_does_not_start_the_step_debounce_or_write(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             binding, schema = make_wide_panel_binding(tmp_path)
             panel = TunerPanel(binding, schema=schema)
             row = panel._rows["SPEED"]
@@ -1471,7 +1480,7 @@ class TestTunerPanelStepping(unittest.TestCase):
 
     def test_pending_step_write_flushed_by_editing_finished(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             binding, schema = make_panel_binding(tmp_path)
             panel = TunerPanel(binding, schema=schema)
             row = panel._rows["GEAR1_MAX_SPEED"]
@@ -1502,7 +1511,7 @@ class TestTunerPanelStepping(unittest.TestCase):
         # deliver it, by dispatching a FocusOut event straight to the
         # widget, deterministically and without needing a real window.
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             binding, schema = make_panel_binding(tmp_path)
             panel = TunerPanel(binding, schema=schema)
             row = panel._rows["GEAR1_MAX_SPEED"]
@@ -1523,7 +1532,7 @@ class TestTunerPanelStepping(unittest.TestCase):
 
     def test_pending_step_write_flushed_on_window_close(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             garage_root = tmp_path / "nuke-raider-garage"
             garage_root.mkdir()
             game_repo = make_game_repo_with_config(tmp_path / "nuke-raider", PANEL_CONFIG_TEXT)
@@ -1553,7 +1562,7 @@ class TestTunerPanelStepping(unittest.TestCase):
 
     def test_stepped_write_refreshes_header_totals_and_open_diff(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             garage_root = tmp_path / "nuke-raider-garage"
             garage_root.mkdir()
             game_repo = make_game_repo_with_config(tmp_path / "nuke-raider", PANEL_CONFIG_TEXT)
@@ -1783,7 +1792,7 @@ class TestGarageWindowDoctorIntegration(unittest.TestCase):
         # AC14 / R14: the failure is reported at startup, without the user
         # having to open anything.
         with tempfile.TemporaryDirectory() as tmp:
-            garage_root = self._garage_root(Path(tmp))
+            garage_root = self._garage_root(tmp_root(tmp))
 
             window = self._window(garage_root, self._failing_report())
 
@@ -1794,7 +1803,7 @@ class TestGarageWindowDoctorIntegration(unittest.TestCase):
 
     def test_a_whole_toolchain_shows_no_notice_at_all(self):
         with tempfile.TemporaryDirectory() as tmp:
-            garage_root = self._garage_root(Path(tmp))
+            garage_root = self._garage_root(tmp_root(tmp))
 
             window = self._window(garage_root, self._passing_report())
 
@@ -1803,7 +1812,7 @@ class TestGarageWindowDoctorIntegration(unittest.TestCase):
 
     def test_the_doctor_opens_itself_once_when_a_check_failed(self):
         with tempfile.TemporaryDirectory() as tmp:
-            garage_root = self._garage_root(Path(tmp))
+            garage_root = self._garage_root(tmp_root(tmp))
 
             window = self._window(garage_root, self._failing_report())
             self.assertFalse(window.doctor_dialog.isVisible())
@@ -1823,7 +1832,7 @@ class TestGarageWindowDoctorIntegration(unittest.TestCase):
 
     def test_the_doctor_stays_closed_when_every_check_passes(self):
         with tempfile.TemporaryDirectory() as tmp:
-            garage_root = self._garage_root(Path(tmp))
+            garage_root = self._garage_root(tmp_root(tmp))
 
             window = self._window(garage_root, self._passing_report())
             window.show()
@@ -1834,7 +1843,7 @@ class TestGarageWindowDoctorIntegration(unittest.TestCase):
 
     def test_menu_action_opens_the_doctor_and_it_can_be_closed_and_reopened(self):
         with tempfile.TemporaryDirectory() as tmp:
-            garage_root = self._garage_root(Path(tmp))
+            garage_root = self._garage_root(tmp_root(tmp))
 
             window = self._window(garage_root, self._passing_report())
 
@@ -1859,7 +1868,7 @@ class TestGarageWindowDoctorIntegration(unittest.TestCase):
         # running Garage; re-running them would redraw the same answer and
         # cost a subprocess per tool each time.
         with tempfile.TemporaryDirectory() as tmp:
-            garage_root = self._garage_root(Path(tmp))
+            garage_root = self._garage_root(tmp_root(tmp))
 
             with mock.patch.object(
                 doctor_core, "run_checks", return_value=self._passing_report()
@@ -2206,7 +2215,7 @@ class TestCompileBar(CompileBarFixture, unittest.TestCase):
 
     def test_the_window_hands_the_doctor_report_to_the_compile_bar(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             garage_root = tmp_path / "nuke-raider-garage"
             garage_root.mkdir()
             make_game_repo(tmp_path / "nuke-raider")
@@ -2238,7 +2247,7 @@ class TestCompileBar(CompileBarFixture, unittest.TestCase):
 class TestGarageWindowCompileIntegration(unittest.TestCase):
     def test_the_compile_bar_is_in_the_window_body(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             garage_root = tmp_path / "nuke-raider-garage"
             garage_root.mkdir()
             make_game_repo(tmp_path / "nuke-raider")
@@ -2256,7 +2265,7 @@ class TestGarageWindowCompileIntegration(unittest.TestCase):
         # A compile writes into the worktree, so the header's totals can be
         # stale the moment it ends.
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             garage_root = tmp_path / "nuke-raider-garage"
             garage_root.mkdir()
             make_game_repo(tmp_path / "nuke-raider")
@@ -2274,7 +2283,7 @@ class TestGarageWindowCompileIntegration(unittest.TestCase):
         # and a compile that outlives its window is invisible work in the
         # user's worktree.
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = tmp_root(tmp)
             garage_root = tmp_path / "nuke-raider-garage"
             garage_root.mkdir()
             make_game_repo(tmp_path / "nuke-raider")
