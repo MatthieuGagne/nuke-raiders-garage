@@ -3,6 +3,7 @@
 so default discovery never descends into it). Run via `make test-garage`.
 """
 import json
+import os
 import re
 import subprocess
 import sys
@@ -10,6 +11,97 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+
+# CI-only tracing for the flake in TestCommitPanelStopLeavesTheWorktreeUsable.
+# The GitHub Windows runner fails one of those tests about half the time, and
+# has done it two different ways: once a fifteen-second wait for git's
+# index.lock expired, once the interpreter died eleven milliseconds into a
+# test with exit code 1 and no output at all. Neither reproduces on a
+# developer machine -- eight consecutive local runs of that class pass -- so
+# the runner has to narrate what it does. Off unless the workflow asks.
+TRACE = os.environ.get("GARAGE_TEST_TRACE") == "1"
+
+
+def trace(message):
+    """A progress marker, flushed, so a process that dies mid-test still
+    leaves the last line it reached behind."""
+    if TRACE:
+        sys.stderr.write("[trace] {}\n".format(message))
+        sys.stderr.flush()
+
+
+def process_snapshot(label):
+    """Every git, sh, sleep, python and pwsh process with its parent.
+
+    `_kill_tree` runs `taskkill /F /T` on a child PID, and a victim of that
+    exits with code 1 and prints nothing -- which is exactly what the runner
+    showed. This says which processes existed, and who their parents were,
+    at the moments around a kill.
+    """
+    if not TRACE:
+        return
+    script = (
+        "Get-CimInstance Win32_Process | "
+        "Where-Object { $_.Name -match 'git|sh\\.exe|sleep|python|pwsh' } | "
+        "ForEach-Object { \"$($_.ProcessId) parent=$($_.ParentProcessId) $($_.Name)\" }"
+    )
+    try:
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", script],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError) as exc:
+        out = "snapshot failed: {}".format(exc)
+    trace(
+        "processes at {} -- this interpreter is pid {}:\n{}".format(
+            label, os.getpid(), out
+        )
+    )
+
+
+def _trace_kills():
+    """Narrate every process-tree kill, with what the PID actually is.
+
+    The runner's death has the signature of `taskkill /F`: exit code 1, no
+    output, instantly. `_kill_tree` is the only code here that runs one, and
+    it kills by PID -- so the question is whether the PID it kills is still
+    the child it thinks it is. This wraps it rather than editing the product,
+    and only when the workflow asks for tracing.
+    """
+    if not TRACE:
+        return
+    # Imported here, not at module scope: this helper is defined above the
+    # package imports so it sits with the other tracing.
+    from tools.garage.core import make_runner as runner_module
+
+    original = runner_module._kill_tree
+
+    def traced(process):
+        pid = process.pid
+        alive = process.poll() is None
+        try:
+            listing = subprocess.run(
+                ["tasklist", "/FI", "PID eq {}".format(pid), "/FO", "CSV", "/NH"],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            ).stdout.strip()
+        except (OSError, subprocess.SubprocessError) as exc:
+            listing = "tasklist failed: {}".format(exc)
+        trace(
+            "killing tree of pid {} (still running: {}) -- that pid is now: {}"
+            " -- this interpreter is pid {}".format(pid, alive, listing, os.getpid())
+        )
+        result = original(process)
+        trace("kill of pid {} returned".format(pid))
+        return result
+
+    runner_module._kill_tree = traced
+
+
+_trace_kills()
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
@@ -2883,15 +2975,23 @@ class CommitPanelFixture:
         # before every cleanup, so deleting the tree there is what turned a
         # failing assertion on a slow runner into an interpreter that died
         # without printing which assertion failed.
+        # Step markers: the runner has died inside this setUp, eleven
+        # milliseconds after unittest printed the test name and before the
+        # test body ran a single line. Whichever marker is last in the log
+        # is the call it died in.
+        trace("setUp: making the temp dir")
         self._tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(self._tmp.cleanup)
         self.tmp_path = tmp_root(self._tmp.name)
         self.garage_root = self.tmp_path / "nuke-raider-garage"
         self.garage_root.mkdir()
+        trace("setUp: making the game repo (git init, add, commit)")
         self.game_repo = make_game_repo_with_config(
             self.tmp_path / "nuke-raider", PANEL_CONFIG_TEXT
         )
+        trace("setUp: binding")
         self.binding = project.bind(self.garage_root)
+        trace("setUp: done")
 
     def on_branch(self, name="feat/tuning"):
         _run_git(["checkout", "-q", "-b", name], self.game_repo)
@@ -3087,6 +3187,15 @@ class TestCommitPanelStopLeavesTheWorktreeUsable(
         )
         return hook
 
+    def setUp(self):
+        super().setUp()
+        trace("=== {} body starting".format(self.id()))
+        process_snapshot("start of {}".format(self.id()))
+        # Registered after the fixture's temp cleanup, so it runs before it:
+        # what is still alive when the test is over, while its tree is still
+        # on disk to be blamed.
+        self.addCleanup(process_snapshot, "end of {}".format(self.id()))
+
     def wait_for_lock(self, panel, lock):
         """Wait for git to take the index lock, and explain a timeout.
 
@@ -3095,8 +3204,25 @@ class TestCommitPanelStopLeavesTheWorktreeUsable(
         cleanup. Everything the failure needs is in the panel and on disk;
         a bare assertTrue threw all of it away.
         """
-        if self.wait_until(lambda: lock.exists(), 15000):
+        waited = 0
+        while waited < 15000 and not lock.exists():
+            QTest.qWait(20)
+            waited += 20
+            if waited % 2000 == 0:
+                trace(
+                    "waiting for the lock, {}ms: hook ran={} running={}"
+                    " status={!r}".format(
+                        waited,
+                        getattr(self, "hook_marker", None)
+                        and self.hook_marker.exists(),
+                        panel.is_running(),
+                        panel.status_text(),
+                    )
+                )
+        if lock.exists():
+            trace("the lock appeared after {}ms".format(waited))
             return
+        process_snapshot("the lock wait timing out")
         self.fail(
             "git never took the index lock at {}\n"
             "  hook marker exists: {}\n"

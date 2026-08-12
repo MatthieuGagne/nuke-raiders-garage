@@ -23,5 +23,39 @@ jobs:
       # -v the last line names the test that was running; with faulthandler
       # a fatal signal prints its stack. Both were added after a run failed
       # with exactly `...................F` and no other output.
+      # What the hook the stop tests install actually depends on. Its first
+      # line is `#!/bin/sh` and its body calls `sleep`, and if either is
+      # missing on this image the commit ends before it can be stopped.
+      - name: Probe what the stop tests depend on
+        run: |
+          git --version
+          Get-Command sh, sleep, taskkill, tasklist -ErrorAction SilentlyContinue |
+            Select-Object Name, Source | Format-Table -AutoSize
+
+      # -u, -v and faulthandler are diagnostics, not noise. A Qt suite can
+      # die on an abort rather than a failure, unittest prints its summary
+      # last, and buffered output is lost when a process is terminated -- so
+      # an abort otherwise leaves a log that names nothing. This run failed
+      # once with exactly `...................F` and nothing else.
       - name: Run panel test suite
-        run: python -X faulthandler -m unittest discover -s tests/garage -p 'test_*.py' -v
+        env:
+          GARAGE_TEST_TRACE: "1"
+        run: python -u -X faulthandler -m unittest discover -s tests/garage -p 'test_*.py' -v
+
+      # The flake is about one job in two, so one sample per push is a slow
+      # way to learn anything. Three more runs of just that class cost about
+      # twenty seconds each and never decide the job -- the run above is the
+      # gate. `if: always()` because the interesting case is the one where
+      # the gate already died.
+      - name: Sample the stop tests three more times
+        if: always()
+        continue-on-error: true
+        env:
+          GARAGE_TEST_TRACE: "1"
+        run: |
+          foreach ($i in 1..3) {
+            Write-Host "=== sample $i"
+            python -u -X faulthandler -m unittest -v `
+              tests.garage.test_panels.TestCommitPanelStopLeavesTheWorktreeUsable
+            Write-Host "=== sample $i exited $LASTEXITCODE"
+          }
