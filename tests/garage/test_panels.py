@@ -1892,16 +1892,22 @@ class CompileBarFixture:
     """
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
+        # ignore_cleanup_errors: these tests kill a process tree on
+        # purpose, and a killed process's children can still hold a handle
+        # under the directory when it goes away. Windows raises on that.
+        self._tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        # A cleanup, not tearDown: unittest runs tearDown *before* every
+        # cleanup, and cleanups run last-registered-first. The bar's
+        # stop_and_wait, registered in _bar(), therefore runs before this
+        # -- so the directory a build is running in cannot be deleted
+        # while that build is still running.
+        self.addCleanup(self._tmp.cleanup)
         tmp_path = tmp_root(self._tmp.name)
         garage_root = tmp_path / "nuke-raider-garage"
         garage_root.mkdir()
         make_game_repo(tmp_path / "nuke-raider")
         self.binding = project.bind(garage_root)
         self.worktree = self.binding.active_worktree.path
-
-    def tearDown(self):
-        self._tmp.cleanup()
 
     def _bar(self):
         bar = CompileBar(self.binding)
@@ -2673,7 +2679,12 @@ class WorktreePanelFixture:
     against `git worktree list` rather than a stand-in."""
 
     def setUp(self):
+        # A cleanup rather than tearDown, for the ordering reason the
+        # commit fixture explains. This panel's git calls are synchronous,
+        # so cleanup errors are not ignored here: a handle still held after
+        # them would be a leak worth failing on.
         self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
         self.tmp_path = tmp_root(self._tmp.name)
         self.garage_root = self.tmp_path / "nuke-raider-garage"
         self.garage_root.mkdir()
@@ -2681,9 +2692,6 @@ class WorktreePanelFixture:
             self.tmp_path / "nuke-raider", PANEL_CONFIG_TEXT
         )
         self.binding = project.bind(self.garage_root)
-
-    def tearDown(self):
-        self._tmp.cleanup()
 
     def panel(self):
         return WorktreesPanel(self.binding)
@@ -2868,7 +2876,15 @@ class CommitPanelFixture:
     """
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
+        # Same two reasons as the compile-bar fixture: a stopped commit is
+        # a killed process tree whose children may still hold a handle, and
+        # the panel's stop_and_wait (registered in panel()) must run before
+        # the repository it is committing in is deleted. tearDown runs
+        # before every cleanup, so deleting the tree there is what turned a
+        # failing assertion on a slow runner into an interpreter that died
+        # without printing which assertion failed.
+        self._tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(self._tmp.cleanup)
         self.tmp_path = tmp_root(self._tmp.name)
         self.garage_root = self.tmp_path / "nuke-raider-garage"
         self.garage_root.mkdir()
@@ -2876,9 +2892,6 @@ class CommitPanelFixture:
             self.tmp_path / "nuke-raider", PANEL_CONFIG_TEXT
         )
         self.binding = project.bind(self.garage_root)
-
-    def tearDown(self):
-        self._tmp.cleanup()
 
     def on_branch(self, name="feat/tuning"):
         _run_git(["checkout", "-q", "-b", name], self.game_repo)

@@ -16,5 +16,12 @@ jobs:
           python-version: "3.13"
       - name: Install requirements (PySide6)
         run: pip install -r requirements.txt
+      # -v and faulthandler are diagnostics, not noise. A Qt suite can die
+      # on an abort rather than a failure -- a worker thread destroyed while
+      # still running takes the interpreter with it -- and unittest prints
+      # its summary last, so an abort leaves a log that names nothing. With
+      # -v the last line names the test that was running; with faulthandler
+      # a fatal signal prints its stack. Both were added after a run failed
+      # with exactly `...................F` and no other output.
       - name: Run panel test suite
-        run: python -m unittest discover -s tests/garage -p 'test_*.py'
+        run: python -X faulthandler -m unittest discover -s tests/garage -p 'test_*.py' -v
