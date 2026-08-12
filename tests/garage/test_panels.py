@@ -3067,14 +3067,50 @@ class TestCommitPanelStopLeavesTheWorktreeUsable(
     # the test cannot outlive it: killing git does not always close the
     # pipe that its hook's children inherited, so the reader can stay
     # blocked until the hook itself exits.
-    SLOW_HOOK = "#!/bin/sh\nsleep 5\n"
+    SLOW_HOOK = '#!/bin/sh\ntouch "%s"\nsleep 5\n'
 
     def install_slow_hook(self):
+        """Install a hook that is slow, and that says it ran.
+
+        The marker exists because a Windows CI runner failed the lock wait
+        below and the message could not say which half broke: a lock that
+        was never taken because the hook never ran looks nothing like a
+        lock that came and went between two twenty-millisecond polls, and
+        the fix is different in each case.
+        """
         hooks = self.game_repo / ".git" / "hooks"
         hooks.mkdir(parents=True, exist_ok=True)
+        self.hook_marker = hooks / "pre-commit-ran"
         hook = hooks / "pre-commit"
-        hook.write_text(self.SLOW_HOOK, encoding="utf-8")
+        hook.write_text(
+            self.SLOW_HOOK % self.hook_marker.as_posix(), encoding="utf-8"
+        )
         return hook
+
+    def wait_for_lock(self, panel, lock):
+        """Wait for git to take the index lock, and explain a timeout.
+
+        git stages the `-a` changes into the lock before it runs the hook,
+        so stopping earlier than this would prove nothing about the
+        cleanup. Everything the failure needs is in the panel and on disk;
+        a bare assertTrue threw all of it away.
+        """
+        if self.wait_until(lambda: lock.exists(), 15000):
+            return
+        self.fail(
+            "git never took the index lock at {}\n"
+            "  hook marker exists: {}\n"
+            "  panel still running: {}\n"
+            "  panel status: {}\n"
+            "  panel log:\n{}".format(
+                lock,
+                getattr(self, "hook_marker", None)
+                and self.hook_marker.exists(),
+                panel.is_running(),
+                panel.status_text(),
+                panel.log_text(),
+            )
+        )
 
     def test_stopping_a_commit_leaves_no_lock_behind(self):
         self.on_branch()
@@ -3088,10 +3124,7 @@ class TestCommitPanelStopLeavesTheWorktreeUsable(
         # Wait for git to actually take the lock -- it stages the -a
         # changes into index.lock *before* running the hook, and stopping
         # earlier than that would prove nothing about the cleanup.
-        self.assertTrue(
-            self.wait_until(lambda: lock.exists(), 15000),
-            "git never took the index lock",
-        )
+        self.wait_for_lock(panel, lock)
         panel.stop()
         self.assertTrue(self.wait_until(lambda: not panel.is_running()))
 
@@ -3120,7 +3153,7 @@ class TestCommitPanelStopLeavesTheWorktreeUsable(
 
         lock = commit_core.git_dir(self.game_repo) / "index.lock"
         panel.commit()
-        self.assertTrue(self.wait_until(lambda: lock.exists(), 15000))
+        self.wait_for_lock(panel, lock)
         panel.stop()
         self.assertTrue(self.wait_until(lambda: not panel.is_running()))
 
@@ -3138,7 +3171,7 @@ class TestCommitPanelStopLeavesTheWorktreeUsable(
 
         lock = commit_core.git_dir(self.game_repo) / "index.lock"
         panel.commit()
-        self.assertTrue(self.wait_until(lambda: lock.exists(), 15000))
+        self.wait_for_lock(panel, lock)
 
         panel.stop_and_wait()
 
