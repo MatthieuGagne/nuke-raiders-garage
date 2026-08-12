@@ -307,6 +307,16 @@ REAL_CONFIG_H_PATH = _bound_config_h()
 NO_GAME_REPO = REAL_CONFIG_H_PATH is None
 NO_GAME_REPO_REASON = "no game repository is bound beside this checkout"
 
+# A backslash is a path separator on Windows and an ordinary character
+# everywhere else, so the GBDK_HOME defect this suite covers -- a value
+# spelled `C:\gbdk` that resolves in Python and dies in bash -- cannot be
+# staged on Linux: there, `\tmp\x\gbdk` names nothing, the missing-lcc
+# check answers first, and the assertion is about the wrong failure.
+# Garage is a Windows application (R1); the Windows leg of the CI matrix
+# covers this.
+NOT_WINDOWS = sys.platform != "win32"
+NOT_WINDOWS_REASON = "a backslash is only a path separator on Windows"
+
 SAMPLE_TUNABLES = {
     "_shape": "test fixture",
     "entries": {
@@ -1597,6 +1607,7 @@ class TestDoctorBuildChain(unittest.TestCase):
             self.assertEqual(check.status, doctor.FAIL)
             self.assertIn("bin/lcc", check.detail)
 
+    @unittest.skipIf(NOT_WINDOWS, NOT_WINDOWS_REASON)
     def test_gbdk_home_with_backslashes_fails_even_though_lcc_is_there(self):
         # The real defect: `C:\gbdk` holds bin/lcc, so every existence test
         # passes, and no source file compiles. The Makefile expands it into
