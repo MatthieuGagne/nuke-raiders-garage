@@ -1,0 +1,33 @@
+name: test
+
+# Default suite (tools/garage/core/ coverage). Runs on Windows and Linux
+# and installs no display library -- this is what proves AC15: the
+# default target succeeds with PySide6 absent.
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      # Both legs always report. Without this, the first platform to fail
+      # cancels the other one mid-checkout, and a Windows application's
+      # Windows result is the one that gets hidden.
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Run default test suite (no PySide6 installed)
+        run: python -m unittest discover -s tests -p 'test_*.py'
+
+      # R8/AC9. With no game repository checked out beside this one the
+      # check exits 0 and says it did not run, so this step proves the
+      # script itself still works -- the drift that matters is caught by
+      # the suite above, on a machine that has both checkouts.
+      - name: Drift check
+        run: python tools/garage_lint.py

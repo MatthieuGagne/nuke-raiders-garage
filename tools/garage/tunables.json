@@ -1,0 +1,717 @@
+{
+  "_shape": "Classification of every #define in src/config.h (game repo). Top-level key 'entries' maps a #define NAME to its record, in the same order as the header. Each record has 'class' in {tunable, structural, derived, marker} and a 'reason' sentence. A 'tunable' record additionally carries 'category' (for UI grouping) and integer 'min'/'max' clamps -- Garage must never write a tunable value outside [min, max]. 'structural', 'derived' and 'marker' records carry no min/max/category and Garage must never write those lines at all (R7). This file is the single source of truth for tools/garage_lint.py's drift check (R8): every #define in config.h must appear here exactly once, and every entry here must still exist in config.h.",
+  "entries": {
+    "CONFIG_H": {
+      "class": "marker",
+      "reason": "Include guard; declares no value."
+    },
+    "MAX_NPCS": {
+      "class": "structural",
+      "reason": "NPC pool ceiling; sizes NPC WRAM arrays and bounds how many NPC sprites can be on screen at once."
+    },
+    "MAX_SPRITES": {
+      "class": "structural",
+      "reason": "Hardware OAM budget input; comment shows the exact 32+3=35<=40 sprite-cap arithmetic the build depends on. Explicitly called out as non-editable in the spec (AC8)."
+    },
+    "DIALOG_ARROW_OAM_SLOT": {
+      "class": "structural",
+      "reason": "Fixed OAM slot index (slot 4) reserved for the dialog overflow arrow sprite; a hardware slot assignment."
+    },
+    "GEAR1_MAX_SPEED": {
+      "class": "tunable",
+      "category": "Car Physics",
+      "min": 1,
+      "max": 15,
+      "reason": "Reused verbatim from tools/balancer.py VARIABLES; a proven-safe car-feel dial."
+    },
+    "GEAR1_ACCEL": {
+      "class": "tunable",
+      "category": "Car Physics",
+      "min": 1,
+      "max": 15,
+      "reason": "Reused verbatim from tools/balancer.py VARIABLES."
+    },
+    "GEAR2_MAX_SPEED": {
+      "class": "tunable",
+      "category": "Car Physics",
+      "min": 1,
+      "max": 15,
+      "reason": "Reused verbatim from tools/balancer.py VARIABLES."
+    },
+    "GEAR2_ACCEL": {
+      "class": "tunable",
+      "category": "Car Physics",
+      "min": 1,
+      "max": 15,
+      "reason": "Reused verbatim from tools/balancer.py VARIABLES."
+    },
+    "GEAR3_MAX_SPEED": {
+      "class": "tunable",
+      "category": "Car Physics",
+      "min": 1,
+      "max": 15,
+      "reason": "Reused verbatim from tools/balancer.py VARIABLES."
+    },
+    "GEAR3_ACCEL": {
+      "class": "tunable",
+      "category": "Car Physics",
+      "min": 1,
+      "max": 15,
+      "reason": "Reused verbatim from tools/balancer.py VARIABLES."
+    },
+    "GEAR_DOWNSHIFT_FRAMES": {
+      "class": "tunable",
+      "category": "Car Physics",
+      "min": 1,
+      "max": 60,
+      "reason": "Reused verbatim from tools/balancer.py VARIABLES."
+    },
+    "PLAYER_FRICTION": {
+      "class": "tunable",
+      "category": "Car Physics",
+      "min": 0,
+      "max": 8,
+      "reason": "Reused verbatim from tools/balancer.py VARIABLES."
+    },
+    "PLAYER_HANDLING": {
+      "class": "tunable",
+      "category": "Player Stats",
+      "min": 0,
+      "max": 10,
+      "reason": "Block comment explicitly labels this a 'tunable placeholder'; its own comment says the turning system is 'not yet implemented', so no code currently reads it for anything -- there is no correctness dependency to break. Range mirrors the small integer scale of sibling player-stat placeholders."
+    },
+    "PLAYER_ARMOR": {
+      "class": "tunable",
+      "category": "Combat",
+      "min": 0,
+      "max": 15,
+      "reason": "Reused verbatim from tools/balancer.py VARIABLES; damage.c actually consumes this (ARMOR tier), unlike its 'reserved for future' neighbours."
+    },
+    "PLAYER_FUEL": {
+      "class": "tunable",
+      "category": "Player Stats",
+      "min": 1,
+      "max": 60,
+      "reason": "Block comment labels this a 'tunable placeholder'; comment states the fuel-depletion system is 'not yet implemented', so no code currently reads it. Range is a coarse placeholder around the current default (20)."
+    },
+    "PLAYER_MAX_HP": {
+      "class": "tunable",
+      "category": "Combat",
+      "min": 1,
+      "max": 255,
+      "reason": "Reused verbatim from tools/balancer.py VARIABLES."
+    },
+    "DAMAGE_INVINCIBILITY_FRAMES": {
+      "class": "tunable",
+      "category": "Combat",
+      "min": 0,
+      "max": 60,
+      "reason": "Reused verbatim from tools/balancer.py VARIABLES."
+    },
+    "ARMOR_HEAVY_REDUCTION": {
+      "class": "tunable",
+      "category": "Combat",
+      "min": 0,
+      "max": 20,
+      "reason": "Flat per-hit HP reduction for HEAVY armor; damage.c's damage_apply() floors the result at 1 regardless of this value ('amount > ARMOR_HEAVY_REDUCTION ? amount-... : 1u'), so no underflow/correctness risk from any value in range."
+    },
+    "ENEMY_BULLET_DAMAGE": {
+      "class": "tunable",
+      "category": "Combat",
+      "min": 1,
+      "max": 99,
+      "reason": "Reused verbatim from tools/balancer.py VARIABLES."
+    },
+    "WEAPON1_CANNON_DAMAGE": {
+      "class": "tunable",
+      "category": "Combat",
+      "min": 1,
+      "max": 10,
+      "reason": "Per-bullet HP damage for the CANNON weapon tier; consumed only through enemy_apply_damage(), which floors at 0 (underflow-safe) -- confirmed in enemy_common.c."
+    },
+    "WEAPON1_LASER_DAMAGE": {
+      "class": "tunable",
+      "category": "Combat",
+      "min": 1,
+      "max": 10,
+      "reason": "Per-hit HP damage for the LASER weapon tier; also floored via enemy_apply_damage(). Comment notes a soft balance relation ('kills RACER_HP=5 in 3 hits, #424') -- purely a documented balance target, not an enforced invariant, since the kill path floors HP safely for any damage value."
+    },
+    "LOADOUT_WEAPON1_LASER": {
+      "class": "structural",
+      "reason": "Option index into LOADOUT_WEAPON1_NAMES[]/WEAPON1_DAMAGE_TABLE[]; an enum-like array-index constant, not a game-feel literal."
+    },
+    "MAX_POWERUPS": {
+      "class": "structural",
+      "reason": "Pool ceiling; sizes powerup.c's parallel WRAM arrays (powerup_tx/ty/type/active/oam[MAX_POWERUPS]) and each active powerup holds its own OAM slot (powerup_oam[]), so raising it spends sprite budget on a build already tight on OAM."
+    },
+    "POWERUP_TYPE_HEAL": {
+      "class": "structural",
+      "reason": "Enum-like powerup-type constant, not a magnitude."
+    },
+    "POWERUP_HEAL_AMOUNT": {
+      "class": "tunable",
+      "category": "Powerups",
+      "min": 1,
+      "max": 100,
+      "reason": "HP restored by a heal powerup (powerup.c calls damage_heal(POWERUP_HEAL_AMOUNT)); damage_heal() itself clamps to PLAYER_MAX_HP with an overflow guard, so any value in range is safe. Capped at PLAYER_MAX_HP's default (100)."
+    },
+    "POWERUP_TILE_BASE": {
+      "class": "structural",
+      "reason": "Reads as a gameplay number but is the first BG tile index reserved for powerup tiles -- a VRAM tile-layout constant, not a magnitude."
+    },
+    "MAX_MAP_TILES_W": {
+      "class": "structural",
+      "reason": "Comment states this is a 'ROM-budget cap only' consumed by the tmx_to_c.py build tool, not a runtime gameplay value."
+    },
+    "HUD_SCANLINE": {
+      "class": "structural",
+      "reason": "Pixel row the code assumes as the HUD window boundary; used directly to bound player movement -- a screen-coordinate constant."
+    },
+    "CAMERA_REPAIR_MAX_CELLS": {
+      "class": "structural",
+      "reason": "Comment explains it sizes the BG repair buffer and bounds VBlank tile traffic; a buffer-sizing/performance constant."
+    },
+    "TERRAIN_SAND_FRICTION_MUL": {
+      "class": "tunable",
+      "category": "Car Physics",
+      "min": 1,
+      "max": 5,
+      "reason": "Friction multiplier on sand; vehicle_physics.c computes PLAYER_FRICTION * TERRAIN_SAND_FRICTION_MUL as a uint8_t -- max 8*5=40 stays well inside uint8_t range, so no overflow risk at the declared ceilings."
+    },
+    "TERRAIN_BOOST_DELTA": {
+      "class": "tunable",
+      "category": "Car Physics",
+      "min": 0,
+      "max": 10,
+      "reason": "vy kick per frame applied on boost pads (vehicle_physics.c); a speed-feel dial with no sizing role."
+    },
+    "TERRAIN_BOOST_MAX_SPEED": {
+      "class": "tunable",
+      "category": "Car Physics",
+      "min": 1,
+      "max": 15,
+      "reason": "Speed cap on boost pads. Comment notes it intentionally 'exceeds gear 3 max speed (6)' -- a documented design relationship, not an enforced invariant; player.c/racer.c simply use it as an alternate max_speed value, so any value in range is safe."
+    },
+    "OVERMAP_W": {
+      "class": "structural",
+      "reason": "Confirmed in state_overmap.c: used directly as the stride into overmap_map[]/overmap_id_map[] flat arrays ('ty * OVERMAP_W + tx'); a layout dimension baked into array indexing."
+    },
+    "OVERMAP_H": {
+      "class": "structural",
+      "reason": "Confirmed in state_overmap.c: bounds car movement and BG tile writes (set_bkg_tiles(..., OVERMAP_W, OVERMAP_H, ...)); a layout dimension."
+    },
+    "OVERMAP_TILE_BLANK": {
+      "class": "structural",
+      "reason": "Enum-like overmap tile-type index."
+    },
+    "OVERMAP_TILE_ROAD": {
+      "class": "structural",
+      "reason": "Enum-like overmap tile-type index."
+    },
+    "OVERMAP_TILE_HUB": {
+      "class": "structural",
+      "reason": "Enum-like overmap tile-type index."
+    },
+    "OVERMAP_TILE_DEST": {
+      "class": "structural",
+      "reason": "Enum-like overmap tile-type index."
+    },
+    "OVERMAP_TILE_CITY_HUB": {
+      "class": "structural",
+      "reason": "Enum-like overmap tile-type index."
+    },
+    "DIALOG_TEXT_BUF_LEN": {
+      "class": "structural",
+      "reason": "WRAM cache buffer size, per section comment."
+    },
+    "DIALOG_NAME_BUF_LEN": {
+      "class": "structural",
+      "reason": "WRAM cache buffer size, per section comment."
+    },
+    "DIALOG_CHOICE_BUF_LEN": {
+      "class": "structural",
+      "reason": "WRAM cache buffer size, per section comment."
+    },
+    "HUD_FONT_BASE": {
+      "class": "structural",
+      "reason": "BG tile index marking the start of the HUD custom font region in VRAM tile layout."
+    },
+    "HUD_FONT_COUNT": {
+      "class": "structural",
+      "reason": "Comment explicitly warns 'update LOADER_BG_START if this grows' -- LOADER_BG_START is computed from this value, so it is a VRAM-layout constant whose correctness the loader depends on."
+    },
+    "LOADER_BG_START": {
+      "class": "derived",
+      "reason": "Expression: ((uint8_t)(HUD_FONT_BASE + HUD_FONT_COUNT)); computed from two other #defines, not a literal."
+    },
+    "MAX_HUB_NPCS": {
+      "class": "structural",
+      "reason": "Confirmed in hub_data.h: sizes npc_names[MAX_HUB_NPCS] and npc_dialog_ids[MAX_HUB_NPCS] arrays -- array-bound constant."
+    },
+    "HUB_PORTRAIT_BOX_W": {
+      "class": "structural",
+      "reason": "Comment states 'portrait box width in tiles (cols 0-5)'; a BG column layout the hub dialog rendering code assumes."
+    },
+    "HUB_DIALOG_BOX_W": {
+      "class": "structural",
+      "reason": "Comment states 'dialog box width in tiles (cols 6-19)'; a BG column layout the hub dialog rendering code assumes."
+    },
+    "MAX_CHECKPOINTS": {
+      "class": "structural",
+      "reason": "Confirmed in track.c: sizes wram_checkpoints[MAX_CHECKPOINTS] and clamps loader.c's parsed checkpoint count -- array-bound constant."
+    },
+    "NPC_TYPE_TURRET": {
+      "class": "structural",
+      "reason": "Comment: 'must match NPC_TYPE_MAP in tools/tmx_to_c.py'; an enum-like type constant shared with an external tool."
+    },
+    "NPC_TYPE_CAR": {
+      "class": "structural",
+      "reason": "Comment: 'must match NPC_TYPE_MAP in tools/tmx_to_c.py'; an enum-like type constant shared with an external tool."
+    },
+    "NPC_TYPE_PEDESTRIAN": {
+      "class": "structural",
+      "reason": "Comment: 'must match NPC_TYPE_MAP in tools/tmx_to_c.py'; an enum-like type constant shared with an external tool."
+    },
+    "DIR_NONE": {
+      "class": "structural",
+      "reason": "Sentinel value (0xFF) for 'no fixed facing direction'; an enum-like constant, hex-formatted."
+    },
+    "NPC_TYPE_PATROL": {
+      "class": "structural",
+      "reason": "Comment: 'must match NPC_TYPE_MAP[\"patrol\"] in tools/tmx_to_c.py'; an enum-like type constant."
+    },
+    "MAX_PATROLS": {
+      "class": "structural",
+      "reason": "Comment explicitly states 'v1 pool ceiling -- N>1 needs an OAM re-audit'; the file itself flags this as OAM-budget-sensitive."
+    },
+    "PATROL_MAX_WAYPOINTS": {
+      "class": "structural",
+      "reason": "Comment: 'WRAM route buffer per patrol' -- a buffer-size constant."
+    },
+    "PATROL_HP": {
+      "class": "derived",
+      "reason": "Expression: RACER_HP; references another #define, not a literal."
+    },
+    "PATROL_HIT_RADIUS": {
+      "class": "derived",
+      "reason": "Expression: RACER_HIT_RADIUS; references another #define, not a literal."
+    },
+    "PATROL_SPEED": {
+      "class": "tunable",
+      "category": "Enemies",
+      "min": 1,
+      "max": 5,
+      "reason": "Max patrol AI speed magnitude. Comment states it 'matches racer gear-3 AI (< player 6)' -- a documented balance intent that the player should remain the fastest car; max is capped at 5 (racer gear-3 default) to preserve that stated invariant."
+    },
+    "PATROL_DETECT_RADIUS": {
+      "class": "tunable",
+      "category": "Enemies",
+      "min": 8,
+      "max": 160,
+      "reason": "Manhattan-distance AI aggro radius ('~8 tiles' per comment); pure AI-feel parameter with no sizing role. Max kept below the default PATROL_LEAVE_RADIUS (192) to preserve the documented enter/leave (sticky pursuit) relationship."
+    },
+    "PATROL_LEAVE_RADIUS": {
+      "class": "tunable",
+      "category": "Enemies",
+      "min": 64,
+      "max": 320,
+      "reason": "Manhattan-distance AI de-aggro radius ('~24 tiles -- sticky pursuit' per comment); AI-feel parameter. Min kept above a small detect radius to preserve the documented sticky-pursuit relationship."
+    },
+    "PATROL_FIRE_RADIUS": {
+      "class": "tunable",
+      "category": "Enemies",
+      "min": 8,
+      "max": 160,
+      "reason": "Manhattan-distance firing range for a chasing patrol; AI-feel parameter with the same tile-derived scale as PATROL_DETECT_RADIUS."
+    },
+    "PATROL_WP_THRESHOLD": {
+      "class": "tunable",
+      "category": "Enemies",
+      "min": 1,
+      "max": 24,
+      "reason": "Manhattan 'close enough' threshold for waypoint advance (enemy_wp_reached()); a pathing-feel parameter, not a buffer or array bound. Kept modest so it never approaches the tile-to-tile spacing patrols travel."
+    },
+    "PATROL_FIRE_INTERVAL": {
+      "class": "tunable",
+      "category": "Enemies",
+      "min": 1,
+      "max": 120,
+      "reason": "Frames between patrol shots. Comment notes it currently '== TURRET_FIRE_INTERVAL' -- a soft, undocumented-in-code coupling worth preserving by convention but not enforced; range matches TURRET_FIRE_INTERVAL's proven balancer.py range."
+    },
+    "PATROL_MODE_PATROL": {
+      "class": "structural",
+      "reason": "Comment: 'FSM modes -- uint8_t #defines, NOT a C enum'; an enum-like state constant."
+    },
+    "PATROL_MODE_CHASE": {
+      "class": "structural",
+      "reason": "Comment: 'FSM modes -- uint8_t #defines, NOT a C enum'; an enum-like state constant."
+    },
+    "PLAYER_SLOT": {
+      "class": "structural",
+      "reason": "Comment: 'player always slot 0 -- stable regardless of enemy count'; a fixed pool-slot index other code relies on."
+    },
+    "MAX_ENEMY_RACERS": {
+      "class": "structural",
+      "reason": "Genuine gameplay number (how many AI racers appear), but MAX_SPRITES' own comment shows the OAM budget is built around 'racer pool (lazy, <=8 = 2 active enemies x 4)' on a build already reporting OAM at 32/40 (WARN). Raising this grows MAX_RACERS (derived) and spends 4 more OAM slots per additional racer, risking the hardware sprite cap -- an OAM-budget dependency, not a pure feel dial."
+    },
+    "MAX_RACERS": {
+      "class": "derived",
+      "reason": "Expression: (MAX_ENEMY_RACERS + 1u); references another #define, not a literal."
+    },
+    "MAX_RACER_WAYPOINTS": {
+      "class": "structural",
+      "reason": "Comment: 'WRAM copy buffer; tracks may have fewer' -- a buffer-size constant."
+    },
+    "RACER_WP_THRESHOLD": {
+      "class": "tunable",
+      "category": "Enemies",
+      "min": 1,
+      "max": 24,
+      "reason": "Manhattan 'close enough' threshold for racer waypoint advance; same pathing-feel role as PATROL_WP_THRESHOLD, confirmed used only in enemy_wp_reached() with no sizing role."
+    },
+    "RACER_GEAR1_MAX_SPEED": {
+      "class": "tunable",
+      "category": "Enemies",
+      "min": 1,
+      "max": 15,
+      "reason": "AI racer gear-1 top speed; independent AI difficulty dial per the section comment."
+    },
+    "RACER_GEAR1_ACCEL": {
+      "class": "tunable",
+      "category": "Enemies",
+      "min": 1,
+      "max": 15,
+      "reason": "AI racer gear-1 acceleration; independent AI difficulty dial."
+    },
+    "RACER_GEAR2_MAX_SPEED": {
+      "class": "tunable",
+      "category": "Enemies",
+      "min": 1,
+      "max": 15,
+      "reason": "AI racer gear-2 top speed; independent AI difficulty dial."
+    },
+    "RACER_GEAR2_ACCEL": {
+      "class": "tunable",
+      "category": "Enemies",
+      "min": 1,
+      "max": 15,
+      "reason": "AI racer gear-2 acceleration; independent AI difficulty dial."
+    },
+    "RACER_GEAR3_MAX_SPEED": {
+      "class": "tunable",
+      "category": "Enemies",
+      "min": 1,
+      "max": 5,
+      "reason": "AI racer top speed. Comment states this 'is 5 (< player 6) so the player can beat a perfect AI' -- an explicit balance-critical invariant the file itself documents; max is capped at 5 (the current value) so Garage cannot let this exceed the player's GEAR3_MAX_SPEED (6)."
+    },
+    "RACER_GEAR3_ACCEL": {
+      "class": "tunable",
+      "category": "Enemies",
+      "min": 1,
+      "max": 15,
+      "reason": "AI racer gear-3 acceleration; independent AI difficulty dial."
+    },
+    "RACER_GEAR_DOWNSHIFT_FRAMES": {
+      "class": "tunable",
+      "category": "Enemies",
+      "min": 1,
+      "max": 60,
+      "reason": "AI racer downshift timing; mirrors the player's GEAR_DOWNSHIFT_FRAMES role and range."
+    },
+    "RACER_RAM_DAMAGE": {
+      "class": "tunable",
+      "category": "Combat",
+      "min": 1,
+      "max": 99,
+      "reason": "HP damage to the player on ram collision; applied only through damage_apply(), which floors player HP at 0 -- confirmed safe for any value in range."
+    },
+    "ENEMY_RAM_DAMAGE": {
+      "class": "structural",
+      "reason": "TRAP: racer.c and patrol.c subtract this directly from a uint8_t hp field with NO floor guard ('racer_hp[i] = (uint8_t)(racer_hp[i]-ENEMY_RAM_DAMAGE)'), and both files carry an explicit comment: 'Underflow-safe and lethal-exact only while ENEMY_RAM_DAMAGE == 1 path; raising ENEMY_RAM_DAMAGE needs an hp<=DAMAGE guard here.' Any value other than 1 can underflow racer_hp/patrol_hp (wrap to ~255) -- a genuine correctness dependency, not a feel dial."
+    },
+    "ENEMY_RAM_COOLDOWN": {
+      "class": "derived",
+      "reason": "Expression: DAMAGE_INVINCIBILITY_FRAMES; references another #define, not a literal."
+    },
+    "ENEMY_RAM_REACH": {
+      "class": "structural",
+      "reason": "Confirmed in enemy_common.c: inflates the ram AABB specifically to fix a documented solid-collision edge case (#417, 'a car solid-blocked flush against an enemy still rams it from any direction'). Shrinking it risks regressing that collision fix -- a correctness-motivated constant, not a feel dial."
+    },
+    "RACER_HP": {
+      "class": "tunable",
+      "category": "Enemies",
+      "min": 1,
+      "max": 20,
+      "reason": "Bullet hits to destroy a racer; damage is applied only through enemy_apply_damage(), confirmed floored at 0 -- safe for any value in range. Also the source PATROL_HP derives from."
+    },
+    "RACER_HIT_RADIUS": {
+      "class": "tunable",
+      "category": "Enemies",
+      "min": 2,
+      "max": 16,
+      "reason": "Screen-space px radius for bullet hit checks (racer.c); a hit-detection-feel parameter, not a buffer/array bound. Also the source PATROL_HIT_RADIUS derives from."
+    },
+    "RACER_HIT_FLASH_FRAMES": {
+      "class": "tunable",
+      "category": "Enemies",
+      "min": 1,
+      "max": 30,
+      "reason": "Frames of hit-blink visual feedback per bullet hit; pure cosmetic timing."
+    },
+    "MAX_EXPLOSIONS": {
+      "class": "structural",
+      "reason": "Confirmed in explosion.c: sizes exp_active/exp_frame/exp_timer/exp_oam/exp_tile/exp_flip/exp_car/exp_wx/exp_wty[MAX_EXPLOSIONS] arrays, and each active explosion holds its own OAM slot (exp_oam[]) -- a pool ceiling with a direct OAM-budget consequence on a build already at 32/40 sprites."
+    },
+    "EXPLOSION_NUM_FRAMES": {
+      "class": "structural",
+      "reason": "Comment: 'frames in the explosion sprite sheet' -- describes the actual art asset; must match the sprite sheet frame count on disk, so it is asset-dependent, not a free-standing feel dial."
+    },
+    "EXPLOSION_FRAME_TICKS": {
+      "class": "tunable",
+      "category": "Combat",
+      "min": 10,
+      "max": 90,
+      "reason": "Ticks per explosion animation frame (~0.67s total at 60fps per comment); pure timing, confirmed in explosion.c as a simple timer comparison with no sizing role. RACER_DEATH_TICKS (derived) recomputes automatically from this value, so changing it never desyncs the OAM hand-off it documents."
+    },
+    "RACER_DEATH_TICKS": {
+      "class": "derived",
+      "reason": "Expression: (EXPLOSION_NUM_FRAMES * EXPLOSION_FRAME_TICKS); references two other #defines, not a literal."
+    },
+    "MAX_ENEMIES": {
+      "class": "structural",
+      "reason": "Turret/enemy pool ceiling; comment notes the turret sprite slot is assigned at runtime from this pool, so it is OAM-budget sensitive on a build already at 32/40 sprites."
+    },
+    "TURRET_FIRE_INTERVAL": {
+      "class": "tunable",
+      "category": "Enemies",
+      "min": 1,
+      "max": 120,
+      "reason": "Reused verbatim from tools/balancer.py VARIABLES."
+    },
+    "TURRET_WIND_UP": {
+      "class": "tunable",
+      "category": "Enemies",
+      "min": 0,
+      "max": 120,
+      "reason": "Grace period before a turret's first shot; pure AI-feel timing, same scale as TURRET_FIRE_INTERVAL."
+    },
+    "TURRET_HP": {
+      "class": "tunable",
+      "category": "Enemies",
+      "min": 1,
+      "max": 10,
+      "reason": "Reused verbatim from tools/balancer.py VARIABLES."
+    },
+    "TURRET_HIT_RADIUS": {
+      "class": "tunable",
+      "category": "Enemies",
+      "min": 1,
+      "max": 16,
+      "reason": "Px radius for turret collision detection (turret.c); a hit-detection-feel parameter confirmed to have no sizing role."
+    },
+    "MAX_PROJECTILES": {
+      "class": "structural",
+      "reason": "Bullet pool ceiling; comment notes the bullet sprite slot is assigned at runtime from this pool -- OAM-budget sensitive on a build already at 32/40 sprites."
+    },
+    "PROJ_SPEED": {
+      "class": "tunable",
+      "category": "Combat",
+      "min": 1,
+      "max": 15,
+      "reason": "Reused verbatim from tools/balancer.py VARIABLES."
+    },
+    "PROJ_MAX_TTL": {
+      "class": "tunable",
+      "category": "Combat",
+      "min": 10,
+      "max": 120,
+      "reason": "Comment states this is a 'safety cap (~full-screen diagonal at PROJ_SPEED=4)' -- a soft coupling to PROJ_SPEED worth noting, but projectile.c only uses it to seed a simple countdown timer, so any value in range is safe; it just changes how far a bullet can travel before expiring."
+    },
+    "PROJ_FIRE_COOLDOWN": {
+      "class": "tunable",
+      "category": "Combat",
+      "min": 1,
+      "max": 60,
+      "reason": "Reused verbatim from tools/balancer.py VARIABLES."
+    },
+    "LASER_FIRE_COOLDOWN": {
+      "class": "tunable",
+      "category": "Combat",
+      "min": 1,
+      "max": 60,
+      "reason": "Frames between beam pulses; comment notes it is 'independent of PROJ_FIRE_COOLDOWN' -- pure timing dial, same scale as PROJ_FIRE_COOLDOWN."
+    },
+    "BEAM_VISIBLE_FRAMES": {
+      "class": "tunable",
+      "category": "Combat",
+      "min": 1,
+      "max": 30,
+      "reason": "Frames the beam lane stays drawn before tiles restore; pure visual timing."
+    },
+    "BEAM_LANE_HALF": {
+      "class": "structural",
+      "reason": "Comment: 'px half-thickness of the damage band -- matches the single 8px tile drawn'; the hit-detection band is explicitly tied to a fixed 8px BG tile the renderer draws, so changing it desyncs hit detection from the visible beam."
+    },
+    "BEAM_MAX_CELLS": {
+      "class": "structural",
+      "reason": "Comment: 'max BG cells one lane can cover -- matches camera.c VIS_COLS'; a cross-file constant that must track another module's screen-width constant."
+    },
+    "BEAM_AXIS_H": {
+      "class": "structural",
+      "reason": "Enum-like beam-axis constant."
+    },
+    "BEAM_AXIS_V": {
+      "class": "structural",
+      "reason": "Enum-like beam-axis constant."
+    },
+    "BEAM_TILE_OFS_H": {
+      "class": "structural",
+      "reason": "Comment: 'horizontal segment = loader slot + 0'; a VRAM tile-offset constant."
+    },
+    "BEAM_TILE_OFS_V": {
+      "class": "structural",
+      "reason": "Comment: 'vertical segment = loader slot + 1'; a VRAM tile-offset constant."
+    },
+    "MUSIC_MAX_CATCHUP": {
+      "class": "structural",
+      "reason": "Confirmed in music.c as a hard clamp on the per-frame catch-up tick count ('if (owed > MUSIC_MAX_CATCHUP) owed = MUSIC_MAX_CATCHUP'). Comment says it 'bounds the catch-up so a multi-frame stall cannot spiral' -- a performance/timing safety cap protecting frame budget, not a feel dial."
+    },
+    "DEBUG_LOG_ADDR": {
+      "class": "structural",
+      "reason": "WRAM address (hex) for the debug ring buffer; comment states these are 'fixed WRAM addresses in the last 66 bytes'."
+    },
+    "DEBUG_LOG_SIZE": {
+      "class": "structural",
+      "reason": "Debug ring buffer size in bytes; a buffer-sizing constant tied to the fixed WRAM address layout."
+    },
+    "DEBUG_LOG_IDX": {
+      "class": "structural",
+      "reason": "WRAM address (hex) for the debug ring buffer write index."
+    },
+    "DEBUG_TICK_ADDR": {
+      "class": "structural",
+      "reason": "WRAM address (hex) for the music tick counter."
+    },
+    "CD_SCREEN_COL": {
+      "class": "structural",
+      "reason": "Comment: 'left tile column of countdown pair on screen'; a screen-coordinate constant the rendering code assumes."
+    },
+    "CD_SCREEN_ROW": {
+      "class": "structural",
+      "reason": "Comment: 'tile row of countdown pair on screen'; a screen-coordinate constant the rendering code assumes."
+    },
+    "CD_FRAMES_NUM": {
+      "class": "tunable",
+      "category": "Countdown",
+      "min": 10,
+      "max": 180,
+      "reason": "Frames per countdown number phase (03,02,01); confirmed in state_playing.c as a simple phase-length threshold with no sizing role -- pure pacing/feel."
+    },
+    "CD_FRAMES_GO": {
+      "class": "tunable",
+      "category": "Countdown",
+      "min": 10,
+      "max": 180,
+      "reason": "Frames for the GO phase; same pacing role as CD_FRAMES_NUM."
+    },
+    "NUM_TRACKS": {
+      "class": "structural",
+      "reason": "Confirmed in track.c as an array-bound check ('if (id >= NUM_TRACKS) id = 0u') against the track table. Note: the track table (track.c) currently holds only 2 entries (TRACK1_REWARD, TRACK2_REWARD) even though NUM_TRACKS=3 -- an existing mismatch in the game repo, out of scope here, but reason enough on its own to keep this array-bound constant out of casual editing."
+    },
+    "TRACK1_REWARD": {
+      "class": "tunable",
+      "category": "Economy",
+      "min": 10,
+      "max": 300,
+      "reason": "Scrap reward for track 1; a pure economy-balance number (track.c's reward table entry, used only as a payout amount)."
+    },
+    "TRACK2_REWARD": {
+      "class": "tunable",
+      "category": "Economy",
+      "min": 10,
+      "max": 300,
+      "reason": "Scrap reward for track 2; a pure economy-balance number."
+    },
+    "LOADOUT_NUM_FIELDS": {
+      "class": "structural",
+      "reason": "Sizes LOADOUT_OPTION_NAMES[LOADOUT_NUM_FIELDS] in this same file -- a literal array-bound constant."
+    },
+    "LOADOUT_OPTIONS_PER_FIELD": {
+      "class": "structural",
+      "reason": "Sizes WEAPON1_DAMAGE_TABLE[LOADOUT_OPTIONS_PER_FIELD] in this same file -- a literal array-bound constant."
+    },
+    "LOADOUT_FIELD_CAR": {
+      "class": "structural",
+      "reason": "Enum-like field-index constant."
+    },
+    "LOADOUT_FIELD_ARMOR": {
+      "class": "structural",
+      "reason": "Enum-like field-index constant."
+    },
+    "LOADOUT_FIELD_WEAPON1": {
+      "class": "structural",
+      "reason": "Enum-like field-index constant."
+    },
+    "LOADOUT_FIELD_WEAPON2": {
+      "class": "structural",
+      "reason": "Enum-like field-index constant."
+    },
+    "LOADOUT_DEFAULT_CAR": {
+      "class": "tunable",
+      "category": "Loadout",
+      "min": 0,
+      "max": 1,
+      "reason": "Which starting car loadout.c seeds at boot -- a genuine designer/balance choice (e.g. start the player with the TANK instead of the VIPER). Clamped tightly to 0-1 because it indexes the fixed 2-option LOADOUT_CAR_NAMES[]/LOADOUT_OPTIONS_PER_FIELD array; anything outside that range would read out of bounds. Torn call -- see report."
+    },
+    "LOADOUT_DEFAULT_ARMOR": {
+      "class": "tunable",
+      "category": "Loadout",
+      "min": 0,
+      "max": 1,
+      "reason": "Starting armor tier; same reasoning as LOADOUT_DEFAULT_CAR, clamped to the fixed 2-option array bound."
+    },
+    "LOADOUT_DEFAULT_WEAPON1": {
+      "class": "tunable",
+      "category": "Loadout",
+      "min": 0,
+      "max": 1,
+      "reason": "Starting WEAPON1 option; same reasoning as LOADOUT_DEFAULT_CAR, clamped to the fixed 2-option array bound."
+    },
+    "LOADOUT_DEFAULT_WEAPON2": {
+      "class": "tunable",
+      "category": "Loadout",
+      "min": 0,
+      "max": 1,
+      "reason": "Starting WEAPON2 option; same reasoning as LOADOUT_DEFAULT_CAR, clamped to the fixed 2-option array bound."
+    },
+    "LOADOUT_STRINGS_DEFINED": {
+      "class": "marker",
+      "reason": "Include-guard-style #define with no value, per the ifndef block that follows it."
+    },
+    "WEAPON1_DAMAGE_TABLE_DEFINED": {
+      "class": "marker",
+      "reason": "Include-guard-style #define with no value, per the ifndef block that follows it."
+    },
+    "UPGRADE_COST_ARMOR": {
+      "class": "tunable",
+      "category": "Economy",
+      "min": 10,
+      "max": 300,
+      "reason": "Tier-1 ARMOR unlock price; a pure economy-balance number."
+    },
+    "UPGRADE_COST_WEAPON1": {
+      "class": "tunable",
+      "category": "Economy",
+      "min": 10,
+      "max": 300,
+      "reason": "Tier-1 WEAPON1 unlock price; a pure economy-balance number."
+    },
+    "UPGRADE_COST_WEAPON2": {
+      "class": "tunable",
+      "category": "Economy",
+      "min": 10,
+      "max": 300,
+      "reason": "Tier-1 WEAPON2 unlock price; a pure economy-balance number."
+    }
+  }
+}
