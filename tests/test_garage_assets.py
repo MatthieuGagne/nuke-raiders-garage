@@ -430,7 +430,9 @@ class TestVerify(unittest.TestCase):
         self.assertEqual(result.png.tile_count, 2)
 
     def test_five_colours_fails_and_names_the_count(self):
-        """AC4."""
+        """AC4, and the oversized-palette case: a palette declaring more
+        entries than the pixels use decodes cleanly, so the converter
+        accepts it and Garage is the one that refuses."""
         write_indexed_png(self.repo / "assets/sprites/car.png", 8, 8, 5)
 
         result = assets.verify(self.binding, self._asset("assets/sprites/car.png"))
@@ -503,6 +505,67 @@ class TestVerify(unittest.TestCase):
         (self.repo / "assets/music/song.uge").write_bytes(b"\x00\x01")
 
         result = assets.verify(self.binding, self._asset("assets/music/song.uge"))
+
+        self.assertTrue(result.ok)
+
+    def test_pixels_that_genuinely_use_five_colours_fail(self):
+        """AC4's other half. The test above covers a palette that declares
+        more entries than the pixels use, which decodes cleanly; this one
+        uses index 4 for real, so the converter itself refuses."""
+        write_indexed_png(self.repo / "assets/sprites/car.png", 8, 8, 5,
+                          pixels=[4] + [0] * 63)
+
+        result = assets.verify(self.binding, self._asset("assets/sprites/car.png"))
+
+        self.assertFalse(result.ok)
+        problem = result.problems[0]
+        self.assertEqual(problem.code, assets.PROBLEM_COLOURS)
+        self.assertIn("5", problem.message)
+
+    def test_an_unsupported_png_format_is_unreadable_not_a_colour_problem(self):
+        """A broken *asset* that is not a colour problem takes the other
+        branch. Without this the `looks_like_colours` heuristic could
+        misroute every read failure into a colour message and no test
+        would notice."""
+        path = self.repo / "assets/sprites/car.png"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # Greyscale (colour type 0) -- a real PNG that png_to_tiles does not
+        # accept, and one with no palette, so no colour count exists.
+        ihdr = struct.pack(">IIBBBBB", 8, 8, 8, 0, 0, 0, 0)
+        raw = b"".join(b"\x00" + bytes([0] * 8) for _ in range(8))
+        path.write_bytes(
+            b"\x89PNG\r\n\x1a\n"
+            + _png_chunk(b"IHDR", ihdr)
+            + _png_chunk(b"IDAT", zlib.compress(raw))
+            + _png_chunk(b"IEND", b"")
+        )
+
+        result = assets.verify(self.binding, self._asset("assets/sprites/car.png"))
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.problems[0].code, assets.PROBLEM_UNREADABLE)
+
+    def test_an_editor_source_beside_a_sprite_has_nothing_to_verify(self):
+        """A .aseprite is what the artist edits, not what a converter
+        reads. It is listed, and it passes, because there is no limit for
+        it to exceed."""
+        (self.repo / "assets/sprites").mkdir(parents=True, exist_ok=True)
+        (self.repo / "assets/sprites/car.aseprite").write_bytes(b"\x00\x01")
+
+        result = assets.verify(
+            self.binding, self._asset("assets/sprites/car.aseprite")
+        )
+
+        self.assertTrue(result.ok)
+        self.assertIsNone(result.png)
+
+    def test_an_other_kind_asset_has_nothing_to_verify(self):
+        (self.repo / "assets/dialog").mkdir(parents=True, exist_ok=True)
+        (self.repo / "assets/dialog/npcs.json").write_text("{}", encoding="utf-8")
+
+        result = assets.verify(
+            self.binding, self._asset("assets/dialog/npcs.json")
+        )
 
         self.assertTrue(result.ok)
 
