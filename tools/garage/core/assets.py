@@ -1,5 +1,4 @@
-"""Asset discovery, kind detection, pre-flight verification and the two
-file operations the panel needs (open, and "did it change?").
+"""Asset discovery and kind detection.
 
 No Qt import belongs in this module or anywhere under tools/garage/core/
 (R12): everything here is testable with no display.
