@@ -598,9 +598,14 @@ SHELL := bash
 BUILD_DIR ?= build
 TARGET := $(BUILD_DIR)/nuke-raider.gb
 
-.PHONY: all clean
+.PHONY: all clean memory-check sprites
 
 all: hooks $(TARGET)
+
+memory-check:
+\tpython tools/memory_check.py
+
+sprites: src/player_sprite.c
 
 build/track_rotation_manifest.json: \\
     assets/maps/track.tmx assets/maps/track2.tmx \\
@@ -695,6 +700,15 @@ class TestParseMakefile(unittest.TestCase):
                 if "build/track_tile_id_map.json" in r.targets][0]
         self.assertFalse(rule.is_converter)
 
+    def test_a_phony_rule_is_not_a_converter_rule(self):
+        """`memory-check` runs `python tools/...` like every converter
+        rule does, but it is a command, not a file. The game repository
+        has ten of these; without the `.PHONY` check they are all
+        classified as converters."""
+        rule = self._rule_for("memory-check")
+        self.assertTrue(rule.phony)
+        self.assertFalse(rule.is_converter)
+
 
 class TestTargetsForAsset(unittest.TestCase):
     def setUp(self):
@@ -751,6 +765,21 @@ class TestGeneratedFiles(unittest.TestCase):
         self.assertNotIn("assets/sprites/player_car.png", self.generated)
         self.assertNotIn("assets/maps/tileset.png", self.generated)
 
+    def test_a_phony_target_is_not_a_generated_file(self):
+        """This set's whole meaning is "paths a converter writes". A
+        maintenance target that happens to run a repo tool is neither a
+        path nor written."""
+        self.assertNotIn("memory-check", self.generated)
+        self.assertNotIn("all", self.generated)
+
+    def test_a_phony_convenience_alias_is_not_a_generated_file(self):
+        """`sprites: src/player_sprite.c` has no recipe and its only
+        prerequisite IS generated, so it satisfies the side-effect rule
+        exactly -- the second pass has to exclude phony targets itself.
+        The real Makefile's `dialog_data` is this shape."""
+        self.assertNotIn("sprites", self.generated)
+        self.assertIn("src/player_sprite.c", self.generated)
+
 
 @unittest.skipIf(NO_GAME_REPO, NO_GAME_REPO_REASON)
 class TestAgainstTheRealMakefile(unittest.TestCase):
@@ -774,6 +803,15 @@ class TestAgainstTheRealMakefile(unittest.TestCase):
                 self.rules, "assets/sprites/player_car.png"
             ),
         )
+
+    def test_no_phony_maintenance_target_is_called_a_generated_file(self):
+        """The real Makefile declares ten phony targets whose recipes run
+        `python tools/...`. Every one of them looked like a converter rule
+        before `.PHONY` was consulted."""
+        generated = pipeline.generated_files(self.rules)
+        for phony in ("all", "hooks", "memory-check", "bank-check",
+                      "sync-docs", "dialog_data", "tile-check"):
+            self.assertNotIn(phony, generated)
 
 
 if __name__ == "__main__":
