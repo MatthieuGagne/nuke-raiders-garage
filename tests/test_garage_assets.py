@@ -19,7 +19,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from tools.garage.core import assets, preview, project
+from tools.garage.core import assets, pipeline, preview, project
 
 GAME_REPO_REMOTE_URL = "https://github.com/MatthieuGagne/gmb-nuke-raider.git"
 
@@ -587,6 +587,193 @@ class TestVerify(unittest.TestCase):
         summary = result.summary()
         self.assertIn("5", summary)
         self.assertIn("12", summary)
+
+
+# A Makefile fragment in the shape the game repository actually uses: a
+# continuation, several targets on one rule, an order-only prerequisite, a
+# recipe-less rule declaring side-effect outputs, an aseprite export rule
+# whose target is another asset, and a `$(TARGET):` line with no recipe.
+SAMPLE_MAKEFILE = """\
+SHELL := bash
+BUILD_DIR ?= build
+TARGET := $(BUILD_DIR)/nuke-raider.gb
+
+.PHONY: all clean
+
+all: hooks $(TARGET)
+
+build/track_rotation_manifest.json: \\
+    assets/maps/track.tmx assets/maps/track2.tmx \\
+    tools/tmx_to_c.py | build
+\tpython tools/tmx_to_c.py --emit-rotation-manifest $@ \\
+\t    assets/maps/track.tmx assets/maps/track2.tmx
+
+build/track_tile_id_map.json src/track_tileset_meta.h: src/track_tiles.c
+
+src/track_tiles.c: \\
+    assets/maps/tileset.png assets/maps/track.tsx \\
+    build/track_rotation_manifest.json tools/png_to_tiles.py | build
+\tpython tools/png_to_tiles.py --bank 255 \\
+\t    --rotation-manifest build/track_rotation_manifest.json \\
+\t    assets/maps/tileset.png src/track_tiles.c track_tile_data
+
+src/track_map.c: assets/maps/track.tmx build/track_tile_id_map.json tools/tmx_to_c.py
+\tpython tools/tmx_to_c.py --id-map build/track_tile_id_map.json \\
+\t    assets/maps/track.tmx src/track_map.c
+
+src/player_sprite.c: assets/sprites/player_car.png tools/png_to_tiles.py
+\tpython tools/png_to_tiles.py --bank 255 assets/sprites/player_car.png src/player_sprite.c player_tile_data
+
+$(TARGET): src/player_sprite.c
+
+assets/maps/tileset.png: assets/maps/tileset.aseprite
+\taseprite --batch $< --save-as $@
+
+assets/sprites/%.png: assets/sprites/%.aseprite
+\taseprite --batch $< --save-as $@
+
+clean:
+\trm -rf build/
+"""
+
+
+class TestParseMakefile(unittest.TestCase):
+    def setUp(self):
+        self.rules = pipeline.parse_makefile(SAMPLE_MAKEFILE)
+
+    def _rule_for(self, target: str):
+        matches = [r for r in self.rules if target in r.targets]
+        self.assertEqual(len(matches), 1, f"expected one rule for {target}")
+        return matches[0]
+
+    def test_it_joins_continued_prerequisite_lines(self):
+        rule = self._rule_for("src/track_tiles.c")
+        self.assertIn("assets/maps/tileset.png", rule.prerequisites)
+        self.assertIn("assets/maps/track.tsx", rule.prerequisites)
+        self.assertIn("tools/png_to_tiles.py", rule.prerequisites)
+
+    def test_it_drops_order_only_prerequisites(self):
+        rule = self._rule_for("src/track_tiles.c")
+        self.assertNotIn("build", rule.prerequisites)
+        self.assertNotIn("|", rule.prerequisites)
+
+    def test_it_keeps_every_target_of_a_multi_target_rule(self):
+        rule = [r for r in self.rules
+                if "build/track_tile_id_map.json" in r.targets][0]
+        self.assertIn("src/track_tileset_meta.h", rule.targets)
+
+    def test_it_ignores_variable_assignments(self):
+        self.assertFalse(any("SHELL" in t for r in self.rules for t in r.targets))
+        self.assertFalse(any("BUILD_DIR" in t for r in self.rules for t in r.targets))
+
+    def test_it_ignores_a_pattern_rule(self):
+        self.assertFalse(any("%" in t for r in self.rules for t in r.targets))
+
+    def test_it_ignores_a_target_spelled_with_a_variable(self):
+        self.assertFalse(any("$(" in t for r in self.rules for t in r.targets))
+
+    def test_it_joins_continued_recipe_lines(self):
+        """The tileset recipe spans three lines; it is one command."""
+        rule = self._rule_for("src/track_tiles.c")
+        self.assertEqual(len(rule.recipe), 1)
+        self.assertIn("--bank 255", rule.recipe[0])
+        self.assertIn("--rotation-manifest", rule.recipe[0])
+        self.assertIn("track_tile_data", rule.recipe[0])
+
+    def test_a_converter_rule_is_one_whose_recipe_runs_a_repo_tool(self):
+        self.assertTrue(self._rule_for("src/player_sprite.c").is_converter)
+
+    def test_an_aseprite_export_rule_is_not_a_converter_rule(self):
+        """It writes another asset, not a generated source, and it needs a
+        drawing program on PATH. R6 names three converters; this is none
+        of them."""
+        rule = self._rule_for("assets/maps/tileset.png")
+        self.assertFalse(rule.is_converter)
+
+    def test_a_recipe_less_rule_is_not_a_converter_rule(self):
+        rule = [r for r in self.rules
+                if "build/track_tile_id_map.json" in r.targets][0]
+        self.assertFalse(rule.is_converter)
+
+
+class TestTargetsForAsset(unittest.TestCase):
+    def setUp(self):
+        self.rules = pipeline.parse_makefile(SAMPLE_MAKEFILE)
+
+    def test_a_sprite_names_the_source_it_generates(self):
+        self.assertEqual(
+            pipeline.targets_for_asset(self.rules, "assets/sprites/player_car.png"),
+            ["src/player_sprite.c"],
+        )
+
+    def test_a_map_names_every_target_it_feeds(self):
+        """Editing track.tmx regenerates the map *and* the rotation
+        manifest -- a converter run that did one and not the other would
+        leave the worktree half converted."""
+        self.assertEqual(
+            pipeline.targets_for_asset(self.rules, "assets/maps/track.tmx"),
+            ["build/track_rotation_manifest.json", "src/track_map.c"],
+        )
+
+    def test_an_asset_no_rule_reads_names_nothing(self):
+        self.assertEqual(
+            pipeline.targets_for_asset(self.rules, "assets/reference/x.png"), []
+        )
+
+    def test_a_tileset_names_the_tile_source(self):
+        self.assertEqual(
+            pipeline.targets_for_asset(self.rules, "assets/maps/tileset.png"),
+            ["src/track_tiles.c"],
+        )
+
+
+class TestGeneratedFiles(unittest.TestCase):
+    """R10: Garage must never edit a generated file. The set is derived
+    from the Makefile rather than listed here, so a new converter rule in
+    the game repository is covered the day it lands."""
+
+    def setUp(self):
+        self.generated = pipeline.generated_files(
+            pipeline.parse_makefile(SAMPLE_MAKEFILE)
+        )
+
+    def test_a_converter_target_is_generated(self):
+        self.assertIn("src/track_map.c", self.generated)
+        self.assertIn("src/player_sprite.c", self.generated)
+
+    def test_a_side_effect_target_is_generated(self):
+        """`build/track_tile_id_map.json src/track_tileset_meta.h:
+        src/track_tiles.c` has no recipe -- it declares outputs the tile
+        rule writes on the side. They are generated all the same."""
+        self.assertIn("src/track_tileset_meta.h", self.generated)
+
+    def test_an_asset_is_not_generated(self):
+        self.assertNotIn("assets/sprites/player_car.png", self.generated)
+        self.assertNotIn("assets/maps/tileset.png", self.generated)
+
+
+@unittest.skipIf(NO_GAME_REPO, NO_GAME_REPO_REASON)
+class TestAgainstTheRealMakefile(unittest.TestCase):
+    """The parser is only useful if it reads the file it was written for."""
+
+    def setUp(self):
+        self.rules = pipeline.read_rules(project.bind())
+
+    def test_the_specs_three_generated_files_are_all_derived(self):
+        """R10 names src/track_map.c, the generated tile sources and
+        src/dialog_data.c."""
+        generated = pipeline.generated_files(self.rules)
+        self.assertIn("src/track_map.c", generated)
+        self.assertIn("src/track_tiles.c", generated)
+        self.assertIn("src/dialog_data.c", generated)
+
+    def test_the_player_sprite_resolves_to_its_generated_source(self):
+        self.assertIn(
+            "src/player_sprite.c",
+            pipeline.targets_for_asset(
+                self.rules, "assets/sprites/player_car.png"
+            ),
+        )
 
 
 if __name__ == "__main__":
