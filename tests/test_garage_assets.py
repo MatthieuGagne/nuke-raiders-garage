@@ -814,5 +814,160 @@ class TestAgainstTheRealMakefile(unittest.TestCase):
             self.assertNotIn(phony, generated)
 
 
+@unittest.skipIf(NO_GAME_REPO, NO_GAME_REPO_REASON)
+class TestPlanFor(unittest.TestCase):
+    """R5/R6/R11: what Garage would run for an asset, and when it refuses
+    to run anything at all."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = tmp_root(self._tmp.name)
+        self.repo = make_repo_with_converters(self.root)
+        (self.repo / "Makefile").write_text(SAMPLE_MAKEFILE, encoding="utf-8")
+        self.binding = bind_over(self.root, self.repo)
+        self.rules = pipeline.parse_makefile(SAMPLE_MAKEFILE)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _asset(self, relative: str) -> assets.Asset:
+        return [a for a in assets.discover(self.binding)
+                if a.relative_path == relative][0]
+
+    def _plan(self, relative: str) -> pipeline.Plan:
+        asset = self._asset(relative)
+        return pipeline.plan_for(
+            self.binding, asset, assets.verify(self.binding, asset), self.rules
+        )
+
+    def test_a_clean_sprite_gets_the_make_command_for_its_target(self):
+        """AC6: the same command a terminal runs."""
+        write_indexed_png(self.repo / "assets/sprites/player_car.png", 16, 8, 4)
+
+        plan = self._plan("assets/sprites/player_car.png")
+
+        self.assertTrue(plan.can_run)
+        self.assertEqual(len(plan.commands), 1)
+        self.assertEqual(
+            list(plan.commands[0].argv),
+            ["make", "-W", "assets/sprites/player_car.png", "src/player_sprite.c"],
+        )
+        self.assertEqual(plan.converters, ("png_to_tiles.py",))
+
+    def test_a_failed_verification_refuses_and_produces_no_command(self):
+        """AC5."""
+        write_indexed_png(self.repo / "assets/sprites/player_car.png", 8, 8, 9)
+
+        plan = self._plan("assets/sprites/player_car.png")
+
+        self.assertFalse(plan.can_run)
+        self.assertEqual(plan.commands, ())
+        self.assertIn("9", plan.refusal)
+
+    def test_a_map_gets_every_target_in_one_make_call(self):
+        (self.repo / "assets/maps").mkdir(parents=True, exist_ok=True)
+        (self.repo / "assets/maps/track.tmx").write_text(
+            '<map width="64" height="32" tilewidth="8" tileheight="8"></map>',
+            encoding="utf-8",
+        )
+
+        plan = self._plan("assets/maps/track.tmx")
+
+        self.assertEqual(
+            list(plan.commands[0].argv),
+            ["make", "-W", "assets/maps/track.tmx",
+             "build/track_rotation_manifest.json", "src/track_map.c"],
+        )
+        self.assertEqual(plan.converters, ("tmx_to_c.py",))
+
+    def test_an_asset_no_rule_reads_refuses_and_says_so(self):
+        (self.repo / "assets/reference").mkdir(parents=True, exist_ok=True)
+        write_indexed_png(self.repo / "assets/reference/shot.png", 8, 8, 4)
+
+        plan = self._plan("assets/reference/shot.png")
+
+        self.assertFalse(plan.can_run)
+        self.assertIn("Makefile", plan.refusal)
+
+    def test_a_uge_gets_the_two_music_validators(self):
+        """R11/AC11."""
+        (self.repo / "assets/music").mkdir(parents=True, exist_ok=True)
+        (self.repo / "assets/music/song.uge").write_bytes(b"\x00")
+
+        plan = self._plan("assets/music/song.uge")
+
+        self.assertTrue(plan.can_run)
+        self.assertEqual(len(plan.commands), 2)
+        self.assertIn("music_song_validate.py", plan.commands[0].argv[2])
+        self.assertEqual(plan.commands[0].argv[3], "src/music_data.c")
+        self.assertIn("music_wire_check.py", plan.commands[1].argv[2])
+        self.assertEqual(
+            plan.converters, ("music_song_validate.py", "music_wire_check.py")
+        )
+
+    def test_the_music_commands_run_the_worktrees_own_copies(self):
+        """R13: no path here is hardcoded -- these must point into the
+        fixture worktree, not into any checkout on this machine."""
+        commands = pipeline.music_commands(self.binding)
+
+        for command in commands:
+            self.assertTrue(
+                Path(command.argv[2]).is_relative_to(self.repo),
+                f"{command.argv[2]} is outside the active worktree",
+            )
+
+
+@unittest.skipIf(NO_GAME_REPO, NO_GAME_REPO_REASON)
+class TestConverterRunProducesTheSameFile(unittest.TestCase):
+    """AC6, end to end: run the plan's command with make_runner and
+    compare the file it wrote against the one a terminal invocation of the
+    converter writes."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = tmp_root(self._tmp.name)
+        self.repo = make_repo_with_converters(self.root)
+        (self.repo / "Makefile").write_text(
+            "src/player_sprite.c: assets/sprites/player_car.png tools/png_to_tiles.py\n"
+            "\tpython tools/png_to_tiles.py --bank 255 "
+            "assets/sprites/player_car.png src/player_sprite.c player_tile_data\n",
+            encoding="utf-8",
+        )
+        (self.repo / "src").mkdir(exist_ok=True)
+        write_indexed_png(self.repo / "assets/sprites/player_car.png", 16, 8, 4)
+        self.binding = bind_over(self.root, self.repo)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_make_from_garage_writes_what_the_terminal_writes(self):
+        from tools.garage.core import make_runner
+
+        asset = [a for a in assets.discover(self.binding)
+                 if a.relative_path == "assets/sprites/player_car.png"][0]
+        plan = pipeline.plan_for(
+            self.binding, asset, assets.verify(self.binding, asset)
+        )
+        lines = []
+        results = make_runner.run_sequence(
+            list(plan.commands), self.repo, lines.append
+        )
+        if results and results[0].exit_code == make_runner.EXIT_NOT_STARTED:
+            self.skipTest("make is not on PATH on this machine")
+        self.assertTrue(all(r.ok for r in results), "\n".join(lines))
+        from_garage = (self.repo / "src/player_sprite.c").read_bytes()
+
+        (self.repo / "src/player_sprite.c").unlink()
+        subprocess.run(
+            [sys.executable, "tools/png_to_tiles.py", "--bank", "255",
+             "assets/sprites/player_car.png", "src/player_sprite.c",
+             "player_tile_data"],
+            cwd=str(self.repo), check=True, capture_output=True, text=True,
+        )
+        from_terminal = (self.repo / "src/player_sprite.c").read_bytes()
+
+        self.assertEqual(from_garage, from_terminal)
+
+
 if __name__ == "__main__":
     unittest.main()

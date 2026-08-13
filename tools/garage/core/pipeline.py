@@ -30,9 +30,13 @@ validators are named here, and only here.
 from __future__ import annotations
 
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Sequence, Set, Tuple
+from typing import List, Optional, Sequence, Set, Tuple
+
+from tools.garage.core import assets as assets_core
+from tools.garage.core.make_runner import Command
 
 MAKEFILE_NAME = "Makefile"
 
@@ -319,3 +323,125 @@ def generated_files(rules: Sequence[Rule]) -> Set[str]:
         if all(p in generated for p in rule.prerequisites):
             generated.update(rule.targets)
     return generated
+
+
+# ── What Garage would run, and when it refuses (R5, R6, R11) ─────────────
+
+REFUSAL_PREFIX = "Verification failed"
+
+
+@dataclass(frozen=True)
+class Plan:
+    """The commands for one asset, or the reason there are none.
+
+    `refusal` and `commands` are exclusive: R5 says a failed verification
+    means no converter runs, and the way to make that structural rather
+    than remembered is for the refusing branch to produce an empty command
+    list. A panel that runs `plan.commands` cannot run a refused asset.
+    """
+
+    commands: Tuple[Command, ...] = ()
+    targets: Tuple[str, ...] = ()
+    converters: Tuple[str, ...] = ()
+    refusal: Optional[str] = None
+    # True when a rule for this asset passes `--rotation-manifest`, which
+    # is what makes Garage's tile cost a *base* count -- see ROTATION_NOTE.
+    rotation: bool = False
+
+    @property
+    def can_run(self) -> bool:
+        return bool(self.commands) and self.refusal is None
+
+
+def music_commands(binding) -> List[Command]:
+    """R11's two validators, run against the active worktree's own copies.
+
+    `music_song_validate.py` reads the hUGETracker C export -- the .uge is
+    the tracker's project file, and nothing outside the tracker parses it.
+    `music_wire_check.py` reads the whole worktree and checks that the
+    export is wired into music_data.h, music.c and bank-manifest.json.
+    Between them they answer the only question Garage can ask about a song
+    after the user has been in the editor: is what came out of it usable.
+
+    `sys.executable`, not "python": Garage must run the interpreter it is
+    running under, not whatever a PATH lookup finds.
+    """
+    worktree = binding.active_worktree.path
+    song = binding.resolve(*MUSIC_SONG_VALIDATE)
+    wire = binding.resolve(*MUSIC_WIRE_CHECK)
+    return [
+        Command(
+            argv=(sys.executable, "-u", str(song), MUSIC_EXPORT_RELATIVE),
+            label=f"python tools/{MUSIC_SONG_VALIDATE[-1]} {MUSIC_EXPORT_RELATIVE}",
+            target=MUSIC_EXPORT_RELATIVE,
+        ),
+        Command(
+            argv=(sys.executable, "-u", str(wire), str(worktree)),
+            label=f"python tools/{MUSIC_WIRE_CHECK[-1]} .",
+            target=MUSIC_EXPORT_RELATIVE,
+        ),
+    ]
+
+
+def _converters_for_targets(rules: Sequence[Rule], targets: Sequence[str]) -> Tuple[str, ...]:
+    found: List[str] = []
+    for rule in rules:
+        if not rule.is_converter or not any(t in targets for t in rule.targets):
+            continue
+        for name in rule.converter_names():
+            if name not in found:
+                found.append(name)
+    return tuple(found)
+
+
+def plan_for(binding, asset, verification, rules: Sequence[Rule] = None) -> Plan:
+    """What Garage would run for `asset`, or why it will not.
+
+    R5 first: a failed verification produces a refusal and no command, so
+    the panel cannot run a converter on an asset that failed. The refusal
+    is the verification's own summary, which names the value and the limit
+    (R4).
+    """
+    if not verification.ok:
+        return Plan(refusal=f"{REFUSAL_PREFIX} — {verification.summary()}")
+
+    if asset.kind == assets_core.KIND_MUSIC:
+        commands = music_commands(binding)
+        return Plan(
+            commands=tuple(commands),
+            targets=(MUSIC_EXPORT_RELATIVE,),
+            converters=(MUSIC_SONG_VALIDATE[-1], MUSIC_WIRE_CHECK[-1]),
+        )
+
+    if rules is None:
+        try:
+            rules = read_rules(binding)
+        except PipelineError as exc:
+            return Plan(refusal=exc.message)
+
+    targets = targets_for_asset(rules, asset.relative_path)
+    if not targets:
+        return Plan(
+            refusal=(
+                f"No rule in the game repository's Makefile reads "
+                f"{asset.relative_path}, so there is no converter to run for "
+                f"it. It is a source or a reference file rather than an "
+                f"input to the build."
+            )
+        )
+
+    # `-W <asset>`: force the chain this asset feeds and nothing else. See
+    # the module docstring for why not `-B`.
+    argv = (MAKE_EXECUTABLE, "-W", asset.relative_path, *targets)
+    rotation = any(
+        rule.is_converter
+        and any(t in targets for t in rule.targets)
+        and any("--rotation-manifest" in line for line in rule.recipe)
+        for rule in rules
+    )
+    return Plan(
+        commands=(Command(argv=argv, label=" ".join(argv), target=targets[0]),),
+        targets=tuple(targets),
+        converters=_converters_for_targets(rules, targets),
+        rotation=rotation,
+    )
