@@ -400,5 +400,131 @@ class TestReadTmx(unittest.TestCase):
             self.assertIsNone(facts.width)
 
 
+@unittest.skipIf(NO_GAME_REPO, NO_GAME_REPO_REASON)
+class TestVerify(unittest.TestCase):
+    """R4: verify before a converter runs, and say which limit is
+    exceeded. R5's refusal is built on `Verification.ok`."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = tmp_root(self._tmp.name)
+        self.repo = make_repo_with_converters(self.root)
+        self.binding = bind_over(self.root, self.repo)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _asset(self, relative: str) -> assets.Asset:
+        found = [a for a in assets.discover(self.binding)
+                 if a.relative_path == relative]
+        self.assertEqual(len(found), 1, f"{relative} not discovered")
+        return found[0]
+
+    def test_a_clean_sprite_passes(self):
+        write_indexed_png(self.repo / "assets/sprites/car.png", 16, 8, 4)
+
+        result = assets.verify(self.binding, self._asset("assets/sprites/car.png"))
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.problems, [])
+        self.assertEqual(result.png.tile_count, 2)
+
+    def test_five_colours_fails_and_names_the_count(self):
+        """AC4."""
+        write_indexed_png(self.repo / "assets/sprites/car.png", 8, 8, 5)
+
+        result = assets.verify(self.binding, self._asset("assets/sprites/car.png"))
+
+        self.assertFalse(result.ok)
+        problem = result.problems[0]
+        self.assertEqual(problem.code, assets.PROBLEM_COLOURS)
+        self.assertIn("5", problem.message)
+        self.assertIn("4", problem.limit)
+
+    def test_an_rgb_png_with_seven_greys_fails_and_names_the_count(self):
+        write_rgb_png(self.repo / "assets/sprites/car.png", 8, 8,
+                      greys=[0, 30, 60, 90, 120, 150, 180])
+
+        result = assets.verify(self.binding, self._asset("assets/sprites/car.png"))
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.problems[0].code, assets.PROBLEM_COLOURS)
+        self.assertIn("7", result.problems[0].message)
+
+    def test_a_size_that_is_not_a_multiple_of_eight_fails(self):
+        write_indexed_png(self.repo / "assets/sprites/car.png", 12, 8, 4)
+
+        result = assets.verify(self.binding, self._asset("assets/sprites/car.png"))
+
+        self.assertFalse(result.ok)
+        problem = result.problems[0]
+        self.assertEqual(problem.code, assets.PROBLEM_DIMENSIONS)
+        self.assertIn("12", problem.message)
+        self.assertIn("8", problem.limit)
+
+    def test_a_tileset_over_the_vram_budget_fails_and_names_the_cost(self):
+        # 200 tiles: 200 x 1 tiles, past png_to_tiles' 192-tile limit.
+        write_indexed_png(self.repo / "assets/tiles/big.png", 1600, 8, 4)
+
+        result = assets.verify(self.binding, self._asset("assets/tiles/big.png"))
+
+        self.assertFalse(result.ok)
+        problem = [p for p in result.problems
+                   if p.code == assets.PROBLEM_TILE_COST][0]
+        self.assertIn("200", problem.message)
+        self.assertIn("192", problem.limit)
+
+    def test_a_map_reports_its_size_and_passes(self):
+        (self.repo / "assets/maps").mkdir(parents=True, exist_ok=True)
+        (self.repo / "assets/maps/track.tmx").write_text(
+            '<map width="64" height="32" tilewidth="8" tileheight="8"></map>',
+            encoding="utf-8",
+        )
+
+        result = assets.verify(self.binding, self._asset("assets/maps/track.tmx"))
+
+        self.assertTrue(result.ok)
+        self.assertEqual((result.tmx.width, result.tmx.height), (64, 32))
+
+    def test_a_broken_map_fails(self):
+        (self.repo / "assets/maps").mkdir(parents=True, exist_ok=True)
+        (self.repo / "assets/maps/track.tmx").write_text("<map", encoding="utf-8")
+
+        result = assets.verify(self.binding, self._asset("assets/maps/track.tmx"))
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.problems[0].code, assets.PROBLEM_UNREADABLE)
+
+    def test_music_needs_no_pre_flight(self):
+        """R11: the validators are the check for a .uge, and they run
+        after the user has been in the editor -- there is nothing Garage
+        can verify about the binary beforehand."""
+        (self.repo / "assets/music").mkdir(parents=True, exist_ok=True)
+        (self.repo / "assets/music/song.uge").write_bytes(b"\x00\x01")
+
+        result = assets.verify(self.binding, self._asset("assets/music/song.uge"))
+
+        self.assertTrue(result.ok)
+
+    def test_a_missing_converter_is_reported_as_a_problem_not_a_crash(self):
+        write_indexed_png(self.repo / "assets/sprites/car.png", 8, 8, 4)
+        (self.repo / "tools" / "png_to_tiles.py").unlink()
+
+        result = assets.verify(self.binding, self._asset("assets/sprites/car.png"))
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.problems[0].code, assets.PROBLEM_CONVERTER)
+        self.assertIn("png_to_tiles.py", result.problems[0].message)
+
+    def test_the_summary_names_every_problem(self):
+        write_indexed_png(self.repo / "assets/sprites/car.png", 12, 8, 5)
+
+        result = assets.verify(self.binding, self._asset("assets/sprites/car.png"))
+
+        summary = result.summary()
+        self.assertIn("5", summary)
+        self.assertIn("12", summary)
+
+
 if __name__ == "__main__":
     unittest.main()

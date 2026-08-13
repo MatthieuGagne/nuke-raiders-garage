@@ -1,4 +1,4 @@
-"""Asset discovery and kind detection.
+"""Asset discovery, kind detection and pre-flight verification.
 
 No Qt import belongs in this module or anywhere under tools/garage/core/
 (R12): everything here is testable with no display.
@@ -18,6 +18,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Tuple
+
+from tools.garage.core import preview
 
 ASSETS_DIRNAME = "assets"
 
@@ -149,3 +151,148 @@ def group_by_kind(found: List[Asset]) -> Dict[str, List[Asset]]:
     for asset in found:
         groups[asset.kind].append(asset)
     return groups
+
+
+# ── Verification (R4) ────────────────────────────────────────────────────
+# Today an asset problem appears as a converter error, or later as a
+# compile error -- both far from the change that caused them. R4 moves the
+# report to the moment the user selects the asset, which is only useful if
+# it states *which* limit is exceeded and by how much. Every Problem
+# therefore carries both the measured value and the limit.
+
+PROBLEM_COLOURS = "colours"
+PROBLEM_DIMENSIONS = "dimensions"
+PROBLEM_TILE_COST = "tile-cost"
+PROBLEM_UNREADABLE = "unreadable"
+PROBLEM_CONVERTER = "converter"
+
+
+@dataclass(frozen=True)
+class Problem:
+    """One reason a converter must not run yet. `message` states what is
+    wrong including the measured value; `limit` states the limit exceeded.
+    Both are shown -- "5 colours" alone does not say what is allowed.
+    """
+
+    code: str
+    message: str
+    limit: str
+
+
+@dataclass
+class Verification:
+    asset: "Asset"
+    problems: List[Problem]
+    png: "preview.PngFacts | None" = None
+    tmx: "preview.TmxFacts | None" = None
+
+    @property
+    def ok(self) -> bool:
+        return not self.problems
+
+    def summary(self) -> str:
+        """One line naming every problem, for a tooltip or a log."""
+        if not self.problems:
+            return "Verified — no problem found."
+        return "  ".join(f"{p.message} (limit: {p.limit})" for p in self.problems)
+
+
+def _verify_image(binding, asset: "Asset") -> Verification:
+    try:
+        facts = preview.read_png(binding, asset.path)
+    except preview.ConverterUnavailable as exc:
+        return Verification(
+            asset,
+            [Problem(PROBLEM_CONVERTER, exc.message, "a converter in the worktree")],
+        )
+
+    problems: List[Problem] = []
+
+    # The colour rejection is the converter's own sentence, so the user
+    # reads what a terminal would have printed (AC4). The count is stated
+    # separately because png_to_tiles' indexed-PNG message names the
+    # offending index rather than the count.
+    if facts.error is not None:
+        count = facts.colour_count
+        looks_like_colours = count is not None and count > preview.MAX_COLOURS
+        problems.append(
+            Problem(
+                PROBLEM_COLOURS if looks_like_colours else PROBLEM_UNREADABLE,
+                (
+                    f"{asset.name} has {count} colours — {facts.error}"
+                    if looks_like_colours
+                    else f"{asset.name} could not be read — {facts.error}"
+                ),
+                (
+                    f"{preview.MAX_COLOURS} colours"
+                    if looks_like_colours
+                    else "a PNG png_to_tiles.py accepts"
+                ),
+            )
+        )
+        return Verification(asset, problems, png=facts)
+
+    if facts.colour_count is not None and facts.colour_count > preview.MAX_COLOURS:
+        # An indexed PNG whose palette is oversized but whose pixels stay
+        # inside 0-3 decodes cleanly. png_to_tiles accepts it; the palette
+        # is still wrong, and the user will hit it the moment they use a
+        # fifth entry.
+        problems.append(
+            Problem(
+                PROBLEM_COLOURS,
+                f"{asset.name} has a palette of {facts.colour_count} colours",
+                f"{preview.MAX_COLOURS} colours",
+            )
+        )
+
+    if facts.width % preview.TILE_SIZE or facts.height % preview.TILE_SIZE:
+        problems.append(
+            Problem(
+                PROBLEM_DIMENSIONS,
+                f"{asset.name} is {facts.width}×{facts.height} pixels, which is "
+                f"not a whole number of tiles",
+                f"a multiple of {preview.TILE_SIZE} pixels on each side",
+            )
+        )
+
+    if facts.tile_count is not None and facts.tile_count > preview.MAX_TILES:
+        problems.append(
+            Problem(
+                PROBLEM_TILE_COST,
+                f"{asset.name} costs {facts.tile_count} tiles",
+                f"{preview.MAX_TILES} tiles of VRAM",
+            )
+        )
+
+    return Verification(asset, problems, png=facts)
+
+
+def _verify_map(asset: "Asset") -> Verification:
+    facts = preview.read_tmx(asset.path)
+    if facts.error is not None:
+        return Verification(
+            asset,
+            [Problem(PROBLEM_UNREADABLE, facts.error, "a map Tiled can read")],
+            tmx=facts,
+        )
+    return Verification(asset, [], tmx=facts)
+
+
+def verify(binding, asset: "Asset") -> Verification:
+    """Pre-flight an asset (R4). `Verification.ok` is what R5's refusal
+    reads; nothing here runs a converter or writes a file.
+
+    Music has no pre-flight: a `.uge` is a binary Garage cannot inspect,
+    and R11 names the two validators as its check -- they run after the
+    user comes back from the editor, which is where their answer means
+    something.
+    """
+    if asset.kind in (KIND_SPRITES, KIND_TILES):
+        if asset.path.suffix.lower() in IMAGE_SUFFIXES:
+            return _verify_image(binding, asset)
+        # A .aseprite or .xcf source: the file the artist edits, not the
+        # file a converter reads. Nothing to verify and nothing to refuse.
+        return Verification(asset, [])
+    if asset.kind == KIND_MAPS:
+        return _verify_map(asset)
+    return Verification(asset, [])
