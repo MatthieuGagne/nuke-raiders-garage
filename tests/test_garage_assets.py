@@ -19,7 +19,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from tools.garage.core import assets, project
+from tools.garage.core import assets, preview, project
 
 GAME_REPO_REMOTE_URL = "https://github.com/MatthieuGagne/gmb-nuke-raider.git"
 
@@ -198,6 +198,206 @@ class TestDiscover(unittest.TestCase):
                 [a.name for a in groups[assets.KIND_SPRITES]], ["a.png"]
             )
             self.assertEqual([a.name for a in groups[assets.KIND_MAPS]], [])
+
+
+# ── PNG fixtures ─────────────────────────────────────────────────────────
+# Written by hand rather than by an imaging library: this suite runs under
+# `make test`, whose whole point is that it needs nothing installed.
+
+
+def _png_chunk(ctype: bytes, data: bytes) -> bytes:
+    return (
+        struct.pack(">I", len(data))
+        + ctype
+        + data
+        + struct.pack(">I", zlib.crc32(ctype + data) & 0xFFFFFFFF)
+    )
+
+
+def write_indexed_png(path: Path, width: int, height: int, palette_size: int,
+                      pixels=None) -> Path:
+    """An 8-bit indexed PNG (colour type 3) with `palette_size` PLTE
+    entries. `pixels` is a flat row-major list of palette indices; None
+    means every pixel is index 0."""
+    if pixels is None:
+        pixels = [0] * (width * height)
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 3, 0, 0, 0)
+    plte = b"".join(bytes(((i * 37) % 256,) * 3) for i in range(palette_size))
+    raw = b"".join(
+        b"\x00" + bytes(pixels[y * width:(y + 1) * width]) for y in range(height)
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(
+        b"\x89PNG\r\n\x1a\n"
+        + _png_chunk(b"IHDR", ihdr)
+        + _png_chunk(b"PLTE", plte)
+        + _png_chunk(b"IDAT", zlib.compress(raw))
+        + _png_chunk(b"IEND", b"")
+    )
+    return path
+
+
+def write_rgb_png(path: Path, width: int, height: int, greys) -> Path:
+    """A truecolour PNG (colour type 2). `greys` is a list of grey levels;
+    pixel (x, y) takes greys[(y * width + x) % len(greys)], so an image
+    with N distinct luminances is one call."""
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    rows = []
+    for y in range(height):
+        row = bytearray(b"\x00")
+        for x in range(width):
+            level = greys[(y * width + x) % len(greys)]
+            row += bytes((level, level, level))
+        rows.append(bytes(row))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(
+        b"\x89PNG\r\n\x1a\n"
+        + _png_chunk(b"IHDR", ihdr)
+        + _png_chunk(b"IDAT", zlib.compress(b"".join(rows)))
+        + _png_chunk(b"IEND", b"")
+    )
+    return path
+
+
+# The real converter, copied into a fixture worktree so these tests
+# exercise the code Garage will actually load. Resolved through a binding
+# (R13); the tests skip when this checkout has no game repository beside
+# it, which is the CI case AC12 protects.
+def _bound_png_to_tiles():
+    try:
+        path = project.bind().resolve("tools", "png_to_tiles.py")
+    except project.BindingError:
+        return None
+    return path if path.is_file() else None
+
+
+REAL_PNG_TO_TILES = _bound_png_to_tiles()
+NO_GAME_REPO = REAL_PNG_TO_TILES is None
+NO_GAME_REPO_REASON = "no game repository is bound beside this checkout"
+
+
+def make_repo_with_converters(root: Path) -> Path:
+    """A fixture game repository holding the real png_to_tiles.py."""
+    repo = make_game_repo(root / "nuke-raider")
+    target = repo / "tools" / "png_to_tiles.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(REAL_PNG_TO_TILES.read_bytes())
+    return repo
+
+
+@unittest.skipIf(NO_GAME_REPO, NO_GAME_REPO_REASON)
+class TestReadPng(unittest.TestCase):
+    """R2/R3: the pixels, the tile cost and the colour count come from the
+    active worktree's own png_to_tiles.py, so AC3 holds by construction."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = tmp_root(self._tmp.name)
+        self.repo = make_repo_with_converters(self.root)
+        self.binding = bind_over(self.root, self.repo)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_it_reports_the_size_and_the_tile_cost(self):
+        png = write_indexed_png(self.repo / "assets/sprites/car.png", 16, 8, 4)
+
+        facts = preview.read_png(self.binding, png)
+
+        self.assertIsNone(facts.error)
+        self.assertEqual((facts.width, facts.height), (16, 8))
+        self.assertEqual((facts.tiles_x, facts.tiles_y), (2, 1))
+        self.assertEqual(facts.tile_count, 2)
+
+    def test_the_pixels_are_game_boy_palette_indices(self):
+        png = write_indexed_png(
+            self.repo / "assets/sprites/car.png", 8, 8,
+            palette_size=4, pixels=[i % 4 for i in range(64)],
+        )
+
+        facts = preview.read_png(self.binding, png)
+
+        self.assertEqual(len(facts.pixels), 64)
+        self.assertEqual(set(facts.pixels), {0, 1, 2, 3})
+
+    def test_a_palette_of_seven_reports_seven_colours(self):
+        """AC4 asks Garage to name the colour count. For an indexed PNG
+        the count that means something to the user is how many entries the
+        palette holds."""
+        png = write_indexed_png(self.repo / "assets/sprites/car.png", 8, 8, 7)
+
+        facts = preview.read_png(self.binding, png)
+
+        self.assertEqual(facts.colour_count, 7)
+
+    def test_an_rgb_png_with_seven_greys_reports_the_converter_message(self):
+        png = write_rgb_png(
+            self.repo / "assets/sprites/car.png", 8, 8,
+            greys=[0, 30, 60, 90, 120, 150, 180],
+        )
+
+        facts = preview.read_png(self.binding, png)
+
+        self.assertIsNotNone(facts.error)
+        self.assertIn("7 distinct luminance values", facts.error)
+        self.assertEqual(facts.colour_count, 7)
+
+    def test_a_missing_converter_is_a_named_failure_not_a_crash(self):
+        (self.repo / "tools" / "png_to_tiles.py").unlink()
+        png = write_indexed_png(self.repo / "assets/sprites/car.png", 8, 8, 4)
+
+        with self.assertRaises(preview.ConverterUnavailable) as caught:
+            preview.read_png(self.binding, png)
+
+        self.assertIn("png_to_tiles.py", str(caught.exception))
+
+    def test_the_tile_count_matches_what_png_to_tiles_writes(self):
+        """AC3, proven against the converter's own output rather than
+        against a second copy of its arithmetic."""
+        png = write_indexed_png(self.repo / "assets/sprites/car.png", 24, 16, 4)
+        out = self.repo / "src" / "car.c"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        result = subprocess.run(
+            [sys.executable, "tools/png_to_tiles.py", "--bank", "255",
+             "assets/sprites/car.png", "src/car.c", "car_tile_data"],
+            cwd=str(self.repo), capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        written = out.read_text(encoding="utf-8")
+
+        facts = preview.read_png(self.binding, png)
+
+        self.assertIn(f"car_tile_data_count = {facts.tile_count}u;", written)
+
+
+class TestReadTmx(unittest.TestCase):
+    """R3: the size of each map. Plain XML -- no converter needed."""
+
+    def test_it_reports_the_map_size_in_tiles(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = tmp_root(tmp) / "track.tmx"
+            path.write_text(
+                '<?xml version="1.0" encoding="UTF-8"?>\n'
+                '<map version="1.10" orientation="orthogonal" width="64" '
+                'height="32" tilewidth="8" tileheight="8"></map>\n',
+                encoding="utf-8",
+            )
+
+            facts = preview.read_tmx(path)
+
+            self.assertIsNone(facts.error)
+            self.assertEqual((facts.width, facts.height), (64, 32))
+            self.assertEqual((facts.tile_width, facts.tile_height), (8, 8))
+
+    def test_unparsable_xml_is_an_error_not_a_crash(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = tmp_root(tmp) / "broken.tmx"
+            path.write_text("<map width=", encoding="utf-8")
+
+            facts = preview.read_tmx(path)
+
+            self.assertIsNotNone(facts.error)
+            self.assertIsNone(facts.width)
 
 
 if __name__ == "__main__":
