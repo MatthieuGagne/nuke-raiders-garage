@@ -16,6 +16,7 @@ import tempfile
 import unittest
 import zlib
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -967,6 +968,116 @@ class TestConverterRunProducesTheSameFile(unittest.TestCase):
         from_terminal = (self.repo / "src/player_sprite.c").read_bytes()
 
         self.assertEqual(from_garage, from_terminal)
+
+
+class TestOpenInDefaultApp(unittest.TestCase):
+    """R8/AC8: the Windows file association, and no editor named."""
+
+    def test_it_calls_the_windows_shell_open(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = tmp_root(tmp) / "car.png"
+            path.write_bytes(b"x")
+            with mock.patch.object(assets, "_startfile") as startfile:
+                assets.open_in_default_app(path)
+            startfile.assert_called_once_with(str(path))
+
+    def test_a_missing_file_is_a_named_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = tmp_root(tmp) / "gone.png"
+            with self.assertRaises(assets.OpenError) as caught:
+                assets.open_in_default_app(path)
+            self.assertIn("gone.png", str(caught.exception))
+
+    def test_no_file_association_is_a_named_failure_not_a_traceback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = tmp_root(tmp) / "car.weird"
+            path.write_bytes(b"x")
+            with mock.patch.object(assets, "_startfile", side_effect=OSError("no app")):
+                with self.assertRaises(assets.OpenError) as caught:
+                    assets.open_in_default_app(path)
+            self.assertIn("no application", str(caught.exception).lower())
+
+    def test_no_editor_is_named_in_any_string_the_code_uses(self):
+        """R8: Garage carries no path to an editor and no setting for one.
+
+        Docstrings are excluded on purpose: explaining *why* an Aseprite
+        export rule is not a converter is exactly the comment that belongs
+        in `core/pipeline.py`. What R8 forbids is a string the code can
+        pass to a subprocess or store as a setting, which is every string
+        constant that is not a docstring.
+        """
+        import ast
+
+        from tools.garage.core import pipeline as pipeline_module
+
+        for module in (assets, pipeline_module):
+            tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
+            docstrings = set()
+            for node in ast.walk(tree):
+                body = getattr(node, "body", None)
+                if not isinstance(body, list) or not body:
+                    continue
+                first = body[0]
+                if (
+                    isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef,
+                                      ast.AsyncFunctionDef))
+                    and isinstance(first, ast.Expr)
+                    and isinstance(first.value, ast.Constant)
+                    and isinstance(first.value.value, str)
+                ):
+                    docstrings.add(id(first.value))
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.Constant)
+                    and isinstance(node.value, str)
+                    and id(node) not in docstrings
+                ):
+                    lowered = node.value.lower()
+                    for editor in ("aseprite", "tiled", "hugetracker"):
+                        self.assertNotIn(
+                            editor, lowered,
+                            f"{module.__name__} names {editor} in code",
+                        )
+
+
+class TestChangeDetection(unittest.TestCase):
+    """R9/AC9: an asset changed on disk after the user opened it."""
+
+    def test_an_untouched_file_reports_no_change(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = tmp_root(tmp) / "car.png"
+            path.write_bytes(b"x")
+            before = assets.stamp(path)
+            self.assertFalse(assets.has_changed(before, assets.stamp(path)))
+
+    def test_a_rewritten_file_reports_a_change(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = tmp_root(tmp) / "car.png"
+            path.write_bytes(b"x")
+            before = assets.stamp(path)
+            path.write_bytes(b"xy")
+            self.assertTrue(assets.has_changed(before, assets.stamp(path)))
+
+    def test_a_same_size_rewrite_reports_a_change(self):
+        """An editor that saves the same byte count must not slip past --
+        the mtime is what catches it."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = tmp_root(tmp) / "car.png"
+            path.write_bytes(b"x")
+            before = assets.stamp(path)
+            path.write_bytes(b"y")
+            after = assets.Stamp(
+                exists=True, size_bytes=1, mtime_ns=before.mtime_ns + 1_000_000
+            )
+            self.assertTrue(assets.has_changed(before, after))
+
+    def test_a_deleted_file_reports_a_change(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = tmp_root(tmp) / "car.png"
+            path.write_bytes(b"x")
+            before = assets.stamp(path)
+            path.unlink()
+            self.assertTrue(assets.has_changed(before, assets.stamp(path)))
 
 
 if __name__ == "__main__":

@@ -1,4 +1,5 @@
-"""Asset discovery, kind detection and pre-flight verification.
+"""Asset discovery, kind detection, pre-flight verification and the two
+file operations the panel needs (open, and "did it change?").
 
 No Qt import belongs in this module or anywhere under tools/garage/core/
 (R12): everything here is testable with no display.
@@ -15,6 +16,9 @@ Every path resolves through `tools.garage.core.project.Binding` (R13).
 """
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -296,3 +300,87 @@ def verify(binding, asset: "Asset") -> Verification:
     if asset.kind == KIND_MAPS:
         return _verify_map(asset)
     return Verification(asset, [])
+
+
+# ── Opening an asset, and noticing it changed (R8, R9) ───────────────────
+
+
+class OpenError(Exception):
+    """The file could not be handed to an application. Carries the path,
+    so the panel says which file rather than showing a traceback.
+    """
+
+    def __init__(self, path: Path, message: str):
+        self.path = path
+        self.message = message
+        super().__init__(message)
+
+
+def _startfile(target: str) -> None:
+    """The Windows shell "open" verb -- the file association itself.
+
+    Wrapped in a function of our own for two reasons: `os.startfile` does
+    not exist off Windows, so referring to it at module scope would make
+    this module unimportable there (and the default suite runs on Linux in
+    CI); and a named seam is what the test replaces, rather than patching
+    a standard-library attribute that may not be present.
+    """
+    if hasattr(os, "startfile"):
+        os.startfile(target)  # noqa: S606 -- the shell association is the point
+        return
+    # Not Windows. Garage ships on Windows (P1 R1), but the module must
+    # still work where the suite runs.
+    opener = "open" if sys.platform == "darwin" else "xdg-open"
+    subprocess.Popen([opener, target])
+
+
+def open_in_default_app(path: Path) -> None:
+    """Hand `path` to whatever application the user has associated with
+    its file type (R8).
+
+    Garage names no editor and holds no setting for one: which program
+    opens a `.png`, a `.tmx` or a `.uge` is the user's decision, recorded
+    where they already record it. That also means Garage cannot know
+    whether an application actually appeared -- a failure to *start* one is
+    reported; what the user then does in it is R9's problem.
+    """
+    path = Path(path)
+    if not path.is_file():
+        raise OpenError(path, f"'{path}' does not exist, so there is nothing to open.")
+    try:
+        _startfile(str(path))
+    except OSError as exc:
+        raise OpenError(
+            path,
+            f"Windows started no application for '{path.name}': {exc}. That "
+            f"file type has no application associated with it — set one from "
+            f"Explorer (Open with ▸ Choose another app).",
+        ) from exc
+
+
+@dataclass(frozen=True)
+class Stamp:
+    """What a file looked like at one moment. Size *and* mtime: an editor
+    that rewrites a file to the same byte count is the ordinary case for a
+    sprite, and size alone would miss every one of them.
+    """
+
+    exists: bool
+    size_bytes: int
+    mtime_ns: int
+
+
+def stamp(path: Path) -> Stamp:
+    try:
+        stat = Path(path).stat()
+    except OSError:
+        return Stamp(exists=False, size_bytes=0, mtime_ns=0)
+    return Stamp(exists=True, size_bytes=stat.st_size, mtime_ns=stat.st_mtime_ns)
+
+
+def has_changed(before: Stamp, after: Stamp) -> bool:
+    """Did the file change between the two stamps? A deletion counts: the
+    asset the user opened is not the asset on disk any more, which is
+    exactly what R9 asks Garage to notice.
+    """
+    return before != after
