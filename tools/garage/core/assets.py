@@ -276,7 +276,13 @@ def _verify_map(asset: "Asset") -> Verification:
     if facts.error is not None:
         return Verification(
             asset,
-            [Problem(PROBLEM_UNREADABLE, facts.error, "a map Tiled can read")],
+            # The limit names the *format*, not the program that writes it.
+            # R8 keeps every editor's name out of Garage, and a message the
+            # card shows in a tooltip is exactly where one would creep back
+            # in. It is also more useful this way: the user knows which
+            # program made the file, and what they need is what is wrong
+            # with it.
+            [Problem(PROBLEM_UNREADABLE, facts.error, "a well-formed .tmx file")],
             tmx=facts,
         )
     return Verification(asset, [], tmx=facts)
