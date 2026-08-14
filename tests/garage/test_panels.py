@@ -1292,8 +1292,11 @@ class TestNoColourLiteralInPanelSource(unittest.TestCase):
         # objects, but every one of them is still built from a name in
         # tokens.py rather than a literal -- the invariant this test
         # guards -- so that shape is excluded rather than the whole
-        # construction.
-        allowed = re.compile(r"QColor\(\s*TOKENS\[")
+        # construction. The pattern matches the *whole* call, subscript and
+        # closing paren included, so nothing after the subscript (a
+        # fallback literal in an `or` clause, say) can escape by riding
+        # along behind an unanchored prefix match.
+        allowed = re.compile(r"QColor\(\s*TOKENS\[[^\]]+\]\s*\)")
         for path in PANEL_SOURCE_FILES:
             text = path.read_text(encoding="utf-8")
             remainder = allowed.sub("", text)

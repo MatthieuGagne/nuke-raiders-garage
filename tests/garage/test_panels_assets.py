@@ -12,7 +12,6 @@ import tempfile
 import unittest
 import zlib
 from pathlib import Path
-from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -303,6 +302,19 @@ class TestPreviewable(unittest.TestCase):
             tile_count=None, colour_count=9, pixels=[], error="too many",
         )))
 
+    def test_a_strip_too_short_to_count_a_tile_is_not_previewed(self):
+        """`tile_count` is `(w // 8) * (h // 8)`, so a strip under 8 pixels
+        tall costs "0 tiles" however wide it is. A tile-only bound would
+        wave 700,000 pixels straight into the freeze this guard exists to
+        prevent."""
+        from tools.garage.core import preview
+        from tools.garage.panels.assets import _previewable
+
+        self.assertFalse(_previewable(preview.PngFacts(
+            width=100000, height=7, tiles_x=12500, tiles_y=0, tile_count=0,
+            colour_count=4, pixels=[0] * 700000,
+        )))
+
 
 class TestCostText(AssetsPanelTestCase):
     def test_a_sprite_states_its_tile_cost(self):
@@ -343,6 +355,20 @@ class TestVerdict(AssetsPanelTestCase):
         self.assertIn("9", card.verdict_label.text())
         self.assertFalse(card.convert_button.isEnabled())
         self.assertIn("9", card.convert_button.toolTip())
+
+    def test_the_card_can_actually_paint_its_verdict_border(self):
+        """A plain QWidget paints neither background nor border from a
+        style sheet, so without this attribute the whole `#assets-card`
+        block — including the fail and CHANGED borders — is dead CSS that
+        renders as nothing. The suite cannot see colour, but it can see
+        whether the card is capable of showing one."""
+        from PySide6.QtCore import Qt as QtNamespace
+
+        card = self.card_for("assets/sprites/broken.png")
+        self.assertTrue(
+            card.testAttribute(QtNamespace.WidgetAttribute.WA_StyledBackground)
+        )
+        self.assertEqual(card.property("verdict"), "fail")
 
 
 if __name__ == "__main__":

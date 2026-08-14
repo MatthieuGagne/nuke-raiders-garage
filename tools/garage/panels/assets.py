@@ -56,6 +56,12 @@ CARD_WIDTH = 168
 GRID_COLUMNS = 4
 LOG_VISIBLE_LINES = 8
 
+# The most pixels `thumbnail_image` will walk. 192 tiles is 12,288
+# pixels, so this leaves room for a legal image of any shape while
+# still bounding one whose dimensions defeat the tile count -- see
+# `_previewable`.
+MAX_PREVIEW_PIXELS = 16384
+
 
 def gb_shades() -> List[QColor]:
     """The four Game Boy shades as colours, read from the theme by name."""
@@ -81,6 +87,11 @@ def thumbnail_image(facts: preview.PngFacts, scale: int = THUMBNAIL_SCALE,
 
     for y in range(facts.height):
         for x in range(facts.width):
+            # `& 3` is defence, not conversion: png_to_tiles' own decoder
+            # already guarantees 0-3 (it raises on a higher index, and
+            # clamps when it quantises luminance). A converter that ever
+            # returned something else would be an IndexError here, and a
+            # preview is not where that should surface.
             colour = shades[facts.pixels[y * facts.width + x] & 3]
             for dy in range(scale):
                 for dx in range(scale):
@@ -109,8 +120,18 @@ def _previewable(facts: preview.PngFacts) -> bool:
     million calls and a window frozen for seconds — to preview art the
     converter is going to refuse anyway. Such a card already carries a
     fail chip naming its tile cost, which is the useful half.
+
+    The pixel bound is not redundant with the tile bound. `tile_count`
+    is `(width // 8) * (height // 8)`, which floors to zero the moment
+    either side is under 8 -- so a 100000x7 strip costs "0 tiles" and
+    would sail through a tile-only check straight into the freeze this
+    function exists to prevent.
     """
-    return bool(facts.pixels) and (facts.tile_count or 0) <= preview.MAX_TILES
+    if not facts.pixels:
+        return False
+    if (facts.tile_count or 0) > preview.MAX_TILES:
+        return False
+    return len(facts.pixels) <= MAX_PREVIEW_PIXELS
 
 
 def cost_text(asset: assets_core.Asset, verification: assets_core.Verification,
@@ -147,6 +168,13 @@ class AssetCard(QWidget):
                  parent=None):
         super().__init__(parent)
         self.setObjectName("assets-card")
+        # Without this, every rule in the stylesheet's `#assets-card` block
+        # is dead: a plain QWidget does not paint a background or a border
+        # from a style sheet, so the card's fail and CHANGED borders would
+        # simply never appear. `tools/garage/panels/tuner.py` carries the
+        # same call for the same reason; `doctor.py` solves it by deriving
+        # from QFrame instead.
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setFixedWidth(CARD_WIDTH)
         self.asset = asset
         self.verification = verification
@@ -239,7 +267,9 @@ class AssetCard(QWidget):
             self.convert_button.setText("Convert")
             self._set_verdict_property("pass")
         self.convert_button.setEnabled(self.plan.can_run)
-        self.convert_button.setToolTip("" if self.plan.can_run else (plan_refusal(self.plan)))
+        self.convert_button.setToolTip(
+            "" if self.plan.can_run else (self.plan.refusal or "")
+        )
 
     def _set_verdict_property(self, value: str) -> None:
         for widget in (self, self.verdict_label):
@@ -258,10 +288,6 @@ class AssetCard(QWidget):
             return
         self._changed = changed
         self._apply_verdict()
-
-
-def plan_refusal(plan) -> str:
-    return plan.refusal or ""
 
 
 class AssetsPanel(QWidget):
