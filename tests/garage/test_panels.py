@@ -1287,9 +1287,19 @@ class TestNoColourLiteralInPanelSource(unittest.TestCase):
             )
 
     def test_no_qcolor_construction(self):
+        # `QColor(TOKENS[...])` is the one allowed shape: the asset panel's
+        # thumbnail paints pixels from Python and so needs actual QColor
+        # objects, but every one of them is still built from a name in
+        # tokens.py rather than a literal -- the invariant this test
+        # guards -- so that shape is excluded rather than the whole
+        # construction.
+        allowed = re.compile(r"QColor\(\s*TOKENS\[")
         for path in PANEL_SOURCE_FILES:
             text = path.read_text(encoding="utf-8")
-            self.assertNotIn("QColor(", text, f"{path} constructs a QColor directly")
+            remainder = allowed.sub("", text)
+            self.assertNotIn(
+                "QColor(", remainder, f"{path} constructs a QColor directly"
+            )
 
     def test_no_qt_colour_constant(self):
         for path in PANEL_SOURCE_FILES:
@@ -1328,6 +1338,10 @@ class TestThemeAppliesAtStartup(unittest.TestCase):
         # The spec's source of truth: garage/index.html's
         # :root[data-theme="dark"] block. Pinning these here means a future
         # edit to tokens.py that drifts from the prototype fails loudly.
+        # The four gb-* entries are the exception: they come from the
+        # prototype's plain :root block (`--gb0` ... `--gb3`), not the dark
+        # variant -- the Game Boy shades are theme-independent -- and are
+        # pinned alongside the dark set for the same reason.
         expected = {
             "bg": "#0E120F", "surface": "#171C18", "surface-2": "#1E241F",
             "surface-3": "#272E28", "line": "#343C35", "line-soft": "#242B25",
@@ -1336,6 +1350,8 @@ class TestThemeAppliesAtStartup(unittest.TestCase):
             "accent-line": "#573224", "pass": "#86B45A", "warn": "#D9AE3C",
             "fail": "#E0647C", "pass-soft": "#1D2717", "warn-soft": "#2C2412",
             "fail-soft": "#2E1720",
+            "gb-0": "#E8EDD8", "gb-1": "#A8B67C",
+            "gb-2": "#5A7043", "gb-3": "#23301E",
         }
         self.assertEqual(theme.TOKENS, expected)
 

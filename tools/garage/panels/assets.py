@@ -1,0 +1,428 @@
+"""The asset panel: find an asset, see it, learn what it costs, open it,
+convert it (spec P2, issue #3).
+
+Layout follows the prototype's Assets screen (`garage/index.html`): a row
+of kind chips, a grid of cards — thumbnail, name, kind tag, verdict chip,
+cost, actions — and a log underneath for what a converter printed.
+
+R18/AC18: no colour literal here. The four Game Boy shades are read from
+`tools.garage.theme.tokens` by name; every other colour is the
+stylesheet's, selected through the object names and the `verdict` dynamic
+property this module sets.
+
+Threading: a converter run blocks on a subprocess pipe, so it goes through
+`tools.garage.panels.runner.RunController` — the same worker the compile
+bar and the commit panel use. Everything that touches a widget below runs
+on the UI thread.
+
+R10 is structural here rather than enforced: the panel lists files under
+`assets/` and nothing else, and a card's only reference to a generated
+file is a text label naming where the converter writes. There is no code
+path that opens one.
+"""
+from __future__ import annotations
+
+from typing import Dict, List, Optional
+
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QColor, QImage, QPixmap
+from PySide6.QtWidgets import (
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QPlainTextEdit,
+    QPushButton,
+    QScrollArea,
+    QVBoxLayout,
+    QWidget,
+)
+
+from tools.garage.core import assets as assets_core
+from tools.garage.core import pipeline, preview
+from tools.garage.core.project import Binding, BindingError
+from tools.garage.panels.runner import RunController
+from tools.garage.theme.tokens import TOKENS
+
+# The four shades, darkest index last, in the order png_to_tiles' palette
+# indices run (0 = lightest, 3 = darkest).
+GB_TOKEN_KEYS = ("gb-0", "gb-1", "gb-2", "gb-3")
+
+# How many screen pixels one image pixel takes in a card thumbnail, and
+# the card's width. The prototype's grid is 168px columns with a 96px
+# thumbnail strip.
+THUMBNAIL_SCALE = 4
+THUMBNAIL_MAX_WIDTH = 152
+CARD_WIDTH = 168
+GRID_COLUMNS = 4
+LOG_VISIBLE_LINES = 8
+
+
+def gb_shades() -> List[QColor]:
+    """The four Game Boy shades as colours, read from the theme by name."""
+    return [QColor(TOKENS[key]) for key in GB_TOKEN_KEYS]
+
+
+def thumbnail_image(facts: preview.PngFacts, scale: int = THUMBNAIL_SCALE,
+                    grid: bool = True) -> QImage:
+    """An image of `facts.pixels` in the four Game Boy shades, with the
+    8-pixel tile grid drawn over it (R2/AC2).
+
+    The grid is drawn in the darkest shade rather than in a colour of its
+    own: it must read as a rule over the art, and adding a fifth colour to
+    a four-shade preview would be a lie about the palette.
+    """
+    shades = gb_shades()
+    width = (facts.width or 0) * scale
+    height = (facts.height or 0) * scale
+    image = QImage(max(width, 1), max(height, 1), QImage.Format.Format_RGB32)
+    image.fill(shades[0])
+    if not facts.pixels or not facts.width:
+        return image
+
+    for y in range(facts.height):
+        for x in range(facts.width):
+            colour = shades[facts.pixels[y * facts.width + x] & 3]
+            for dy in range(scale):
+                for dx in range(scale):
+                    image.setPixelColor(x * scale + dx, y * scale + dy, colour)
+
+    if grid:
+        line = shades[3]
+        step = preview.TILE_SIZE * scale
+        for x in range(0, width, step):
+            for y in range(height):
+                image.setPixelColor(x, y, line)
+        for y in range(0, height, step):
+            for x in range(width):
+                image.setPixelColor(x, y, line)
+    return image
+
+
+def _previewable(facts: preview.PngFacts) -> bool:
+    """Is this image worth drawing a thumbnail of?
+
+    `thumbnail_image` sets every pixel from Python, so its cost is the
+    pixel count times the scale squared. An asset inside the tile budget
+    is at most 192 tiles — 12,288 pixels, a few hundred thousand calls,
+    imperceptible. An asset *over* the budget has no bound at all: the
+    reference screenshots in this project are 2454×122, which is 4.8
+    million calls and a window frozen for seconds — to preview art the
+    converter is going to refuse anyway. Such a card already carries a
+    fail chip naming its tile cost, which is the useful half.
+    """
+    return bool(facts.pixels) and (facts.tile_count or 0) <= preview.MAX_TILES
+
+
+def cost_text(asset: assets_core.Asset, verification: assets_core.Verification,
+              rotation: bool = False) -> str:
+    """The cost line under a card: tiles for an image, size for a map,
+    bytes for anything else (R3).
+    """
+    if verification.png is not None and verification.png.tile_count is not None:
+        count = verification.png.tile_count
+        text = (
+            f"{verification.png.width}×{verification.png.height} · "
+            f"{count} tile{'' if count == 1 else 's'}"
+        )
+        return f"{text} · {pipeline.ROTATION_NOTE}" if rotation else text
+    if verification.tmx is not None and verification.tmx.width is not None:
+        return f"{verification.tmx.width} × {verification.tmx.height} tiles"
+    return f"{asset.size_bytes:,} bytes"
+
+
+class AssetCard(QWidget):
+    """One asset: what it looks like, what it costs, what is wrong with
+    it, and the two things the user can do to it.
+
+    `convert_button` is disabled — with the refusal as its tooltip — when
+    verification failed (R5/AC5). The plan it would run carries no command
+    in that case either, so the refusal holds even if a caller reaches
+    past the button.
+    """
+
+    open_requested = Signal(object)     # AssetCard
+    convert_requested = Signal(object)  # AssetCard
+
+    def __init__(self, asset, verification, plan, image: Optional[QImage],
+                 parent=None):
+        super().__init__(parent)
+        self.setObjectName("assets-card")
+        self.setFixedWidth(CARD_WIDTH)
+        self.asset = asset
+        self.verification = verification
+        self.plan = plan
+        self._changed = False
+
+        layout = QVBoxLayout(self)
+
+        self.thumbnail_label = QLabel()
+        self.thumbnail_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        if image is not None:
+            pixmap = QPixmap.fromImage(image)
+            if pixmap.width() > THUMBNAIL_MAX_WIDTH:
+                pixmap = pixmap.scaledToWidth(
+                    THUMBNAIL_MAX_WIDTH, Qt.TransformationMode.FastTransformation
+                )
+            self.thumbnail_label.setPixmap(pixmap)
+        else:
+            # A map, a song, a source file: no preview exists, and an empty
+            # frame that looks like a failed one would be worse than words.
+            self.thumbnail_label.setText("no preview")
+        layout.addWidget(self.thumbnail_label)
+
+        self.name_label = QLabel(asset.name)
+        self.name_label.setObjectName("assets-name")
+        self.name_label.setWordWrap(True)
+        layout.addWidget(self.name_label)
+
+        row = QHBoxLayout()
+        self.kind_label = QLabel(assets_core.KIND_LABELS[asset.kind])
+        self.kind_label.setObjectName("assets-kind")
+        row.addWidget(self.kind_label)
+        row.addStretch(1)
+        self.verdict_label = QLabel()
+        self.verdict_label.setObjectName("assets-verdict")
+        row.addWidget(self.verdict_label)
+        layout.addLayout(row)
+
+        self.cost_label = QLabel(cost_text(asset, verification, plan.rotation))
+        self.cost_label.setObjectName("assets-cost")
+        self.cost_label.setWordWrap(True)
+        layout.addWidget(self.cost_label)
+
+        # R10: where the converter writes. A label, never a button — a
+        # generated file is read-only in Garage, and the way to make that
+        # true is to offer no control that could open one.
+        self.target_label = QLabel(
+            "→ " + ", ".join(plan.targets) if plan.targets else "no converter"
+        )
+        self.target_label.setObjectName("assets-target")
+        self.target_label.setWordWrap(True)
+        self.target_label.setToolTip(
+            "Generated — read-only in Garage. Edit the asset, not this file."
+            if plan.targets
+            else (plan.refusal or "")
+        )
+        layout.addWidget(self.target_label)
+
+        actions = QHBoxLayout()
+        self.open_button = QPushButton("Open")
+        self.open_button.setObjectName("assets-open")
+        self.open_button.clicked.connect(lambda: self.open_requested.emit(self))
+        actions.addWidget(self.open_button)
+
+        self.convert_button = QPushButton("Convert")
+        self.convert_button.setObjectName("assets-convert")
+        self.convert_button.clicked.connect(
+            lambda: self.convert_requested.emit(self)
+        )
+        actions.addWidget(self.convert_button)
+        layout.addLayout(actions)
+
+        self._apply_verdict()
+
+    def _apply_verdict(self) -> None:
+        if not self.verification.ok:
+            problem = self.verification.problems[0]
+            self.verdict_label.setText(problem.message.upper()[:40])
+            self.verdict_label.setToolTip(self.verification.summary())
+            self.convert_button.setEnabled(False)
+            self.convert_button.setToolTip(self.plan.refusal or "")
+            self._set_verdict_property("fail")
+            return
+        if self._changed:
+            self.verdict_label.setText("CHANGED")
+            self.convert_button.setText("Reconvert")
+            self._set_verdict_property("changed")
+        else:
+            self.verdict_label.setText("OK")
+            self.convert_button.setText("Convert")
+            self._set_verdict_property("pass")
+        self.convert_button.setEnabled(self.plan.can_run)
+        self.convert_button.setToolTip("" if self.plan.can_run else (plan_refusal(self.plan)))
+
+    def _set_verdict_property(self, value: str) -> None:
+        for widget in (self, self.verdict_label):
+            widget.setProperty("verdict", value)
+            widget.style().unpolish(widget)
+            widget.style().polish(widget)
+
+    def is_changed(self) -> bool:
+        return self._changed
+
+    def set_changed(self, changed: bool) -> None:
+        """R9: the asset changed on disk since Garage last looked. The
+        card says so and its action becomes Reconvert, which is the offer
+        AC9 asks for."""
+        if changed == self._changed:
+            return
+        self._changed = changed
+        self._apply_verdict()
+
+
+def plan_refusal(plan) -> str:
+    return plan.refusal or ""
+
+
+class AssetsPanel(QWidget):
+    """R1's list, R2's previews, R3's costs, R4's verdicts."""
+
+    KIND_FILTER_ALL = "all"
+
+    def __init__(self, binding: Optional[Binding],
+                 binding_error: Optional[BindingError], parent=None):
+        super().__init__(parent)
+        self.setObjectName("assets-panel")
+        self.binding = binding
+        self.binding_error = binding_error
+        self._cards: List[AssetCard] = []
+        self._filter = self.KIND_FILTER_ALL
+
+        layout = QVBoxLayout(self)
+
+        self.status_label = QLabel()
+        self.status_label.setObjectName("assets-status")
+        self.status_label.setWordWrap(True)
+        layout.addWidget(self.status_label)
+
+        self.filter_row = QHBoxLayout()
+        self._filter_buttons: Dict[str, QPushButton] = {}
+        for key, label in [(self.KIND_FILTER_ALL, "All")] + [
+            (k, assets_core.KIND_LABELS[k]) for k in assets_core.KIND_ORDER
+        ]:
+            button = QPushButton(label)
+            button.setObjectName("assets-filter")
+            button.setCheckable(True)
+            button.setChecked(key == self.KIND_FILTER_ALL)
+            button.clicked.connect(
+                lambda _checked=False, k=key: self.set_kind_filter(k)
+            )
+            self._filter_buttons[key] = button
+            self.filter_row.addWidget(button)
+        self.filter_row.addStretch(1)
+        layout.addLayout(self.filter_row)
+
+        self.grid_holder = QWidget()
+        self.grid_layout = QGridLayout(self.grid_holder)
+        self.grid_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(self.grid_holder)
+        layout.addWidget(scroll, 1)
+
+        self.log_view = QPlainTextEdit()
+        self.log_view.setObjectName("assets-log")
+        self.log_view.setReadOnly(True)
+        self.log_view.setFixedHeight(
+            self.log_view.fontMetrics().lineSpacing() * LOG_VISIBLE_LINES
+        )
+        layout.addWidget(self.log_view)
+
+        self._runs = RunController(self)
+        self._runs.line.connect(self.append_line)
+        self._runs.finished.connect(self._on_run_finished)
+        self._running_card: Optional[AssetCard] = None
+
+        self.refresh()
+
+    # -- building the grid -------------------------------------------------
+
+    def cards(self) -> List[AssetCard]:
+        return list(self._cards)
+
+    def visible_cards(self) -> List[AssetCard]:
+        return [c for c in self._cards
+                if self._filter in (self.KIND_FILTER_ALL, c.asset.kind)]
+
+    def refresh(self) -> None:
+        """Re-read assets/ and rebuild every card."""
+        for card in self._cards:
+            card.setParent(None)
+            card.deleteLater()
+        self._cards = []
+
+        if self.binding is None:
+            self.status_label.setText(
+                self.binding_error.message if self.binding_error
+                else "No game repository is bound, so there are no assets to show."
+            )
+            return
+
+        try:
+            rules = pipeline.read_rules(self.binding)
+        except pipeline.PipelineError as exc:
+            rules = []
+            self.append_line(exc.message)
+
+        found = assets_core.discover(self.binding)
+        if not found:
+            self.status_label.setText(
+                f"{assets_core.assets_dir(self.binding)} holds no files."
+            )
+            return
+
+        problems = 0
+        for asset in found:
+            verification = assets_core.verify(self.binding, asset)
+            plan = pipeline.plan_for(self.binding, asset, verification, rules)
+            image = None
+            if verification.png is not None and _previewable(verification.png):
+                image = thumbnail_image(verification.png)
+            card = AssetCard(asset, verification, plan, image, parent=self.grid_holder)
+            card.open_requested.connect(self._open)
+            card.convert_requested.connect(self._convert)
+            self._cards.append(card)
+            if not verification.ok:
+                problems += 1
+
+        self.status_label.setText(
+            f"{assets_core.assets_dir(self.binding)} · {len(found)} files · "
+            f"{problems} need attention"
+        )
+        self._relayout()
+
+    def _relayout(self) -> None:
+        while self.grid_layout.count():
+            self.grid_layout.takeAt(0)
+        for card in self._cards:
+            card.setVisible(False)
+        for index, card in enumerate(self.visible_cards()):
+            self.grid_layout.addWidget(
+                card, index // GRID_COLUMNS, index % GRID_COLUMNS
+            )
+            card.setVisible(True)
+
+    def set_kind_filter(self, kind: str) -> None:
+        self._filter = kind
+        for key, button in self._filter_buttons.items():
+            button.setChecked(key == kind)
+        self._relayout()
+
+    # -- the log -----------------------------------------------------------
+
+    def append_line(self, text: str) -> None:
+        self.log_view.appendPlainText(text)
+        scrollbar = self.log_view.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
+
+    def log_text(self) -> str:
+        return self.log_view.toPlainText()
+
+    def is_running(self) -> bool:
+        return self._runs.is_running()
+
+    def stop_and_wait(self) -> None:
+        """For the window closing: a QThread still running when Qt tears
+        its parent down is a crash."""
+        self._runs.stop_and_wait()
+
+    # -- the two actions (filled in by Task 8 and Task 9) ------------------
+
+    def _open(self, card: AssetCard) -> None:
+        raise NotImplementedError
+
+    def _convert(self, card: AssetCard) -> None:
+        raise NotImplementedError
+
+    def _on_run_finished(self, results) -> None:
+        raise NotImplementedError
