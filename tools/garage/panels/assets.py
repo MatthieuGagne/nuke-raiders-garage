@@ -293,6 +293,8 @@ class AssetCard(QWidget):
 class AssetsPanel(QWidget):
     """R1's list, R2's previews, R3's costs, R4's verdicts."""
 
+    run_finished = Signal(object)
+
     KIND_FILTER_ALL = "all"
 
     def __init__(self, binding: Optional[Binding],
@@ -348,6 +350,14 @@ class AssetsPanel(QWidget):
         self._runs.line.connect(self.append_line)
         self._runs.finished.connect(self._on_run_finished)
         self._running_card: Optional[AssetCard] = None
+
+        # What each listed asset looked like when Garage last stamped it,
+        # and which ones are known to have changed since. Both live on the
+        # panel rather than on the cards, because `refresh()` destroys and
+        # rebuilds every card. Task 9 is what fills them; a successful
+        # conversion below is what clears a mark.
+        self._stamps: Dict[str, assets_core.Stamp] = {}
+        self._changed_paths: set = set()
 
         self.refresh()
 
@@ -447,8 +457,75 @@ class AssetsPanel(QWidget):
     def _open(self, card: AssetCard) -> None:
         raise NotImplementedError
 
+    def convert(self, card: AssetCard) -> None:
+        """Run the converter for `card`'s asset (R6/R7).
+
+        R5's refusal is here as well as on the button: the button is
+        disabled when verification failed, and this is the guard behind
+        it. A refused asset writes its reason to the log rather than
+        failing silently — the user pressed something, and something must
+        answer.
+        """
+        if not card.plan.can_run:
+            self.append_line(
+                card.plan.refusal
+                or f"{card.asset.name} cannot be converted."
+            )
+            return
+        if self._runs.is_running():
+            # Two converter runs at once would interleave two tools'
+            # output in one log and race over the same generated file.
+            self.append_line(
+                f"A converter is already running; {card.asset.name} was not "
+                f"started."
+            )
+            return
+
+        self._running_card = card
+        for command in card.plan.commands:
+            # The prototype's log echoes each command as a shell line, so
+            # the output underneath is attributable to the call that
+            # produced it.
+            self.append_line(f"$ {command.label}")
+        if not self._runs.start(
+            list(card.plan.commands), self.binding.active_worktree.path
+        ):
+            self._running_card = None
+            return
+        self._set_busy(True)
+
     def _convert(self, card: AssetCard) -> None:
-        raise NotImplementedError
+        self.convert(card)
+
+    def _set_busy(self, busy: bool) -> None:
+        for card in self._cards:
+            card.convert_button.setEnabled(not busy and card.plan.can_run)
+            card.open_button.setEnabled(not busy)
 
     def _on_run_finished(self, results) -> None:
-        raise NotImplementedError
+        card, self._running_card = self._running_card, None
+        self._set_busy(False)
+        if card is None:
+            return
+        if results and all(r.ok for r in results):
+            self.append_line(
+                f"{card.asset.name} converted — wrote "
+                f"{', '.join(card.plan.targets)}"
+            )
+            # The asset and its outputs now agree, so whatever change
+            # brought the user here is answered (R9).
+            self._stamps[card.asset.relative_path] = assets_core.stamp(
+                card.asset.path
+            )
+            # The offer is answered, so it is withdrawn -- from the panel's
+            # own memory as well as from the card, or the next refresh
+            # would put the mark back (see `refresh`).
+            self._changed_paths.discard(card.asset.relative_path)
+            card.set_changed(False)
+        else:
+            codes = ", ".join(str(r.exit_code) for r in results) or "no result"
+            self.append_line(
+                f"{card.asset.name} — the converter failed (exit {codes}). "
+                f"The message above is the converter's own."
+            )
+        self.run_finished.emit(results)

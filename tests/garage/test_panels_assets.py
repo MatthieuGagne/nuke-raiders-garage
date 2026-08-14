@@ -371,5 +371,116 @@ class TestVerdict(AssetsPanelTestCase):
         self.assertEqual(card.property("verdict"), "fail")
 
 
+class _FakeRuns:
+    """Stands in for RunController: records what it was asked to run and
+    lets the test decide the outcome. The controller's own threading is
+    covered by the compile-bar and commit-panel suites; what matters here
+    is which command the panel builds and what it does with the result."""
+
+    def __init__(self, panel):
+        self.panel = panel
+        self.started = []
+        self._running = False
+
+    def start(self, commands, cwd):
+        self.started.append((list(commands), cwd))
+        self._running = True
+        return True
+
+    def is_running(self):
+        return self._running
+
+    def stop_and_wait(self):
+        self._running = False
+
+    def finish(self, results, lines=()):
+        for line in lines:
+            self.panel.append_line(line)
+        self._running = False
+        self.panel._on_run_finished(results)
+
+
+class _Result:
+    def __init__(self, ok=True, exit_code=0):
+        self.ok = ok
+        self.exit_code = exit_code
+        self.cancelled = False
+
+
+class TestConvert(AssetsPanelTestCase):
+    def setUp(self):
+        super().setUp()
+        self.panel._runs.stop_and_wait()
+        self.fake = _FakeRuns(self.panel)
+        self.panel._runs = self.fake
+
+    def test_converting_a_clean_sprite_runs_the_planned_command(self):
+        """AC6: the command is the one the Makefile's rule implies."""
+        card = self.card_for("assets/sprites/player_car.png")
+
+        self.panel.convert(card)
+
+        commands, cwd = self.fake.started[0]
+        self.assertEqual(
+            list(commands[0].argv),
+            ["make", "-W", "assets/sprites/player_car.png", "src/player_sprite.c"],
+        )
+        self.assertEqual(Path(cwd), self.repo)
+
+    def test_a_failed_asset_runs_nothing_and_says_why(self):
+        """AC5."""
+        card = self.card_for("assets/sprites/broken.png")
+
+        self.panel.convert(card)
+
+        self.assertEqual(self.fake.started, [])
+        self.assertIn("9", self.panel.log_text())
+
+    def test_the_log_shows_the_command_and_the_converter_output(self):
+        """AC7."""
+        card = self.card_for("assets/sprites/player_car.png")
+        self.panel.convert(card)
+
+        self.fake.finish([_Result(ok=True)],
+                         lines=["Wrote src/player_sprite.c"])
+
+        log = self.panel.log_text()
+        self.assertIn("$ make -W assets/sprites/player_car.png", log)
+        self.assertIn("Wrote src/player_sprite.c", log)
+
+    def test_a_converter_error_appears_with_its_own_message(self):
+        """AC7: the message the converter produced, not a summary of it."""
+        card = self.card_for("assets/sprites/player_car.png")
+        self.panel.convert(card)
+
+        self.fake.finish(
+            [_Result(ok=False, exit_code=2)],
+            lines=["Error: Image dimensions 12x8 must be multiples of 8."],
+        )
+
+        log = self.panel.log_text()
+        self.assertIn("Image dimensions 12x8 must be multiples of 8.", log)
+        self.assertIn("failed", log.lower())
+
+    def test_a_second_run_while_one_is_in_flight_is_refused(self):
+        card = self.card_for("assets/sprites/player_car.png")
+        self.panel.convert(card)
+
+        self.panel.convert(card)
+
+        self.assertEqual(len(self.fake.started), 1)
+
+    def test_a_uge_runs_both_music_validators(self):
+        """AC11 (the validator half; the open half is Task 9)."""
+        card = self.card_for("assets/music/song.uge")
+
+        self.panel.convert(card)
+
+        commands, _ = self.fake.started[0]
+        self.assertEqual(len(commands), 2)
+        self.assertIn("music_song_validate.py", commands[0].label)
+        self.assertIn("music_wire_check.py", commands[1].label)
+
+
 if __name__ == "__main__":
     unittest.main()
