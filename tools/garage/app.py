@@ -415,12 +415,22 @@ class GarageWindow(QMainWindow):
 
         A compile in flight refuses the switch: it is running `make` in the
         tree Garage is about to stop pointing at, and its output would land
-        in a window describing a different worktree.
+        in a window describing a different worktree. A converter run from
+        the asset panel is the same situation with a different subprocess:
+        `make -W <asset> ...` killed mid-write, which is what switching
+        would do to it a few lines below (`assets_panel.stop_and_wait()`),
+        leaves a truncated generated file in the worktree the user just
+        left.
         """
         if self.compile_bar.is_running():
             return self.worktrees_panel._set_status(
                 "A compile is running in the current worktree. Stop it before "
                 "switching."
+            )
+        if self.assets_panel.is_running():
+            return self.worktrees_panel._set_status(
+                "A converter is running in the current worktree. Stop it "
+                "before switching."
             )
 
         worktrees_core.activate(self.garage_root, worktree)

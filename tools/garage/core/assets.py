@@ -176,11 +176,20 @@ class Problem:
     """One reason a converter must not run yet. `message` states what is
     wrong including the measured value; `limit` states the limit exceeded.
     Both are shown -- "5 colours" alone does not say what is allowed.
+
+    `chip` is the same fact in a few words ("5 colours", "12×8 pixels",
+    "200 tiles", "unreadable", "no converter"), for the card's verdict
+    chip: that label shares a row with the kind tag inside a 168px-wide
+    card, with no room for a sentence, let alone one clipped to 40
+    characters with the measured value cut off the end. The full
+    sentence still reaches the user, in the tooltip via
+    `Verification.summary()`.
     """
 
     code: str
     message: str
     limit: str
+    chip: str
 
 
 @dataclass
@@ -207,7 +216,8 @@ def _verify_image(binding, asset: "Asset") -> Verification:
     except preview.ConverterUnavailable as exc:
         return Verification(
             asset,
-            [Problem(PROBLEM_CONVERTER, exc.message, "a converter in the worktree")],
+            [Problem(PROBLEM_CONVERTER, exc.message, "a converter in the worktree",
+                      chip="no converter")],
         )
 
     problems: List[Problem] = []
@@ -232,6 +242,7 @@ def _verify_image(binding, asset: "Asset") -> Verification:
                     if looks_like_colours
                     else "a PNG png_to_tiles.py accepts"
                 ),
+                chip=f"{count} colours" if looks_like_colours else "unreadable",
             )
         )
         return Verification(asset, problems, png=facts)
@@ -246,6 +257,7 @@ def _verify_image(binding, asset: "Asset") -> Verification:
                 PROBLEM_COLOURS,
                 f"{asset.name} has a palette of {facts.colour_count} colours",
                 f"{preview.MAX_COLOURS} colours",
+                chip=f"{facts.colour_count} colours",
             )
         )
 
@@ -256,6 +268,7 @@ def _verify_image(binding, asset: "Asset") -> Verification:
                 f"{asset.name} is {facts.width}×{facts.height} pixels, which is "
                 f"not a whole number of tiles",
                 f"a multiple of {preview.TILE_SIZE} pixels on each side",
+                chip=f"{facts.width}×{facts.height} pixels",
             )
         )
 
@@ -265,6 +278,7 @@ def _verify_image(binding, asset: "Asset") -> Verification:
                 PROBLEM_TILE_COST,
                 f"{asset.name} costs {facts.tile_count} tiles",
                 f"{preview.MAX_TILES} tiles of VRAM",
+                chip=f"{facts.tile_count} tiles",
             )
         )
 
@@ -282,7 +296,8 @@ def _verify_map(asset: "Asset") -> Verification:
             # in. It is also more useful this way: the user knows which
             # program made the file, and what they need is what is wrong
             # with it.
-            [Problem(PROBLEM_UNREADABLE, facts.error, "a well-formed .tmx file")],
+            [Problem(PROBLEM_UNREADABLE, facts.error, "a well-formed .tmx file",
+                      chip="unreadable")],
             tmx=facts,
         )
     return Verification(asset, [], tmx=facts)

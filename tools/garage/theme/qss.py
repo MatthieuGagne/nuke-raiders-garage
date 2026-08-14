@@ -53,12 +53,11 @@ names / dynamic properties the panels already expose for this purpose:
   and bold weight diff_view.py already sets stay as the non-colour cue
   colour alone should never be the only signal.
 - `#assets-status`, `#assets-card`, `#assets-name`, `#assets-kind`,
-  `#assets-verdict`, `#assets-cost`, `#assets-target`, `#assets-log`,
-  `#assets-open`, `#assets-convert` -- the asset panel
-  (`tools/garage/panels/assets.py`). `[verdict="pass"|"fail"|"changed"]`
-  carries the OK/problem/CHANGED vocabulary the prototype's `.acard`
-  declares; the chip also spells the word out, so colour is never the
-  only signal.
+  `#assets-verdict`, `#assets-cost`, `#assets-target`, `#assets-log` -- the
+  asset panel (`tools/garage/panels/assets.py`). `[verdict="pass"|"fail"|
+  "changed"]` carries the OK/problem/CHANGED vocabulary the prototype's
+  `.acard` declares; the chip also spells the word out, so colour is never
+  the only signal.
 """
 from __future__ import annotations
 

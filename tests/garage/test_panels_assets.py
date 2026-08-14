@@ -16,11 +16,12 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from tools.garage import theme
 from tools.garage.core import assets as assets_core
-from tools.garage.core import pipeline, project
+from tools.garage.core import make_runner, pipeline, project
 from tools.garage.panels.assets import AssetsPanel, cost_text, thumbnail_image
 
 GAME_REPO_REMOTE_URL = "https://github.com/MatthieuGagne/gmb-nuke-raider.git"
@@ -187,6 +188,51 @@ class TestGrid(AssetsPanelTestCase):
         self.panel.set_kind_filter(assets_core.KIND_TILES)
         self.assertEqual(
             [c.asset.name for c in self.panel.visible_cards()], ["tileset.png"]
+        )
+
+
+@unittest.skipIf(NO_GAME_REPO, NO_GAME_REPO_REASON)
+class TestMissingMakefile(unittest.TestCase):
+    """FIX 4: a worktree with no Makefile must not misdiagnose every card
+    as though no rule reads that card's asset -- the real cause is that
+    there is no Makefile to read at all, and every card's refusal should
+    say so."""
+
+    def setUp(self):
+        theme.apply(_app)
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = tmp_root(self._tmp.name)
+        self.repo = self.root / "nuke-raider"
+        (self.repo / "tools").mkdir(parents=True)
+        (self.repo / "tools" / "png_to_tiles.py").write_bytes(
+            REAL_PNG_TO_TILES.read_bytes()
+        )
+        write_indexed_png(self.repo / "assets/sprites/player_car.png", 16, 8, 4)
+        # Deliberately no Makefile.
+        _run_git(["init", "-b", "master"], self.repo)
+        _run_git(["config", "user.email", "test@example.com"], self.repo)
+        _run_git(["config", "user.name", "Test"], self.repo)
+        _run_git(["add", "."], self.repo)
+        _run_git(["commit", "-m", "init"], self.repo)
+        _run_git(["remote", "add", "origin", GAME_REPO_REMOTE_URL], self.repo)
+        self.binding = bind_over(self.root, self.repo)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_the_refusal_names_the_missing_makefile_not_a_missing_rule(self):
+        panel = AssetsPanel(self.binding, None)
+        self.addCleanup(panel.stop_and_wait)
+
+        matches = [c for c in panel.cards()
+                   if c.asset.relative_path == "assets/sprites/player_car.png"]
+        self.assertEqual(len(matches), 1)
+        card = matches[0]
+
+        self.assertIn("does not exist", card.plan.refusal)
+        self.assertNotIn(
+            "No rule in the game repository's Makefile reads",
+            card.plan.refusal,
         )
 
 
@@ -376,7 +422,18 @@ class _FakeRuns:
     """Stands in for RunController: records what it was asked to run and
     lets the test decide the outcome. The controller's own threading is
     covered by the compile-bar and commit-panel suites; what matters here
-    is which command the panel builds and what it does with the result."""
+    is which command the panel builds and what it does with the result.
+
+    `start` echoes every command through the panel's own
+    `_append_command` -- the same handler the real controller's
+    `command_started` signal drives -- so a test using this fake still
+    exercises the production echo path rather than a copy of it. It
+    echoes them all at once because this fake never runs anything and so
+    has no notion of one command failing before the next starts; the
+    real controller's sequential, stops-on-first-failure echoing is
+    covered separately, with the real controller, in
+    `TestConvertEchoesOnlyCommandsThatRan`.
+    """
 
     def __init__(self, panel):
         self.panel = panel
@@ -386,6 +443,8 @@ class _FakeRuns:
     def start(self, commands, cwd):
         self.started.append((list(commands), cwd))
         self._running = True
+        for command in commands:
+            self.panel._append_command(command.label, command.target)
         return True
 
     def is_running(self):
@@ -437,6 +496,26 @@ class TestConvert(AssetsPanelTestCase):
         self.assertEqual(self.fake.started, [])
         self.assertIn("9", self.panel.log_text())
 
+    def test_convert_refuses_a_card_whose_verification_went_stale(self):
+        """FIX 1: the acceptance flow is edit an asset, see CHANGED, press
+        Reconvert -- and the seconds between are exactly when a file can go
+        from clean to broken. A card built (or last redrawn) while the
+        file was clean must not let a converter run against that stale
+        verification once the file no longer passes it. This fails against
+        the code before FIX 1: `convert()` used to trust `card.plan`
+        outright, which was still the OK plan from before this edit."""
+        card = self.card_for("assets/sprites/player_car.png")
+        self.assertTrue(card.verification.ok)
+
+        write_indexed_png(card.asset.path, 8, 8, 9)  # now fails: 9 colours
+        self.panel.check_for_changes()
+        self.panel.convert(card)
+
+        self.assertEqual(self.fake.started, [])
+        self.assertIn("9", self.panel.log_text())
+        self.assertFalse(card.verification.ok)
+        self.assertFalse(card.convert_button.isEnabled())
+
     def test_the_log_shows_the_command_and_the_converter_output(self):
         """AC7."""
         card = self.card_for("assets/sprites/player_car.png")
@@ -481,6 +560,48 @@ class TestConvert(AssetsPanelTestCase):
         self.assertEqual(len(commands), 2)
         self.assertIn("music_song_validate.py", commands[0].label)
         self.assertIn("music_wire_check.py", commands[1].label)
+
+
+class TestConvertEchoesOnlyCommandsThatRan(AssetsPanelTestCase):
+    """FIX 6: the log must attribute a `$ ...` line only to a command that
+    actually started -- not to every command in a plan, echoed up front,
+    including ones a failed earlier command means never ran. Runs the
+    real `RunController` (this class does not replace `self.panel._runs`
+    the way `TestConvert` does), because the bug this guards against is in
+    the timing of two real, sequential subprocesses.
+    """
+
+    @staticmethod
+    def _wait_until(predicate, timeout_ms=15000):
+        waited = 0
+        while waited < timeout_ms and not predicate():
+            QTest.qWait(20)
+            waited += 20
+        return predicate()
+
+    def test_a_failing_first_command_stops_the_sequence_and_echoes_only_it(self):
+        card = self.card_for("assets/music/song.uge")
+        commands = [
+            make_runner.Command(
+                argv=(sys.executable, "-c", "raise SystemExit(2)"),
+                label="first",
+                target="first",
+            ),
+            make_runner.Command(
+                argv=(sys.executable, "-c", "print('second ran')"),
+                label="second",
+                target="second",
+            ),
+        ]
+
+        self.panel._running_card = card
+        self.assertTrue(self.panel._runs.start(commands, self.repo))
+        self.assertTrue(self._wait_until(lambda: not self.panel.is_running()))
+
+        log = self.panel.log_text()
+        self.assertIn("$ first", log)
+        self.assertNotIn("$ second", log)
+        self.assertNotIn("second ran", log)
 
 
 class TestOpen(AssetsPanelTestCase):
@@ -579,6 +700,23 @@ class TestChangedOnDisk(AssetsPanelTestCase):
         self.panel.check_for_changes()
 
         self.assertTrue(self.card_for("assets/sprites/player_car.png").is_changed())
+
+    def test_a_change_that_breaks_verification_updates_the_verdict(self):
+        """FIX 1b: `check_for_changes` must not leave a stale OK verdict
+        (or stale cost/target text) on a card whose file now fails
+        verification -- it re-verifies and re-plans the card in place,
+        rather than only re-stamping it."""
+        card = self.card_for("assets/sprites/player_car.png")
+        self.assertTrue(card.verification.ok)
+        self.assertEqual(card.verdict_label.text(), "OK")
+
+        write_indexed_png(card.asset.path, 8, 8, 9)  # now fails: 9 colours
+        self.panel.check_for_changes()
+
+        self.assertFalse(card.verification.ok)
+        self.assertFalse(card.convert_button.isEnabled())
+        self.assertIn("9", card.verdict_label.text())
+        self.assertNotEqual(card.verdict_label.text(), "OK")
 
     def test_an_untouched_asset_stays_ok(self):
         card = self.card_for("assets/sprites/player_car.png")

@@ -42,7 +42,12 @@ TILE_SIZE = 8
 # Garage reports them *before* the converter runs (R4); each one cites
 # where it is enforced, so a change there has one place to land here.
 MAX_COLOURS = 4       # png_to_tiles.load_png_pixels
-MAX_TILES = 192       # png_to_tiles.png_to_c -- the VRAM budget
+# png_to_tiles.png_to_c enforces this only on its rotation-manifest branch,
+# which counts every rotated variant it generates against 192; the plain
+# branch writes any tile count with no check at all. Garage applies the
+# limit to every image regardless (R3) -- deliberately stricter than the
+# converter it cites, not a mirror of it.
+MAX_TILES = 192
 
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 PNG_TO_TILES_RELATIVE = ("tools", "png_to_tiles.py")
@@ -166,9 +171,25 @@ def read_png(binding, path: Path) -> PngFacts:
     png_to_tiles.py -- that is a broken worktree, not a broken asset, and
     the two must not be reported the same way. A file the converter
     *rejects* comes back as a PngFacts carrying its message.
+
+    A file Garage cannot even read -- locked by an editor, or deleted in
+    the moment between `discover` finding it and this function opening it
+    -- is the same shape of problem: `error` carries what went wrong, and
+    the caller runs no converter. Left unguarded, that read raises OSError
+    straight out of `verify()`, and from there out of the panel's own
+    constructor, which is startup: an asset going missing or locked would
+    take the whole window down with it rather than showing up as a card
+    with a problem.
     """
     module = load_png_tools(binding)
-    data = Path(path).read_bytes()
+    try:
+        data = Path(path).read_bytes()
+    except OSError as exc:
+        return PngFacts(
+            width=None, height=None, tiles_x=None, tiles_y=None,
+            tile_count=None, colour_count=None, pixels=[],
+            error=f"'{path}' could not be read: {exc}",
+        )
     palette_size = plte_entry_count(data)
 
     try:

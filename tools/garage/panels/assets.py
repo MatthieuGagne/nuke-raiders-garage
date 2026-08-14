@@ -262,7 +262,7 @@ class AssetCard(QWidget):
     def _apply_verdict(self) -> None:
         if not self.verification.ok:
             problem = self.verification.problems[0]
-            self.verdict_label.setText(problem.message.upper()[:40])
+            self.verdict_label.setText(problem.chip.upper())
             self.verdict_label.setToolTip(self.verification.summary())
             self.convert_button.setEnabled(False)
             self.convert_button.setToolTip(self.plan.refusal or "")
@@ -299,9 +299,43 @@ class AssetCard(QWidget):
         self._changed = changed
         self._apply_verdict()
 
+    def apply_verification(self, verification, plan) -> None:
+        """Replace this card's verification and plan with freshly computed
+        ones, and redraw everything that depends on them -- the verdict
+        chip, the cost line, the generated-target label and the Convert
+        button's enabled state and tooltip.
+
+        The card is built once, in `refresh()`, from the verification the
+        asset happened to have at that moment. The file it describes can
+        keep changing underneath it -- an edit made in the seconds between
+        the panel drawing OK and the user reaching for Convert -- so that
+        first verification goes stale the instant the file does. `convert()`
+        and `check_for_changes()` both need to act on what the asset is
+        *now*, not on whatever the card was last drawn with, which is what
+        this method is for: it updates an existing widget in place rather
+        than requiring a full `refresh()` (which would destroy and rebuild
+        every card, including the one a running converter reports to).
+        """
+        self.verification = verification
+        self.plan = plan
+        self.cost_label.setText(cost_text(self.asset, verification, plan.rotation))
+        self.target_label.setText(
+            "→ " + ", ".join(plan.targets) if plan.targets else "no converter"
+        )
+        self.target_label.setToolTip(
+            "Generated — read-only in Garage. Edit the asset, not this file."
+            if plan.targets
+            else (plan.refusal or "")
+        )
+        self._apply_verdict()
+
 
 class AssetsPanel(QWidget):
-    """R1's list, R2's previews, R3's costs, R4's verdicts."""
+    """R1's list, R2's previews, R3's costs, R4's verdicts, R5's refusal to
+    convert a failed asset, R6/R7's converter runs (R11's two validators
+    for music), R8's "open in the default app", R9's change detection and
+    R10's read-only guard over every generated file.
+    """
 
     run_finished = Signal(object)
 
@@ -358,6 +392,7 @@ class AssetsPanel(QWidget):
 
         self._runs = RunController(self)
         self._runs.line.connect(self.append_line)
+        self._runs.command_started.connect(self._append_command)
         self._runs.finished.connect(self._on_run_finished)
         self._running_card: Optional[AssetCard] = None
 
@@ -403,7 +438,15 @@ class AssetsPanel(QWidget):
         try:
             rules = pipeline.read_rules(self.binding)
         except pipeline.PipelineError as exc:
-            rules = []
+            # `None`, not `[]`: `plan_for` treats `None` as "re-read the
+            # rules yourself", and only that branch reproduces this same
+            # PipelineError for each asset. An empty list is not the same
+            # thing to `plan_for` -- it reads as a Makefile with no rules at
+            # all, so every card's refusal would claim "no rule reads this
+            # asset" instead of naming the real cause, which is that there
+            # is no Makefile to read. This log line is the one place that
+            # cause is stated once; every card should say it too.
+            rules = None
             self.append_line(exc.message)
 
         found = assets_core.discover(self.binding)
@@ -448,8 +491,10 @@ class AssetsPanel(QWidget):
                 card.set_changed(True)
         # R10's read-only set, derived from the Makefile rather than
         # listed: a converter rule added to the game repository is covered
-        # the day it lands.
-        self._generated = pipeline.generated_files(rules)
+        # the day it lands. `rules or []`: a missing Makefile (rules is
+        # None here) means Garage knows of no generated file, which is the
+        # truth -- it could not read the file that would have named one.
+        self._generated = pipeline.generated_files(rules or [])
 
         self.status_label.setText(
             f"{assets_core.assets_dir(self.binding)} · {len(found)} files · "
@@ -495,8 +540,6 @@ class AssetsPanel(QWidget):
         self._poll.stop()
         self._runs.stop_and_wait()
 
-    # -- the two actions (filled in by Task 8 and Task 9) ------------------
-
     def open(self, card: AssetCard) -> None:
         """Hand the asset to the Windows default application (R8/AC8).
 
@@ -531,7 +574,18 @@ class AssetsPanel(QWidget):
 
     def check_for_changes(self) -> None:
         """Re-stamp every listed asset and mark the ones that moved
-        (R9/AC9). Called by the poll timer, and directly by tests."""
+        (R9/AC9). Called by the poll timer, and directly by tests.
+
+        A card whose file changed is re-verified and re-planned here, not
+        only re-stamped: without that, a card would keep showing OK (or a
+        problem the edit already fixed) about a file that is not the file
+        it was built from, and a Reconvert pressed from it would run
+        against a verdict the edit had already made false. Updated in
+        place through `AssetCard.apply_verification` rather than by calling
+        `refresh()`, which destroys and rebuilds every card -- a rebuild
+        while a converter is running would delete the very widget the run
+        reports its result to.
+        """
         for card in self._cards:
             relative = card.asset.relative_path
             before = self._stamps.get(relative)
@@ -547,20 +601,38 @@ class AssetsPanel(QWidget):
                 # Remembered on the panel, not only on the card: the card is
                 # thrown away and rebuilt by every `refresh()`.
                 self._changed_paths.add(relative)
+                verification = assets_core.verify(self.binding, card.asset)
+                plan = pipeline.plan_for(self.binding, card.asset, verification)
+                card.apply_verification(verification, plan)
                 card.set_changed(True)
 
     def convert(self, card: AssetCard) -> None:
         """Run the converter for `card`'s asset (R6/R7).
 
-        R5's refusal is here as well as on the button: the button is
-        disabled when verification failed, and this is the guard behind
-        it. A refused asset writes its reason to the log rather than
-        failing silently — the user pressed something, and something must
-        answer.
+        The verification behind `card.plan` can be stale: the acceptance
+        flow is edit an asset, see CHANGED, press Reconvert, and an edit
+        made in the seconds between the panel drawing the card and the user
+        pressing this button is exactly what that flow exists to catch.
+        Trusting `card.plan` here would mean running a converter against a
+        verification computed before the edit -- so this re-verifies and
+        re-plans the asset first, against what is on disk right now, and
+        updates the card to match before doing anything else. A fresh
+        refusal is written to the log and nothing runs; a fresh pass is
+        what gets run.
+
+        `plan.can_run` is still checked afterwards, even though the fresh
+        plan already encodes the same refusal when there is one: R5's
+        guard is deliberately held in three places (the button's enabled
+        state, this check, and the fact that a refused `Plan` carries no
+        command at all), and this is the second and third of them.
         """
-        if not card.plan.can_run:
+        verification = assets_core.verify(self.binding, card.asset)
+        plan = pipeline.plan_for(self.binding, card.asset, verification)
+        card.apply_verification(verification, plan)
+
+        if not plan.can_run:
             self.append_line(
-                card.plan.refusal
+                plan.refusal
                 or f"{card.asset.name} cannot be converted."
             )
             return
@@ -574,13 +646,8 @@ class AssetsPanel(QWidget):
             return
 
         self._running_card = card
-        for command in card.plan.commands:
-            # The prototype's log echoes each command as a shell line, so
-            # the output underneath is attributable to the call that
-            # produced it.
-            self.append_line(f"$ {command.label}")
         if not self._runs.start(
-            list(card.plan.commands), self.binding.active_worktree.path
+            list(plan.commands), self.binding.active_worktree.path
         ):
             self._running_card = None
             return
@@ -588,6 +655,17 @@ class AssetsPanel(QWidget):
 
     def _convert(self, card: AssetCard) -> None:
         self.convert(card)
+
+    def _append_command(self, label: str, target: str) -> None:
+        # `command_started` fires just before a command actually begins, so
+        # this echoes only commands that are truly running -- not every
+        # command in a plan up front. For a multi-command plan (music's two
+        # validators) that matters: if the first fails, `run_sequence`
+        # never starts the second, and echoing it anyway would attribute a
+        # `$` line to a command that never ran. `target` is accepted to
+        # match `RunController.command_started`'s signature; the panel has
+        # no use for it the way the compile bar's budget parser does.
+        self.append_line(f"$ {label}")
 
     def _set_busy(self, busy: bool) -> None:
         for card in self._cards:

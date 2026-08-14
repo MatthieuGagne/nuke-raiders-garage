@@ -2978,6 +2978,37 @@ class TestGarageWindowWorktreeSwitch(WorktreePanelFixture, unittest.TestCase):
         )
         window.compile_bar.stop_and_wait()
 
+    def test_a_converter_in_flight_refuses_the_switch(self):
+        # A converter run from the asset panel is the same situation as a
+        # compile: `make -W <asset> ...` killed mid-write leaves a
+        # truncated generated file in the worktree the user just left.
+        window = self._window()
+        spike = self.spike(window.worktrees_panel)
+        window.assets_panel._runs.start(
+            [
+                make_runner.Command(
+                    argv=(
+                        sys.executable,
+                        "-c",
+                        "import time\n"
+                        "print('x', flush=True)\n"
+                        "while True: time.sleep(0.05)\n",
+                    ),
+                    label="convert",
+                )
+            ],
+            window.binding.active_worktree.path,
+        )
+
+        refusal = window.activate_worktree(spike)
+
+        self.assertIn("converter is running", refusal)
+        self.assertEqual(
+            window.assets_panel.binding.active_worktree.path,
+            self.binding.active_worktree.path,
+        )
+        window.assets_panel.stop_and_wait()
+
 
 class CommitPanelFixture:
     """A real repo on a branch, with one tracked change ready to commit.

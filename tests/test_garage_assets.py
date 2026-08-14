@@ -352,6 +352,22 @@ class TestReadPng(unittest.TestCase):
 
         self.assertIn("png_to_tiles.py", str(caught.exception))
 
+    def test_an_unreadable_file_is_a_named_problem_not_a_crash(self):
+        """FIX 2: a file locked by an editor, or deleted between `discover`
+        and `verify`, must come back as a PngFacts carrying the failure --
+        not raise OSError out of here and, from there, out of `verify()`,
+        `refresh()` and the panel's own constructor, taking Garage's
+        startup down with it."""
+        path = self.repo / "assets/sprites/gone.png"
+        # Never created -- Path.read_bytes() raises FileNotFoundError,
+        # which is an OSError, exactly like a file deleted after discovery.
+
+        facts = preview.read_png(self.binding, path)
+
+        self.assertIsNotNone(facts.error)
+        self.assertIn("gone.png", facts.error)
+        self.assertEqual(facts.pixels, [])
+
     def test_the_tile_count_matches_what_png_to_tiles_writes(self):
         """AC3, proven against the converter's own output rather than
         against a second copy of its arithmetic."""
@@ -429,6 +445,20 @@ class TestVerify(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertEqual(result.problems, [])
         self.assertEqual(result.png.tile_count, 2)
+
+    def test_the_chip_is_short_and_still_names_the_colour_count(self):
+        """FIX 3: the chip is what the card's verdict shows, in a 168px
+        card sharing a row with the kind tag -- the count the design asks
+        for (the prototype's "5 COLOURS") must survive being that short,
+        which `problem.message.upper()[:40]` did not: the count sits at
+        the end of the sentence, which is the end that gets clipped."""
+        write_indexed_png(self.repo / "assets/sprites/car.png", 8, 8, 9)
+
+        result = assets.verify(self.binding, self._asset("assets/sprites/car.png"))
+
+        problem = result.problems[0]
+        self.assertLessEqual(len(problem.chip), 20)
+        self.assertIn("9", problem.chip)
 
     def test_five_colours_fails_and_names_the_count(self):
         """AC4, and the oversized-palette case: a palette declaring more
@@ -1005,12 +1035,19 @@ class TestOpenInDefaultApp(unittest.TestCase):
         in `core/pipeline.py`. What R8 forbids is a string the code can
         pass to a subprocess or store as a setting, which is every string
         constant that is not a docstring.
+
+        This is a tripwire, not an adversarial boundary: it walks the AST
+        for literal string constants, so it catches someone typing an
+        editor's name into a message or a setting, and nothing cleverer.
+        A name built at runtime -- concatenation, an f-string, a value read
+        from a file or an environment variable -- would not appear as a
+        single `ast.Constant` and would slip past it unnoticed.
         """
         import ast
 
         from tools.garage.core import pipeline as pipeline_module
 
-        for module in (assets, pipeline_module):
+        for module in (assets, pipeline_module, preview):
             tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
             docstrings = set()
             for node in ast.walk(tree):
