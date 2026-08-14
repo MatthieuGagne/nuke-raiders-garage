@@ -8,6 +8,10 @@ approved: the Tuner is the whole window body again, the header states
 change *totals* only, and the full diff lives behind a menu action,
 closed until asked for (AC19, AC2).
 
+Iteration P2 adds the asset panel (issue #3): assets/ of the active
+worktree, previewed in the Game Boy palette, verified before a converter
+is offered, and converted by the game repository's own Makefile rule.
+
 Iteration 10 adds the commit dialog (R5/R6, AC5/AC6): a message, the
 `master` refusal, and the pre-commit verification streamed while it runs.
 
@@ -61,6 +65,7 @@ from tools.garage.core.project import (
     bind,
     default_garage_root,
 )
+from tools.garage.panels.assets import AssetsPanel
 from tools.garage.panels.budgets import BudgetsPanel
 from tools.garage.panels.commit import CommitPanel
 from tools.garage.panels.compile_bar import CompileBar
@@ -319,6 +324,7 @@ class GarageWindow(QMainWindow):
         # launch is the default, nothing further needed for that.
 
         self._build_commit()
+        self._build_assets()
 
         self._build_doctor()
         # A failed target whose tool the Doctor already reported missing
@@ -347,6 +353,33 @@ class GarageWindow(QMainWindow):
         self.commit_dialog.show()
         self.commit_dialog.raise_()
         self.commit_dialog.activateWindow()
+
+    def _build_assets(self) -> None:
+        """P2's asset panel, in a dialog like the diff, the Doctor and the
+        commit panel. Rebuilt with the body, because what it lists is
+        `assets/` of the *active* worktree — a panel left pointing at the
+        previous one would offer to convert files in a tree Garage no
+        longer means.
+        """
+        self.assets_panel = AssetsPanel(self.binding, self.binding_error)
+        self.assets_panel.setObjectName("garage-assets-panel")
+        self.assets_dialog = QDialog(self)
+        self.assets_dialog.setObjectName("garage-assets-dialog")
+        self.assets_dialog.setWindowTitle(self._assets_dialog_title())
+        layout = QVBoxLayout(self.assets_dialog)
+        layout.addWidget(self.assets_panel)
+        self.assets_dialog.resize(920, 720)
+
+    def _assets_dialog_title(self) -> str:
+        if self.binding is None:
+            return "Assets"
+        return f"Assets — {self.binding.active_worktree.path.name}"
+
+    def open_assets(self) -> None:
+        self.assets_panel.refresh()
+        self.assets_dialog.show()
+        self.assets_dialog.raise_()
+        self.assets_dialog.activateWindow()
 
     def _on_committed(self, head_line: str) -> None:
         """A commit changes what the worktree holds, so the header totals
@@ -393,8 +426,17 @@ class GarageWindow(QMainWindow):
         worktrees_core.activate(self.garage_root, worktree)
         self._rebind()
 
+        # The asset panel owns a poll timer and may own a converter thread;
+        # both must end before the widget that hosts them is deleted.
+        self.assets_panel.stop_and_wait()
+
         # The dialogs hold panels bound to the old worktree; they go with it.
-        for dialog in (self.diff_dialog, self.doctor_dialog, self.commit_dialog):
+        for dialog in (
+            self.diff_dialog,
+            self.doctor_dialog,
+            self.commit_dialog,
+            self.assets_dialog,
+        ):
             dialog.close()
             dialog.deleteLater()
 
@@ -477,6 +519,11 @@ class GarageWindow(QMainWindow):
         self.show_commit_action.setObjectName("garage-action-show-commit")
         self.show_commit_action.triggered.connect(self.open_commit)
         view_menu.addAction(self.show_commit_action)
+
+        self.show_assets_action = QAction("&Assets…", self)
+        self.show_assets_action.setObjectName("garage-action-show-assets")
+        self.show_assets_action.triggered.connect(self.open_assets)
+        view_menu.addAction(self.show_assets_action)
 
         self.show_worktrees_action = QAction("&Worktrees…", self)
         self.show_worktrees_action.setObjectName("garage-action-show-worktrees")
@@ -562,6 +609,7 @@ class GarageWindow(QMainWindow):
         self.tuner_panel.flush_pending_writes()
         self.compile_bar.stop_and_wait()
         self.commit_panel.stop_and_wait()
+        self.assets_panel.stop_and_wait()
         super().closeEvent(event)
 
 

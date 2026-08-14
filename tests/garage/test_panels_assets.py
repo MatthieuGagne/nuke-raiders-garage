@@ -635,5 +635,50 @@ class TestGeneratedFilesAreReadOnly(AssetsPanelTestCase):
         self.assertIn("generated", self.panel.log_text().lower())
 
 
+@unittest.skipIf(NO_GAME_REPO, NO_GAME_REPO_REASON)
+class TestWindowWiring(unittest.TestCase):
+    def setUp(self):
+        theme.apply(_app)
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = tmp_root(self._tmp.name)
+        self.repo = make_fixture_worktree(self.root)
+        self.garage_root = self.root / "nuke-raider-garage"
+        bind_over(self.root, self.repo)
+        from tools.garage.app import GarageWindow
+
+        self.window = GarageWindow(self.garage_root)
+
+    def tearDown(self):
+        self.window.close()
+        self.window.deleteLater()
+        self._tmp.cleanup()
+
+    def test_the_view_menu_offers_the_assets_panel(self):
+        self.assertEqual(self.window.show_assets_action.text(), "&Assets…")
+
+    def test_opening_shows_the_dialog_with_the_worktrees_assets(self):
+        self.window.open_assets()
+
+        self.assertTrue(self.window.assets_dialog.isVisible())
+        # `make_fixture_worktree` lists one asset of each of the four kinds
+        # plus `broken.png`, a second sprite kept for the failing-verdict
+        # tests (AC4/AC5) -- five files total, as `TestGrid` already
+        # establishes above.
+        self.assertEqual(len(self.window.assets_panel.cards()), 5)
+
+    def test_the_dialog_names_the_worktree_it_lists(self):
+        """With several checkouts open (P1 R3), "Assets" alone does not
+        say whose."""
+        self.assertIn(self.repo.name, self.window.assets_dialog.windowTitle())
+
+    def test_closing_the_window_stops_the_panels_timer_and_thread(self):
+        self.window.open_assets()
+
+        self.window.close()
+
+        self.assertFalse(self.window.assets_panel._poll.isActive())
+        self.assertFalse(self.window.assets_panel.is_running())
+
+
 if __name__ == "__main__":
     unittest.main()
