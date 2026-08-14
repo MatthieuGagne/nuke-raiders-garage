@@ -12,6 +12,7 @@ import tempfile
 import unittest
 import zlib
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -480,6 +481,145 @@ class TestConvert(AssetsPanelTestCase):
         self.assertEqual(len(commands), 2)
         self.assertIn("music_song_validate.py", commands[0].label)
         self.assertIn("music_wire_check.py", commands[1].label)
+
+
+class TestOpen(AssetsPanelTestCase):
+    def test_opening_hands_the_file_to_the_windows_default_app(self):
+        """AC8."""
+        card = self.card_for("assets/sprites/player_car.png")
+
+        with mock.patch.object(assets_core, "_startfile") as startfile:
+            self.panel.open(card)
+
+        startfile.assert_called_once_with(str(card.asset.path))
+
+    def test_a_uge_opens_in_the_default_app_too(self):
+        """AC11, the open half. Garage names no tracker."""
+        card = self.card_for("assets/music/song.uge")
+
+        with mock.patch.object(assets_core, "_startfile") as startfile:
+            self.panel.open(card)
+
+        startfile.assert_called_once_with(str(card.asset.path))
+
+    def test_a_failure_to_open_is_reported_in_the_log(self):
+        card = self.card_for("assets/sprites/player_car.png")
+
+        with mock.patch.object(assets_core, "_startfile", side_effect=OSError("no app")):
+            self.panel.open(card)
+
+        self.assertIn("no application", self.panel.log_text().lower())
+
+
+class TestChangedOnDisk(AssetsPanelTestCase):
+    """AC9: an asset changed on disk is marked as changed, and Garage
+    offers to convert it again."""
+
+    def test_a_file_rewritten_after_opening_is_marked_changed(self):
+        card = self.card_for("assets/sprites/player_car.png")
+        with mock.patch.object(assets_core, "_startfile"):
+            self.panel.open(card)
+
+        write_indexed_png(card.asset.path, 24, 8, 4)
+        self.panel.check_for_changes()
+
+        self.assertTrue(card.is_changed())
+        self.assertIn("CHANGED", card.verdict_label.text())
+
+    def test_the_action_becomes_reconvert(self):
+        card = self.card_for("assets/sprites/player_car.png")
+        with mock.patch.object(assets_core, "_startfile"):
+            self.panel.open(card)
+        write_indexed_png(card.asset.path, 24, 8, 4)
+
+        self.panel.check_for_changes()
+
+        self.assertEqual(card.convert_button.text(), "Reconvert")
+        self.assertTrue(card.convert_button.isEnabled())
+
+    def test_a_changed_mark_survives_a_refresh(self):
+        """`refresh()` throws every card away and builds new ones, and it
+        runs each time the dialog opens. Without carrying the marks across,
+        editing a sprite, seeing CHANGED, closing the panel and reopening
+        it would silently withdraw the offer to convert a file that is
+        still unconverted — which is R9 failing quietly."""
+        card = self.card_for("assets/sprites/player_car.png")
+        write_indexed_png(card.asset.path, 24, 8, 4)
+        self.panel.check_for_changes()
+        self.assertTrue(card.is_changed())
+
+        self.panel.refresh()
+
+        rebuilt = self.card_for("assets/sprites/player_car.png")
+        self.assertTrue(rebuilt.is_changed())
+        self.assertEqual(rebuilt.convert_button.text(), "Reconvert")
+
+    def test_a_refresh_does_not_re_baseline_an_unconverted_asset(self):
+        """The stamp belongs to the asset, not to a rebuild of the grid.
+        If `refresh()` re-stamped, the mark would come back for one tick
+        and then vanish on the next poll."""
+        card = self.card_for("assets/sprites/player_car.png")
+        write_indexed_png(card.asset.path, 24, 8, 4)
+        self.panel.check_for_changes()
+
+        self.panel.refresh()
+        self.panel.check_for_changes()
+
+        self.assertTrue(self.card_for("assets/sprites/player_car.png").is_changed())
+
+    def test_an_untouched_asset_stays_ok(self):
+        card = self.card_for("assets/sprites/player_car.png")
+        with mock.patch.object(assets_core, "_startfile"):
+            self.panel.open(card)
+
+        self.panel.check_for_changes()
+
+        self.assertFalse(card.is_changed())
+
+    def test_an_asset_never_opened_is_watched_from_the_first_look(self):
+        """The user may edit a file from Explorer; R9 says "changed on
+        disk", not "changed after Garage opened it"."""
+        card = self.card_for("assets/sprites/player_car.png")
+        write_indexed_png(card.asset.path, 24, 8, 4)
+
+        self.panel.check_for_changes()
+
+        self.assertTrue(card.is_changed())
+
+
+class TestGeneratedFilesAreReadOnly(AssetsPanelTestCase):
+    """AC10: Garage offers no way to edit a generated file."""
+
+    def test_no_card_is_a_generated_file(self):
+        generated = pipeline.generated_files(pipeline.read_rules(self.binding))
+        for card in self.panel.cards():
+            self.assertNotIn(card.asset.relative_path, generated)
+
+    def test_the_target_is_shown_as_a_label_not_a_control(self):
+        from PySide6.QtWidgets import QAbstractButton
+
+        card = self.card_for("assets/sprites/player_car.png")
+        self.assertIn("src/player_sprite.c", card.target_label.text())
+        self.assertNotIsInstance(card.target_label, QAbstractButton)
+        self.assertIn("read-only", card.target_label.toolTip().lower())
+
+    def test_opening_refuses_a_generated_path(self):
+        """The guard behind the absence of a control: even a caller that
+        built a card by hand cannot open a generated file."""
+        card = self.card_for("assets/sprites/player_car.png")
+        card.asset = type(card.asset)(
+            path=self.repo / "src" / "player_sprite.c",
+            relative_path="src/player_sprite.c",
+            kind=card.asset.kind,
+            size_bytes=0,
+            mtime_ns=0,
+        )
+
+        with mock.patch.object(assets_core, "_startfile") as startfile:
+            self.panel.open(card)
+
+        startfile.assert_not_called()
+        self.assertIn("generated", self.panel.log_text().lower())
 
 
 if __name__ == "__main__":
