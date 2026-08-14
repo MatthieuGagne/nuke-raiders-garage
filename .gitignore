@@ -1,3 +1,7 @@
 garage.local.json
 __pycache__/
 *.pyc
+
+# Scratch for subagent-driven plan execution: ledgers, task briefs, review
+# packages. Working notes for a plan in flight, never part of the product.
+.superpowers/

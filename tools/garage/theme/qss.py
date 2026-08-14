@@ -52,6 +52,12 @@ names / dynamic properties the panels already expose for this purpose:
   the colour distinction R19 deliberately left out; the "+ "/"- " prefix
   and bold weight diff_view.py already sets stay as the non-colour cue
   colour alone should never be the only signal.
+- `#assets-status`, `#assets-card`, `#assets-name`, `#assets-kind`,
+  `#assets-verdict`, `#assets-cost`, `#assets-target`, `#assets-log` -- the
+  asset panel (`tools/garage/panels/assets.py`). `[verdict="pass"|"fail"|
+  "changed"]` carries the OK/problem/CHANGED vocabulary the prototype's
+  `.acard` declares; the chip also spells the word out, so colour is never
+  the only signal.
 """
 from __future__ import annotations
 
@@ -663,4 +669,30 @@ QLabel[diffKind="remove"] {{
 QLabel[diffKind="context"], QLabel[diffKind="meta"] {{
     color: {t['text-3']};
 }}
+
+/* ============================================================
+   Asset panel (tools/garage/panels/assets.py). The prototype's
+   card grid: a thumbnail, a name, a kind tag, a verdict chip, a
+   cost line and two buttons per asset.
+   ============================================================ */
+#assets-card {{
+    background: {t["surface"]};
+    border: 1px solid {t["line"]};
+    border-radius: 5px;
+}}
+#assets-card[verdict="fail"] {{ border-color: {t["fail"]}; }}
+#assets-card[verdict="changed"] {{ border-color: {t["warn"]}; }}
+#assets-name {{ font-family: {FONT_MONO}; font-size: 11px; }}
+#assets-cost, #assets-target {{
+    font-family: {FONT_MONO};
+    font-size: 10px;
+    color: {t["text-3"]};
+}}
+#assets-kind {{ color: {t["text-2"]}; font-size: 10px; }}
+#assets-verdict {{ font-size: 10px; font-weight: 600; }}
+#assets-verdict[verdict="pass"] {{ color: {t["pass"]}; }}
+#assets-verdict[verdict="fail"] {{ color: {t["fail"]}; }}
+#assets-verdict[verdict="changed"] {{ color: {t["warn"]}; }}
+#assets-log {{ font-family: {FONT_MONO}; font-size: 11px; }}
+#assets-status {{ color: {t["text-2"]}; }}
 """

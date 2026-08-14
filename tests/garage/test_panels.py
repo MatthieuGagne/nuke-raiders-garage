@@ -1287,9 +1287,22 @@ class TestNoColourLiteralInPanelSource(unittest.TestCase):
             )
 
     def test_no_qcolor_construction(self):
+        # `QColor(TOKENS[...])` is the one allowed shape: the asset panel's
+        # thumbnail paints pixels from Python and so needs actual QColor
+        # objects, but every one of them is still built from a name in
+        # tokens.py rather than a literal -- the invariant this test
+        # guards -- so that shape is excluded rather than the whole
+        # construction. The pattern matches the *whole* call, subscript and
+        # closing paren included, so nothing after the subscript (a
+        # fallback literal in an `or` clause, say) can escape by riding
+        # along behind an unanchored prefix match.
+        allowed = re.compile(r"QColor\(\s*TOKENS\[[^\]]+\]\s*\)")
         for path in PANEL_SOURCE_FILES:
             text = path.read_text(encoding="utf-8")
-            self.assertNotIn("QColor(", text, f"{path} constructs a QColor directly")
+            remainder = allowed.sub("", text)
+            self.assertNotIn(
+                "QColor(", remainder, f"{path} constructs a QColor directly"
+            )
 
     def test_no_qt_colour_constant(self):
         for path in PANEL_SOURCE_FILES:
@@ -1328,6 +1341,10 @@ class TestThemeAppliesAtStartup(unittest.TestCase):
         # The spec's source of truth: garage/index.html's
         # :root[data-theme="dark"] block. Pinning these here means a future
         # edit to tokens.py that drifts from the prototype fails loudly.
+        # The four gb-* entries are the exception: they come from the
+        # prototype's plain :root block (`--gb0` ... `--gb3`), not the dark
+        # variant -- the Game Boy shades are theme-independent -- and are
+        # pinned alongside the dark set for the same reason.
         expected = {
             "bg": "#0E120F", "surface": "#171C18", "surface-2": "#1E241F",
             "surface-3": "#272E28", "line": "#343C35", "line-soft": "#242B25",
@@ -1336,6 +1353,8 @@ class TestThemeAppliesAtStartup(unittest.TestCase):
             "accent-line": "#573224", "pass": "#86B45A", "warn": "#D9AE3C",
             "fail": "#E0647C", "pass-soft": "#1D2717", "warn-soft": "#2C2412",
             "fail-soft": "#2E1720",
+            "gb-0": "#E8EDD8", "gb-1": "#A8B67C",
+            "gb-2": "#5A7043", "gb-3": "#23301E",
         }
         self.assertEqual(theme.TOKENS, expected)
 
@@ -2958,6 +2977,37 @@ class TestGarageWindowWorktreeSwitch(WorktreePanelFixture, unittest.TestCase):
             self.binding.active_worktree.path,
         )
         window.compile_bar.stop_and_wait()
+
+    def test_a_converter_in_flight_refuses_the_switch(self):
+        # A converter run from the asset panel is the same situation as a
+        # compile: `make -W <asset> ...` killed mid-write leaves a
+        # truncated generated file in the worktree the user just left.
+        window = self._window()
+        spike = self.spike(window.worktrees_panel)
+        window.assets_panel._runs.start(
+            [
+                make_runner.Command(
+                    argv=(
+                        sys.executable,
+                        "-c",
+                        "import time\n"
+                        "print('x', flush=True)\n"
+                        "while True: time.sleep(0.05)\n",
+                    ),
+                    label="convert",
+                )
+            ],
+            window.binding.active_worktree.path,
+        )
+
+        refusal = window.activate_worktree(spike)
+
+        self.assertIn("converter is running", refusal)
+        self.assertEqual(
+            window.assets_panel.binding.active_worktree.path,
+            self.binding.active_worktree.path,
+        )
+        window.assets_panel.stop_and_wait()
 
 
 class CommitPanelFixture:
