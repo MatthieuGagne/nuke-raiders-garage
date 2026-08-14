@@ -556,11 +556,24 @@ class TestChangedOnDisk(AssetsPanelTestCase):
 
     def test_a_refresh_does_not_re_baseline_an_unconverted_asset(self):
         """The stamp belongs to the asset, not to a rebuild of the grid.
-        If `refresh()` re-stamped, the mark would come back for one tick
-        and then vanish on the next poll."""
+
+        The ordering is the whole test. The edit lands and `refresh()` runs
+        with no poll in between — the exact race `setdefault` protects: a
+        user who edits a sprite and reopens the panel before the two-second
+        timer has fired. If `refresh()` re-baselined, that edit would be
+        absorbed into the new baseline, the next poll would compare the
+        changed file against itself, and Garage would never offer to
+        convert it.
+
+        Do not call `check_for_changes()` before the `refresh()` here. Once
+        an asset is marked, the mark is monotonic — only a successful
+        conversion clears it — so `refresh()`'s re-apply loop would keep
+        the card CHANGED on its own and the assertion would hold whether
+        the stamps were preserved or rebuilt. The test would pass against
+        the bug it exists to catch.
+        """
         card = self.card_for("assets/sprites/player_car.png")
         write_indexed_png(card.asset.path, 24, 8, 4)
-        self.panel.check_for_changes()
 
         self.panel.refresh()
         self.panel.check_for_changes()

@@ -15,10 +15,12 @@ Threading: a converter run blocks on a subprocess pipe, so it goes through
 bar and the commit panel use. Everything that touches a widget below runs
 on the UI thread.
 
-R10 is structural here rather than enforced: the panel lists files under
-`assets/` and nothing else, and a card's only reference to a generated
-file is a text label naming where the converter writes. There is no code
-path that opens one.
+R10 is held twice. Structurally, the panel lists files under `assets/`
+and nothing else, and a card's only reference to a generated file is a
+text label naming where the converter writes — no control offers to open
+one. `open()` also refuses a path in the generated set outright, so the
+rule holds for any caller rather than only for a user clicking a button
+that was never drawn.
 """
 from __future__ import annotations
 
@@ -535,6 +537,10 @@ class AssetsPanel(QWidget):
             before = self._stamps.get(relative)
             after = assets_core.stamp(card.asset.path)
             if before is None:
+                # Defensive: `refresh()` stamps every card it builds, so a
+                # listed asset always has a baseline by the time the timer
+                # fires. A missing one would otherwise reach `has_changed`
+                # as None.
                 self._stamps[relative] = after
                 continue
             if assets_core.has_changed(before, after):
