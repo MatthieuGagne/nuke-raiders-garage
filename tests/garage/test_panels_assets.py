@@ -607,9 +607,11 @@ class TestBusyDuringARun(AssetsPanelTestCase):
         self.assertFalse(card.convert_button.isEnabled())
 
     def test_a_grid_rebuilt_during_a_run_offers_no_action(self):
-        """`refresh()` builds fresh widgets that know nothing of the run,
-        and a worktree switch -- which rebuilds this grid -- can happen
-        while one is in flight."""
+        """`refresh()` builds fresh widgets that know nothing of the run.
+        Closing the Assets dialog only hides it -- the panel and any
+        converter thread it started keep running underneath -- and
+        reopening it calls `refresh()` unconditionally, so this rebuild can
+        land squarely in the middle of a run."""
         card = self.card_for("assets/sprites/player_car.png")
         self.panel.convert(card)
 
@@ -618,6 +620,35 @@ class TestBusyDuringARun(AssetsPanelTestCase):
         rebuilt = self.card_for("assets/sprites/player_car.png")
         self.assertFalse(rebuilt.convert_button.isEnabled())
         self.assertFalse(rebuilt.open_button.isEnabled())
+
+    def test_a_disabled_convert_button_carries_the_busy_tooltip(self):
+        """Task 1 gave the disabled Convert button its own tooltip, naming
+        the run rather than leaving the button silent or repeating the
+        refusal a failed verification would show. Pin the text so a future
+        edit does not quietly swap it back to one of those."""
+        card = self.card_for("assets/sprites/player_car.png")
+        other = self.card_for("assets/maps/tileset.png")
+
+        self.panel.convert(card)
+
+        self.assertEqual(
+            other.convert_button.toolTip(),
+            "A converter is running. This is offered again when it finishes.",
+        )
+
+    def test_a_failed_cards_refusal_tooltip_survives_a_run(self):
+        """`_apply_verdict`'s failed-verification branch returns before it
+        ever looks at `_busy` (R5) -- a card whose verification failed
+        keeps its own refusal tooltip through a run in flight rather than
+        having it overwritten by the busy one."""
+        broken = self.card_for("assets/sprites/broken.png")
+        refusal = broken.convert_button.toolTip()
+        card = self.card_for("assets/sprites/player_car.png")
+
+        self.panel.convert(card)
+
+        self.assertEqual(broken.convert_button.toolTip(), refusal)
+        self.assertIn("9", broken.convert_button.toolTip())
 
     def test_the_actions_come_back_when_the_run_finishes(self):
         """The disable must be exactly as long as the run: a card left
@@ -632,6 +663,7 @@ class TestBusyDuringARun(AssetsPanelTestCase):
         self.assertTrue(other.convert_button.isEnabled())
         self.assertTrue(other.open_button.isEnabled())
         self.assertTrue(card.open_button.isEnabled())
+        self.assertTrue(card.convert_button.isEnabled())
 
 
 class TestConvertEchoesOnlyCommandsThatRan(AssetsPanelTestCase):

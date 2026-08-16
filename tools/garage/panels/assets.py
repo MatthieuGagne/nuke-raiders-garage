@@ -482,7 +482,13 @@ class AssetsPanel(QWidget):
         # Both describe the cards this method is about to build, so both
         # are rebuilt from scratch: an entry for a file that has since
         # vanished should not survive. `_stamps` and `_changed_paths` are
-        # deliberately *not* reset -- see the `setdefault` below.
+        # deliberately *not* reset -- see the `setdefault` below. That is an
+        # asymmetry, not an inconsistency: pruning `_stamps` here would
+        # break the sticky mark it exists to hold, and a stale entry it
+        # keeps is still true of the asset it describes -- a file deleted
+        # and later restored comes back pre-marked CHANGED against a
+        # baseline from before the deletion, which is correct, because the
+        # file did change while Garage was not watching it.
         self._verified = {}
         self._rules = None
 
@@ -554,8 +560,12 @@ class AssetsPanel(QWidget):
             if card.asset.relative_path in self._changed_paths:
                 card.set_changed(True)
         # A rebuilt card is a fresh widget that knows nothing of a run in
-        # flight -- and a worktree switch, which is one of the things that
-        # rebuilds this grid, can happen while one is.
+        # flight. Closing the Assets dialog only hides it -- the panel, its
+        # poll and any converter thread it started keep running underneath
+        # -- and `open_assets()` in app.py calls `refresh()` unconditionally
+        # every time the dialog is reopened, so this rebuild can land
+        # squarely in the middle of a run the user started before closing
+        # it.
         self._set_busy(self._runs.is_running())
         # R10's read-only set, derived from the Makefile rather than
         # listed: a converter rule added to the game repository is covered
@@ -663,6 +673,17 @@ class AssetsPanel(QWidget):
         Do not replace it with "skip whenever the path is already marked":
         an asset edited twice would keep the verification from the first
         edit.
+
+        The re-plan above also reuses `self._rules`, the Makefile parsed at
+        the last `refresh()`, rather than reading it again here. That means
+        a Makefile edited while the dialog stays open is invisible to this
+        poll: a converter rule added after the dialog opened will not show
+        up on a card until the dialog is reopened, and one removed still
+        leaves its old target on display. The staleness is bounded on both
+        ends, though -- the next `refresh()` re-reads the Makefile, and
+        `convert()` re-reads it fresh before running anything -- so the one
+        refusal that actually has to be right, the one standing between a
+        stale plan and a subprocess, is never stale.
         """
         for card in self._cards:
             relative = card.asset.relative_path

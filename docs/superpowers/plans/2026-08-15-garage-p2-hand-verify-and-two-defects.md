@@ -117,9 +117,11 @@ class TestBusyDuringARun(AssetsPanelTestCase):
         self.assertFalse(card.convert_button.isEnabled())
 
     def test_a_grid_rebuilt_during_a_run_offers_no_action(self):
-        """`refresh()` builds fresh widgets that know nothing of the run,
-        and a worktree switch -- which rebuilds this grid -- can happen
-        while one is in flight."""
+        """`refresh()` builds fresh widgets that know nothing of the run.
+        Closing the Assets dialog only hides it -- the panel and any
+        converter thread it started keep running underneath -- and
+        reopening it calls `refresh()` unconditionally, so this rebuild can
+        land squarely in the middle of a run."""
         card = self.card_for("assets/sprites/player_car.png")
         self.panel.convert(card)
 
@@ -228,8 +230,12 @@ In `AssetsPanel.refresh`, immediately after the loop that re-applies the changed
 
 ```python
         # A rebuilt card is a fresh widget that knows nothing of a run in
-        # flight -- and a worktree switch, which is one of the things that
-        # rebuilds this grid, can happen while one is.
+        # flight. Closing the Assets dialog only hides it -- the panel, its
+        # poll and any converter thread it started keep running underneath
+        # -- and `open_assets()` in app.py calls `refresh()` unconditionally
+        # every time the dialog is reopened, so this rebuild can land
+        # squarely in the middle of a run the user started before closing
+        # it.
         self._set_busy(self._runs.is_running())
 ```
 
@@ -615,6 +621,8 @@ git -C C:/Code/nuke-raider status --short src/player_sprite.c
 Expected: the timestamp moved (the file really was rewritten) and `status` prints nothing (the bytes are identical to what is checked in — the converter run from the window reproduced the file exactly). A non-empty `status` here means Garage's run produced something different from what the repository holds; capture the diff and stop, because that is either a converter change nobody committed or an AC6 failure.
 
 While the run is in flight, glance at the other cards: every Convert and Open button should be dead for its duration, and live again the moment it finishes. That is Task 1's fix, seen from the outside.
+
+While that same run is still in flight, also close the Assets dialog and reopen it from **View ▸ Assets…**, then let the run finish. This is worth doing here rather than skipping it: it is the one trigger, mid-run dialog close and reopen, that reaches `_running_card` going stale, a known defect the review found and is filing as a follow-up issue rather than fixing in this branch. Expected: the rebuilt grid offers no action on any card, the same as the check above, and when the run completes the log reports the conversion and the `player_car.png` card clears its CHANGED mark, exactly as if the dialog had stayed open. A `RuntimeError` about a deleted C++ object, a run whose completion never appears in the log, or a card left marked CHANGED after a successful conversion are all that defect showing itself. If you see one, note which it was and move on — it is already filed, and this pass is for confirming what is known, not for chasing it further.
 
 - [ ] **Step 7: Check 5 — AC7, a converter error appears with the converter's own message**
 
