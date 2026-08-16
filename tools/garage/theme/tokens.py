@@ -36,6 +36,16 @@ TOKENS = {
     "pass-soft": "#1D2717",
     "warn-soft": "#2C2412",
     "fail-soft": "#2E1720",
+    # The four Game Boy shades, from the prototype's `:root` block
+    # (`--gb0` … `--gb3` in garage/index.html). R2 asks the asset preview
+    # to use them; they are here rather than in the panel because this
+    # package is the only place in the application where a colour may be
+    # spelled out (R18/AC18), and core/preview.py deals in palette
+    # indices 0-3 precisely so that it never has to name one.
+    "gb-0": "#E8EDD8",
+    "gb-1": "#A8B67C",
+    "gb-2": "#5A7043",
+    "gb-3": "#23301E",
 }
 
 # The prototype's typography split (garage/index.html `body` / `.mono`):
