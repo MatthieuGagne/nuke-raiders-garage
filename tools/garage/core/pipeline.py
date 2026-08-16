@@ -279,19 +279,55 @@ def read_rules(binding) -> List[Rule]:
     return parse_makefile(text)
 
 
+def _rules_for_asset(rules: Sequence[Rule], relative_path: str) -> List[Rule]:
+    """The converter rules that read `relative_path`, in Makefile order."""
+    return [
+        rule for rule in rules
+        if rule.is_converter and relative_path in rule.prerequisites
+    ]
+
+
 def targets_for_asset(rules: Sequence[Rule], relative_path: str) -> List[str]:
-    """Every generated file that reads `relative_path`, sorted.
+    """Every generated file that a conversion of `relative_path` writes,
+    sorted. What the card's `→ …` label and the success line report.
 
     All of them, not the first: `assets/maps/track.tmx` feeds the map
     source *and* the rotation manifest, and converting one without the
     other leaves the worktree half converted.
+
+    Not the list to put on a make command line -- see
+    `command_targets_for_asset`.
     """
     found: List[str] = []
-    for rule in rules:
-        if not rule.is_converter:
-            continue
-        if relative_path in rule.prerequisites:
-            found.extend(t for t in rule.targets if t not in found)
+    for rule in _rules_for_asset(rules, relative_path):
+        found.extend(t for t in rule.targets if t not in found)
+    return sorted(found)
+
+
+def command_targets_for_asset(rules: Sequence[Rule], relative_path: str) -> List[str]:
+    """One target per rule that reads `relative_path`, sorted.
+
+    **Why this is not `targets_for_asset`.** A rule written `a b: prereqs`
+    with an ordinary `:` is not one rule with two outputs -- Make reads it
+    as two rules that share a recipe, and asking for both targets runs that
+    recipe twice. `src/dialog_data.c src/hub_data.c:` is exactly that shape,
+    so naming both ran `dialog_to_c.py` twice and wrote both files twice on
+    one press of Convert.
+
+    Naming one target per contributing rule fixes it without weakening the
+    guarantee: a multi-target recipe writes all of its outputs whichever
+    one was asked for, and `assets/maps/track.tmx` still contributes four
+    targets because its four outputs come from four separate recipes.
+
+    The rule's first-named target is the one asked for -- Makefile order,
+    which is where a rule's primary output is written. Two rules declaring
+    the same first target contribute it once: Make keeps one recipe for a
+    target, so asking twice would be asking for the same recipe twice.
+    """
+    found: List[str] = []
+    for rule in _rules_for_asset(rules, relative_path):
+        if rule.targets[0] not in found:
+            found.append(rule.targets[0])
     return sorted(found)
 
 
@@ -431,8 +467,11 @@ def plan_for(binding, asset, verification, rules: Sequence[Rule] = None) -> Plan
         )
 
     # `-W <asset>`: force the chain this asset feeds and nothing else. See
-    # the module docstring for why not `-B`.
-    argv = (MAKE_EXECUTABLE, "-W", asset.relative_path, *targets)
+    # the module docstring for why not `-B`. The command names one target
+    # per contributing rule, not every target: see
+    # `command_targets_for_asset` for why the two lists differ.
+    asked_for = command_targets_for_asset(rules, asset.relative_path)
+    argv = (MAKE_EXECUTABLE, "-W", asset.relative_path, *asked_for)
     rotation = any(
         rule.is_converter
         and any(t in targets for t in rule.targets)
@@ -440,7 +479,7 @@ def plan_for(binding, asset, verification, rules: Sequence[Rule] = None) -> Plan
         for rule in rules
     )
     return Plan(
-        commands=(Command(argv=argv, label=" ".join(argv), target=targets[0]),),
+        commands=(Command(argv=argv, label=" ".join(argv), target=asked_for[0]),),
         targets=tuple(targets),
         converters=_converters_for_targets(rules, targets),
         rotation=rotation,

@@ -72,8 +72,11 @@ MAKEFILE = """\
 src/player_sprite.c: assets/sprites/player_car.png tools/png_to_tiles.py
 \tpython tools/png_to_tiles.py --bank 255 assets/sprites/player_car.png src/player_sprite.c player_tile_data
 
-src/track_map.c: assets/maps/track.tmx tools/tmx_to_c.py
-\tpython tools/tmx_to_c.py assets/maps/track.tmx src/track_map.c
+# One recipe, two outputs -- the shape issue #13 turns on. Make reads
+# `a b:` as two rules sharing this recipe, so the card must name both
+# files and the command must ask for one.
+src/track_map.c src/track_meta.h: assets/maps/track.tmx tools/tmx_to_c.py
+\tpython tools/tmx_to_c.py assets/maps/track.tmx src/track_map.c --meta-out src/track_meta.h
 
 src/track_tiles.c: assets/maps/tileset.png tools/png_to_tiles.py
 \tpython tools/png_to_tiles.py --bank 255 --rotation-manifest build/m.json assets/maps/tileset.png src/track_tiles.c track_tile_data
@@ -388,6 +391,28 @@ class TestCostText(AssetsPanelTestCase):
         card = self.card_for("assets/sprites/player_car.png")
         self.assertFalse(card.plan.rotation)
         self.assertNotIn("base tiles only", card.cost_label.text())
+
+
+class TestMultiTargetRule(AssetsPanelTestCase):
+    """Issue #13: one recipe writing two files. The card names both, the
+    command asks for one -- naming both ran the converter twice, because
+    `a b:` is two rules sharing a recipe rather than one rule with two
+    outputs."""
+
+    def setUp(self):
+        super().setUp()
+        self.card = self.card_for("assets/maps/track.tmx")
+
+    def test_the_card_names_every_file_the_conversion_writes(self):
+        self.assertEqual(
+            self.card.target_label.text(), "→ src/track_map.c, src/track_meta.h"
+        )
+
+    def test_the_command_asks_for_one_target_per_rule(self):
+        self.assertEqual(
+            list(self.card.plan.commands[0].argv),
+            ["make", "-W", "assets/maps/track.tmx", "src/track_map.c"],
+        )
 
 
 class TestVerdict(AssetsPanelTestCase):
