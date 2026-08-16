@@ -4,18 +4,31 @@ file operations the panel needs (open, and "did it change?").
 No Qt import belongs in this module or anywhere under tools/garage/core/
 (R12): everything here is testable with no display.
 
-R1 names four kinds -- sprites, tiles, maps and music -- and AC1 asks for
-*every* file under assets/ in its correct group. Those two together mean a
-fifth group: `assets/dialog/*.json`, `assets/reference/**` and the Tiled
-project files are real files under assets/ that are none of the four, and
-dropping them would make the panel a filtered view that quietly disagrees
-with the directory it claims to list. They are listed as KIND_OTHER, with
-no converter and no preview -- which is the truth about them.
+R1 names four kinds -- sprites, tiles, maps and music -- and the panel
+shows those four and nothing else. `discover` drops everything else.
 
-The one thing "every file" does not stretch to is a dotfile. `.gitkeep`
-is there so git will carry an empty directory; it is git's file rather
-than the project's, and hand-verification of the panel rejected the three
-of them on sight. `discover` skips them -- see the comment there.
+**This was not the first reading.** AC1 asks for *every* file under
+assets/ in its correct group, and that was taken literally: a fifth group,
+KIND_OTHER, held whatever the four kinds did not claim, on the argument
+that dropping files would make the panel a filtered view that quietly
+disagrees with the directory it claims to list. Hand-verifying AC1 against
+the real repository settled it the other way (2026-08-16). The literal
+reading produced twenty-one cards of which seventeen were inert -- twelve
+reference screenshots, a Tiled project file, a build script, three
+`.gitkeep` placeholders, and source art the converters never read -- none
+of them previewable, costable or convertible. A group where five cards in
+six can only be opened is a file browser bolted to an asset panel, and
+Explorer already exists.
+
+**What that costs, stated rather than hidden.** Four of the dropped files
+are genuine build inputs: `assets/dialog/{npcs,hubs}.json`, which
+`dialog_to_c.py` turns into `src/dialog_data.c` and `src/hub_data.c`, and
+`assets/maps/{track,overmap}.tsx`, which the tileset rules read via
+`--tsx`. They no longer have a card, so they can no longer be converted
+from here. That was decided with the cost on the table: dialog gets its
+own editor in P3 (issue #4), and a `.tsx` is edited in Tiled beside the
+map it belongs to. If either turns out to be needed before P3 lands, the
+fix is a kind of its own rather than the return of a junk drawer.
 
 Every path resolves through `tools.garage.core.project.Binding` (R13).
 """
@@ -36,16 +49,20 @@ KIND_SPRITES = "sprites"
 KIND_TILES = "tiles"
 KIND_MAPS = "maps"
 KIND_MUSIC = "music"
-KIND_OTHER = "other"
+# Not a group. `classify` returns this for a file none of the four kinds
+# claims, and `discover` drops it -- so it never reaches a card, a label
+# or a filter chip. It stays a named value rather than a `None` because
+# "this file is not one of ours" is an answer `classify` should be able to
+# give in words, and its tests read better for it.
+KIND_UNHANDLED = "unhandled"
 
 # The order the panel shows the groups in, and the order `discover` sorts
-# by. R1's four kinds first, in the order R1 names them.
+# by. R1's four kinds, in the order R1 names them.
 KIND_ORDER: Tuple[str, ...] = (
     KIND_SPRITES,
     KIND_TILES,
     KIND_MAPS,
     KIND_MUSIC,
-    KIND_OTHER,
 )
 
 KIND_LABELS: Dict[str, str] = {
@@ -53,7 +70,6 @@ KIND_LABELS: Dict[str, str] = {
     KIND_TILES: "Tiles",
     KIND_MAPS: "Maps",
     KIND_MUSIC: "Music",
-    KIND_OTHER: "Other",
 }
 
 # Suffixes that decide a kind on their own, wherever the file sits.
@@ -91,7 +107,8 @@ def classify(relative_path: str) -> str:
 
     Suffix decides first, then directory: a `.tmx` is a map wherever it
     lives, and a `.png` beside the maps is a tileset rather than a map.
-    Anything left is KIND_OTHER -- see the module docstring.
+    Anything left is KIND_UNHANDLED, which `discover` drops -- see the
+    module docstring for why.
     """
     parts = relative_path.split("/")
     suffix = ("." + parts[-1].rsplit(".", 1)[1].lower()) if "." in parts[-1] else ""
@@ -111,7 +128,7 @@ def classify(relative_path: str) -> str:
         return KIND_TILES
     if directory == _SPRITE_DIR:
         return KIND_SPRITES
-    return KIND_OTHER
+    return KIND_UNHANDLED
 
 
 def assets_dir(binding) -> Path:
@@ -138,20 +155,21 @@ def discover(binding) -> List[Asset]:
             continue
         if path.name.startswith("."):
             # Git plumbing, not an asset. `.gitkeep` exists so git will
-            # carry an otherwise empty directory; it has nothing to
-            # preview, nothing to cost and no converter, and the three in
-            # this project landed in two different groups by the accident
-            # of which directory held them. A dotfile rule rather than a
-            # `.gitkeep` one so the next of them is covered the day it
-            # appears rather than the day someone spots it on a card.
+            # carry an otherwise empty directory. Checked separately from
+            # `classify` below because a dotfile under sprites/ would
+            # otherwise be classified a sprite by its directory, which is
+            # how three of them ended up on cards.
             continue
         relative = path.relative_to(worktree).as_posix()
+        kind = classify(relative)
+        if kind == KIND_UNHANDLED:
+            continue
         stat = path.stat()
         found.append(
             Asset(
                 path=path,
                 relative_path=relative,
-                kind=classify(relative),
+                kind=kind,
                 size_bytes=stat.st_size,
                 mtime_ns=stat.st_mtime_ns,
             )

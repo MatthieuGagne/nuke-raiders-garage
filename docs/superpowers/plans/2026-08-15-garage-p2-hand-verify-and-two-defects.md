@@ -560,22 +560,22 @@ Expected: a dialog titled for the active worktree, showing a status line, a row 
 
 - [ ] **Step 3: Check 1 — AC1, every file under `assets/` appears in its correct group**
 
-The status line should read `C:\Code\nuke-raider\assets · 51 files · N need attention` — the 54 Step 1 counted, less the three `.gitkeep` placeholders `discover` skips (see the dotfile rule in `tools/garage/core/assets.py`).
+The status line should read `C:\Code\nuke-raider\assets · 30 files · N need attention` — not the 54 Step 1 counted. `discover` lists the four kinds R1 names and drops everything else, so 24 of the 54 never reach a card: three `.gitkeep` placeholders, the twelve reference screenshots, the two dialog JSON, the two `.tsx`, the map-side `.aseprite`/`.xcf`, `create_assets.py` and the Tiled project file. See the module docstring in `tools/garage/core/assets.py` for why, and for what that costs.
 
 Click each chip and count the cards:
 
 | Chip | Expected | The interesting members |
 |---|---|---|
-| Sprites | 21 | the 11 `.png`, the 9 `.aseprite`, and `car-2.xcf` |
+| Sprites | 21 | the 11 `.png`, the 9 `.aseprite`, and `car-2.xcf` — the directory decides, so the source art is here beside what it exports to |
 | Tiles | 2 | `assets/maps/tileset.png` and `assets/maps/overmap_tiles.png` — tilesets live beside the maps but belong here |
 | Maps | 5 | `overmap.tmx`, `track.tmx`, `track2.tmx`, `track3.tmx`, `track_template.tmx` |
 | Music | 2 | `BeepBox-Song.uge` and `BeepBox-Song.mid` |
-| Other | 21 | `assets/dialog/hubs.json` and `npcs.json`; the twelve `v*_race*.png` reference screenshots; `overmap.tsx` and `track.tsx`; `create_assets.py`; `nuke-raider.tiled-project`; the two map-side `.aseprite`/`.xcf` |
 
-The three groups' worth of `Other` entries are there by design: AC1 asks for *every* file, and dropping the ones the four named kinds do not cover would make the panel a filtered view that quietly disagrees with the directory it claims to list.
+There is no fifth chip. Confirm the row of chips reads **All · Sprites · Tiles · Maps · Music** and nothing more.
 
-Two things to judge rather than assume:
-- **Settled during the first hand-verification pass, 2026-08-16:** no `.gitkeep` gets a card. The panel originally listed all three, on the reading that AC1 asks for *every* file — and they landed in different groups, the ones under `sprites/` and `tiles/` taking their directory's kind while the one under `music/` fell to Other, because music is decided by suffix and there is no music directory rule. The user rejected them on sight: a `.gitkeep` is git's file rather than the project's, with nothing to preview, cost or convert. `discover` now skips every dotfile, so the next one is covered before anyone sees it on a card.
+**Settled during the first hand-verification pass, 2026-08-16.** The panel originally read AC1 literally — *every* file under `assets/`, in a fifth group called Other for anything the four kinds did not claim. Seen against the real repository that group held twenty-one cards of which seventeen were inert, and the three `.gitkeep` placeholders split across two groups by the accident of which directory held them. Both were rejected on sight, in two passes: dotfiles first, then the fifth group entirely.
+
+What that costs is stated rather than hidden, and is worth re-reading if the panel ever feels like it is missing something: `assets/dialog/{npcs,hubs}.json` and `assets/maps/{track,overmap}.tsx` are genuine build inputs that no longer have a card, so they can no longer be converted from Garage. Dialog gets its own editor in P3 (issue #4); a `.tsx` is edited in Tiled beside its map.
 
 - [ ] **Step 4: Check 2 — AC2, a sprite preview reads as the art, in four shades, with a line every 8 pixels**
 

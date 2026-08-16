@@ -74,9 +74,10 @@ def bind_over(tmp_path: Path, game_repo: Path) -> project.Binding:
 
 
 class TestClassify(unittest.TestCase):
-    """R1: sprites, tiles, maps and music. AC1 says *every* file under
-    assets/ lands in a group, so anything that is none of the four gets
-    KIND_OTHER rather than being dropped."""
+    """R1: sprites, tiles, maps and music. Anything that is none of the
+    four classifies as KIND_UNHANDLED, which `discover` drops -- see its
+    tests below and the module docstring for why that reading of AC1 won
+    over the literal one."""
 
     def test_a_png_under_sprites_is_a_sprite(self):
         self.assertEqual(
@@ -114,15 +115,26 @@ class TestClassify(unittest.TestCase):
             assets.classify("assets/music/BeepBox-Song.mid"), assets.KIND_MUSIC
         )
 
-    def test_dialog_json_is_other_not_dropped(self):
+    def test_dialog_json_is_unhandled(self):
+        """Dialog JSON *does* feed a converter (`dialog_to_c.py` writes
+        src/dialog_data.c from it), so this one is a deliberate loss: the
+        four kinds are what the panel shows, and dialog gets its own tool
+        in P3 rather than a card here."""
         self.assertEqual(
-            assets.classify("assets/dialog/npcs.json"), assets.KIND_OTHER
+            assets.classify("assets/dialog/npcs.json"), assets.KIND_UNHANDLED
         )
 
-    def test_a_reference_image_is_other(self):
+    def test_a_reference_image_is_unhandled(self):
         self.assertEqual(
             assets.classify("assets/reference/micro-machines/v01_race01.png"),
-            assets.KIND_OTHER,
+            assets.KIND_UNHANDLED,
+        )
+
+    def test_a_tsx_beside_the_maps_is_unhandled(self):
+        """A Tiled tileset definition is a prerequisite of the tileset
+        rules, but it is not one of the four kinds and has no preview."""
+        self.assertEqual(
+            assets.classify("assets/maps/track.tsx"), assets.KIND_UNHANDLED
         )
 
 
@@ -147,16 +159,52 @@ class TestDiscover(unittest.TestCase):
 
             found = assets.discover(binding)
 
+            # `notes.txt` is here and `npcs.json` is not: kind is decided by
+            # directory as well as by suffix, so anything under sprites/ is
+            # a sprite whatever it is spelled, while dialog JSON is none of
+            # the four kinds and is dropped.
             self.assertEqual(
                 sorted(a.relative_path for a in found),
                 [
-                    "assets/dialog/npcs.json",
                     "assets/maps/tileset.png",
                     "assets/maps/track.tmx",
                     "assets/music/song.uge",
                     "assets/sprites/notes.txt",
                     "assets/sprites/player_car.png",
                 ],
+            )
+
+    def test_a_file_of_no_handled_kind_is_not_listed(self):
+        """Settled by hand-verification, 2026-08-16: the panel shows the
+        four kinds R1 names and nothing else. The literal reading of AC1 --
+        every file under assets/ -- filled a fifth group with twelve
+        reference screenshots, a Tiled project file and a build script,
+        none of which Garage can preview, cost or convert.
+
+        Two of the dropped files, the dialog JSON, *do* feed a converter.
+        That loss is deliberate and was taken with it stated: dialog gets
+        its own editor in P3 (issue #4) rather than a card here.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = tmp_root(tmp)
+            repo = make_game_repo(
+                root / "nuke-raider",
+                {
+                    "assets/sprites/player_car.png": "x",
+                    "assets/dialog/npcs.json": "{}",
+                    "assets/maps/track.tsx": "<tileset/>",
+                    "assets/maps/nuke-raider.tiled-project": "{}",
+                    "assets/maps/create_assets.py": "# build script",
+                    "assets/reference/shots/v01_race01.png": "x",
+                },
+            )
+            binding = bind_over(root, repo)
+
+            found = assets.discover(binding)
+
+            self.assertEqual(
+                [a.relative_path for a in found],
+                ["assets/sprites/player_car.png"],
             )
 
     def test_a_dotfile_is_not_an_asset(self):
@@ -623,16 +671,6 @@ class TestVerify(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertIsNone(result.png)
 
-    def test_an_other_kind_asset_has_nothing_to_verify(self):
-        (self.repo / "assets/dialog").mkdir(parents=True, exist_ok=True)
-        (self.repo / "assets/dialog/npcs.json").write_text("{}", encoding="utf-8")
-
-        result = assets.verify(
-            self.binding, self._asset("assets/dialog/npcs.json")
-        )
-
-        self.assertTrue(result.ok)
-
     def test_a_missing_converter_is_reported_as_a_problem_not_a_crash(self):
         write_indexed_png(self.repo / "assets/sprites/car.png", 8, 8, 4)
         (self.repo / "tools" / "png_to_tiles.py").unlink()
@@ -945,10 +983,13 @@ class TestPlanFor(unittest.TestCase):
         self.assertEqual(plan.converters, ("tmx_to_c.py",))
 
     def test_an_asset_no_rule_reads_refuses_and_says_so(self):
-        (self.repo / "assets/reference").mkdir(parents=True, exist_ok=True)
-        write_indexed_png(self.repo / "assets/reference/shot.png", 8, 8, 4)
+        """A sprite, so it is discovered and previewed like any other --
+        but no Makefile rule names it, so there is nothing to run. Art that
+        has been drawn but not yet wired into the build is the ordinary
+        case for this."""
+        write_indexed_png(self.repo / "assets/sprites/unused.png", 8, 8, 4)
 
-        plan = self._plan("assets/reference/shot.png")
+        plan = self._plan("assets/sprites/unused.png")
 
         self.assertFalse(plan.can_run)
         self.assertIn("Makefile", plan.refusal)
