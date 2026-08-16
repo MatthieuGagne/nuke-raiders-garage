@@ -560,7 +560,7 @@ Expected: a dialog titled for the active worktree, showing a status line, a row 
 
 - [ ] **Step 3: Check 1 — AC1, every file under `assets/` appears in its correct group**
 
-The status line should read `C:\Code\nuke-raider\assets · 30 files · N need attention` — not the 54 Step 1 counted. `discover` lists the four kinds R1 names and drops everything else, so 24 of the 54 never reach a card: three `.gitkeep` placeholders, the twelve reference screenshots, the two dialog JSON, the two `.tsx`, the map-side `.aseprite`/`.xcf`, `create_assets.py` and the Tiled project file. See the module docstring in `tools/garage/core/assets.py` for why, and for what that costs.
+The status line should read `C:\Code\nuke-raider\assets · 32 files · N need attention` — not the 54 Step 1 counted. `discover` lists the kinds Garage handles and drops everything else, so 22 of the 54 never reach a card: three `.gitkeep` placeholders, the twelve reference screenshots, the two `.tsx`, the map-side `.aseprite`/`.xcf`, `create_assets.py` and the Tiled project file. See the module docstring in `tools/garage/core/assets.py` for what earns a group, and for what the change still costs.
 
 Click each chip and count the cards:
 
@@ -570,12 +570,15 @@ Click each chip and count the cards:
 | Tiles | 2 | `assets/maps/tileset.png` and `assets/maps/overmap_tiles.png` — tilesets live beside the maps but belong here |
 | Maps | 5 | `overmap.tmx`, `track.tmx`, `track2.tmx`, `track3.tmx`, `track_template.tmx` |
 | Music | 2 | `BeepBox-Song.uge` and `BeepBox-Song.mid` |
+| Dialog | 2 | `assets/dialog/npcs.json` and `hubs.json` — no preview, but a working Convert: one rule writes `src/dialog_data.c` and `src/hub_data.c` from them |
 
-There is no fifth chip. Confirm the row of chips reads **All · Sprites · Tiles · Maps · Music** and nothing more.
+Confirm the row of chips reads **All · Sprites · Tiles · Maps · Music · Dialog** and nothing more. Press Convert on `npcs.json` and check the log echoes `make -W assets/dialog/npcs.json src/dialog_data.c src/hub_data.c` — both targets, since converting one without the other leaves the worktree half converted.
 
 **Settled during the first hand-verification pass, 2026-08-16.** The panel originally read AC1 literally — *every* file under `assets/`, in a fifth group called Other for anything the four kinds did not claim. Seen against the real repository that group held twenty-one cards of which seventeen were inert, and the three `.gitkeep` placeholders split across two groups by the accident of which directory held them. Both were rejected on sight, in two passes: dotfiles first, then the fifth group entirely.
 
-What that costs is stated rather than hidden, and is worth re-reading if the panel ever feels like it is missing something: `assets/dialog/{npcs,hubs}.json` and `assets/maps/{track,overmap}.tsx` are genuine build inputs that no longer have a card, so they can no longer be converted from Garage. Dialog gets its own editor in P3 (issue #4); a `.tsx` is edited in Tiled beside its map.
+Stating the cost is what changed the answer. Dropping the group would have taken `assets/dialog/{npcs,hubs}.json` with it — two files with a converter Garage can run — so dialog became a kind of its own instead. The rule that replaced "the four R1 names" is: a group is earned when a converter reads the file, or when Garage can show it.
+
+One cost remains, and is worth re-reading if the panel ever feels like it is missing something: `assets/maps/{track,overmap}.tsx` are build inputs the tileset rules read via `--tsx`, and they have no card. A `.tsx` is edited in Tiled beside its map rather than on its own. If that proves wrong, file it under Tiles beside the `tileset.png` it describes.
 
 - [ ] **Step 4: Check 2 — AC2, a sprite preview reads as the art, in four shades, with a line every 8 pixels**
 

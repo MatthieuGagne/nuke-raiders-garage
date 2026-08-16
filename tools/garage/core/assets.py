@@ -4,8 +4,16 @@ file operations the panel needs (open, and "did it change?").
 No Qt import belongs in this module or anywhere under tools/garage/core/
 (R12): everything here is testable with no display.
 
-R1 names four kinds -- sprites, tiles, maps and music -- and the panel
-shows those four and nothing else. `discover` drops everything else.
+R1 names four kinds -- sprites, tiles, maps and music -- and dialog is a
+fifth, added when the four proved to be a list of what R1 happened to
+name rather than a rule. `discover` drops everything else.
+
+**What earns a group.** A converter reads it, so Garage has something to
+run; or Garage can show it, so there is something to look at. Dialog
+qualifies on the first count -- `dialog_to_c.py` turns
+`assets/dialog/*.json` into `src/dialog_data.c` and `src/hub_data.c` --
+and it is the test to apply to the next candidate rather than asking
+whether R1 listed it.
 
 **This was not the first reading.** AC1 asks for *every* file under
 assets/ in its correct group, and that was taken literally: a fifth group,
@@ -20,15 +28,19 @@ of them previewable, costable or convertible. A group where five cards in
 six can only be opened is a file browser bolted to an asset panel, and
 Explorer already exists.
 
-**What that costs, stated rather than hidden.** Four of the dropped files
-are genuine build inputs: `assets/dialog/{npcs,hubs}.json`, which
-`dialog_to_c.py` turns into `src/dialog_data.c` and `src/hub_data.c`, and
-`assets/maps/{track,overmap}.tsx`, which the tileset rules read via
-`--tsx`. They no longer have a card, so they can no longer be converted
-from here. That was decided with the cost on the table: dialog gets its
-own editor in P3 (issue #4), and a `.tsx` is edited in Tiled beside the
-map it belongs to. If either turns out to be needed before P3 lands, the
-fix is a kind of its own rather than the return of a junk drawer.
+Dialog was in that group, and losing it was named as the cost of the
+change. It did not survive the naming: two files with a converter Garage
+can run is exactly what a card is for, and P3's dialog editor (issue #4)
+is a way off. So dialog became a kind rather than a casualty -- which is
+what the docstring above means by asking what earns a group instead of
+what R1 listed.
+
+**What the change still costs.** `assets/maps/{track,overmap}.tsx` are
+build inputs too -- the tileset rules read them via `--tsx` -- and they
+have no card. A `.tsx` is a Tiled tileset definition, edited in Tiled
+beside the map it belongs to and never on its own; if that turns out to be
+wrong, the answer is to file it under KIND_TILES beside the `tileset.png`
+it describes, not to bring back a junk drawer.
 
 Every path resolves through `tools.garage.core.project.Binding` (R13).
 """
@@ -49,6 +61,7 @@ KIND_SPRITES = "sprites"
 KIND_TILES = "tiles"
 KIND_MAPS = "maps"
 KIND_MUSIC = "music"
+KIND_DIALOG = "dialog"
 # Not a group. `classify` returns this for a file none of the four kinds
 # claims, and `discover` drops it -- so it never reaches a card, a label
 # or a filter chip. It stays a named value rather than a `None` because
@@ -57,12 +70,15 @@ KIND_MUSIC = "music"
 KIND_UNHANDLED = "unhandled"
 
 # The order the panel shows the groups in, and the order `discover` sorts
-# by. R1's four kinds, in the order R1 names them.
+# by. R1's four kinds first, in the order R1 names them, then dialog --
+# which R1 does not name but which earns a group the same way the others
+# do: `dialog_to_c.py` reads it, so it is an asset Garage can convert.
 KIND_ORDER: Tuple[str, ...] = (
     KIND_SPRITES,
     KIND_TILES,
     KIND_MAPS,
     KIND_MUSIC,
+    KIND_DIALOG,
 )
 
 KIND_LABELS: Dict[str, str] = {
@@ -70,6 +86,7 @@ KIND_LABELS: Dict[str, str] = {
     KIND_TILES: "Tiles",
     KIND_MAPS: "Maps",
     KIND_MUSIC: "Music",
+    KIND_DIALOG: "Dialog",
 }
 
 # Suffixes that decide a kind on their own, wherever the file sits.
@@ -81,6 +98,7 @@ IMAGE_SUFFIXES = (".png",)
 _SPRITE_DIR = "sprites"
 _TILE_DIR = "tiles"
 _MAP_DIR = "maps"
+_DIALOG_DIR = "dialog"
 
 
 @dataclass(frozen=True)
@@ -128,6 +146,11 @@ def classify(relative_path: str) -> str:
         return KIND_TILES
     if directory == _SPRITE_DIR:
         return KIND_SPRITES
+    if directory == _DIALOG_DIR:
+        # By directory rather than by `.json` suffix, for the same reason
+        # sprites are: what makes a file dialog is where the project keeps
+        # it, and a second format later should not need a rule of its own.
+        return KIND_DIALOG
     return KIND_UNHANDLED
 
 
