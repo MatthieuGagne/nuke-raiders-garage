@@ -701,9 +701,15 @@ class TestVerify(unittest.TestCase):
 
 
 # A Makefile fragment in the shape the game repository actually uses: a
-# continuation, several targets on one rule, an order-only prerequisite, a
+# continuation, several targets on one rule, one asset feeding several
+# independent single-target rules, an order-only prerequisite, a
 # recipe-less rule declaring side-effect outputs, an aseprite export rule
 # whose target is another asset, and a `$(TARGET):` line with no recipe.
+#
+# The two shapes that look alike and are not: `src/dialog_data.c
+# src/hub_data.c:` is *one* recipe writing two files, while track.tmx's
+# four rules are four recipes writing one file each. Issue #13 turns on
+# telling them apart, so the fixture holds both.
 SAMPLE_MAKEFILE = """\
 SHELL := bash
 BUILD_DIR ?= build
@@ -736,6 +742,12 @@ src/track_tiles.c: \\
 src/track_map.c: assets/maps/track.tmx build/track_tile_id_map.json tools/tmx_to_c.py
 \tpython tools/tmx_to_c.py --id-map build/track_tile_id_map.json \\
 \t    assets/maps/track.tmx src/track_map.c
+
+src/track_npc_externs.h: assets/maps/track.tmx tools/tmx_to_array_c.py
+\tpython tools/tmx_to_array_c.py --layer npcs assets/maps/track.tmx src/track_npc_externs.h
+
+src/track_powerup_externs.h: assets/maps/track.tmx tools/tmx_to_array_c.py
+\tpython tools/tmx_to_array_c.py --layer powerups assets/maps/track.tmx src/track_powerup_externs.h
 
 src/player_sprite.c: assets/sprites/player_car.png tools/png_to_tiles.py
 \tpython tools/png_to_tiles.py --bank 255 assets/sprites/player_car.png src/player_sprite.c player_tile_data
@@ -835,12 +847,22 @@ class TestTargetsForAsset(unittest.TestCase):
         )
 
     def test_a_map_names_every_target_it_feeds(self):
-        """Editing track.tmx regenerates the map *and* the rotation
-        manifest -- a converter run that did one and not the other would
-        leave the worktree half converted."""
+        """Editing track.tmx regenerates the map, the rotation manifest and
+        the two extern headers -- a converter run that did one and not the
+        others would leave the worktree half converted."""
         self.assertEqual(
             pipeline.targets_for_asset(self.rules, "assets/maps/track.tmx"),
-            ["build/track_rotation_manifest.json", "src/track_map.c"],
+            ["build/track_rotation_manifest.json", "src/track_map.c",
+             "src/track_npc_externs.h", "src/track_powerup_externs.h"],
+        )
+
+    def test_dialog_json_names_both_files_its_one_rule_writes(self):
+        """The label the card shows is "every file this conversion writes",
+        which is both of them even though the command line names one
+        (issue #13)."""
+        self.assertEqual(
+            pipeline.targets_for_asset(self.rules, "assets/dialog/npcs.json"),
+            ["src/dialog_data.c", "src/hub_data.c"],
         )
 
     def test_an_asset_no_rule_reads_names_nothing(self):
@@ -852,6 +874,52 @@ class TestTargetsForAsset(unittest.TestCase):
         self.assertEqual(
             pipeline.targets_for_asset(self.rules, "assets/maps/tileset.png"),
             ["src/track_tiles.c"],
+        )
+
+
+class TestCommandTargetsForAsset(unittest.TestCase):
+    """Issue #13: what goes on the `make` command line, which is not the
+    same list as what the conversion writes.
+
+    `a b: prereqs` with an ordinary `:` is two rules sharing a recipe, so
+    naming both targets runs that recipe twice. One target per contributing
+    rule forces every rule exactly once."""
+
+    def setUp(self):
+        self.rules = pipeline.parse_makefile(SAMPLE_MAKEFILE)
+
+    def test_a_multi_target_rule_contributes_one_target(self):
+        """The dialog rule writes both files whichever of them is asked
+        for, so asking for both is what ran dialog_to_c.py twice."""
+        self.assertEqual(
+            pipeline.command_targets_for_asset(
+                self.rules, "assets/dialog/npcs.json"
+            ),
+            ["src/dialog_data.c"],
+        )
+
+    def test_four_independent_rules_contribute_four_targets(self):
+        """The case the fix must not break: track.tmx's targets come from
+        four separate recipes, and dropping any of them leaves the worktree
+        half converted."""
+        self.assertEqual(
+            pipeline.command_targets_for_asset(self.rules, "assets/maps/track.tmx"),
+            ["build/track_rotation_manifest.json", "src/track_map.c",
+             "src/track_npc_externs.h", "src/track_powerup_externs.h"],
+        )
+
+    def test_a_sprite_names_its_one_target(self):
+        self.assertEqual(
+            pipeline.command_targets_for_asset(
+                self.rules, "assets/sprites/player_car.png"
+            ),
+            ["src/player_sprite.c"],
+        )
+
+    def test_an_asset_no_rule_reads_names_nothing(self):
+        self.assertEqual(
+            pipeline.command_targets_for_asset(self.rules, "assets/reference/x.png"),
+            [],
         )
 
 
@@ -990,9 +1058,10 @@ class TestPlanFor(unittest.TestCase):
         self.assertEqual(
             list(plan.commands[0].argv),
             ["make", "-W", "assets/maps/track.tmx",
-             "build/track_rotation_manifest.json", "src/track_map.c"],
+             "build/track_rotation_manifest.json", "src/track_map.c",
+             "src/track_npc_externs.h", "src/track_powerup_externs.h"],
         )
-        self.assertEqual(plan.converters, ("tmx_to_c.py",))
+        self.assertEqual(plan.converters, ("tmx_to_c.py", "tmx_to_array_c.py"))
 
     def test_an_asset_no_rule_reads_refuses_and_says_so(self):
         """A sprite, so it is discovered and previewed like any other --
@@ -1006,12 +1075,11 @@ class TestPlanFor(unittest.TestCase):
         self.assertFalse(plan.can_run)
         self.assertIn("Makefile", plan.refusal)
 
-    def test_dialog_json_gets_the_make_command_for_both_its_targets(self):
-        """The reason dialog has a group of its own rather than being
-        dropped with the inert files: it is a build input Garage can
-        actually convert. One rule writes two sources from it, and both
-        have to be named -- converting one without the other would leave
-        the worktree half converted."""
+    def test_dialog_json_names_one_target_and_labels_both(self):
+        """Issue #13. One rule writes both sources, so naming both on the
+        command line ran dialog_to_c.py twice on one press of Convert. The
+        command names one; `targets` still names both, because that is what
+        the card's `→ …` label and the success line report."""
         (self.repo / "assets/dialog").mkdir(parents=True, exist_ok=True)
         (self.repo / "assets/dialog/npcs.json").write_text("{}", encoding="utf-8")
         (self.repo / "assets/dialog/hubs.json").write_text("{}", encoding="utf-8")
@@ -1021,9 +1089,9 @@ class TestPlanFor(unittest.TestCase):
         self.assertTrue(plan.can_run)
         self.assertEqual(
             list(plan.commands[0].argv),
-            ["make", "-W", "assets/dialog/npcs.json",
-             "src/dialog_data.c", "src/hub_data.c"],
+            ["make", "-W", "assets/dialog/npcs.json", "src/dialog_data.c"],
         )
+        self.assertEqual(plan.targets, ("src/dialog_data.c", "src/hub_data.c"))
         self.assertIn("dialog_to_c.py", plan.converters)
 
     def test_a_uge_gets_the_two_music_validators(self):
