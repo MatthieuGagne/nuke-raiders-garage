@@ -810,6 +810,68 @@ class TestChangedOnDisk(AssetsPanelTestCase):
         self.assertTrue(card.is_changed())
 
 
+class TestVerificationBaseline(AssetsPanelTestCase):
+    """Issue #9, defect 2: the CHANGED mark is sticky by design -- only a
+    conversion clears it -- so a marked asset stays changed against the
+    baseline that drives the mark. Re-verifying off that same baseline
+    meant decoding the PNG and re-parsing the game repository's Makefile
+    on every two-second tick, per marked card, forever. The re-verify
+    needs a baseline of its own."""
+
+    def test_a_marked_asset_is_not_re_verified_on_every_tick(self):
+        card = self.card_for("assets/sprites/player_car.png")
+        write_indexed_png(card.asset.path, 24, 8, 4)
+        self.panel.check_for_changes()
+        self.assertTrue(card.is_changed())
+
+        with mock.patch.object(
+            assets_core, "verify", wraps=assets_core.verify
+        ) as verify:
+            self.panel.check_for_changes()
+            self.panel.check_for_changes()
+
+        # Still marked -- the mark outlives the tick, which is the whole
+        # point of `_stamps` not moving -- but the work is done once.
+        self.assertTrue(card.is_changed())
+        self.assertEqual(verify.call_count, 0)
+
+    def test_a_second_edit_of_a_marked_asset_is_verified_again(self):
+        """The trap in the other direction, and the reason the fix is a
+        second baseline rather than "skip if already marked": that
+        shortcut would keep the verification from the *first* edit, so a
+        card would go on showing OK about a file the second edit broke."""
+        card = self.card_for("assets/sprites/player_car.png")
+        write_indexed_png(card.asset.path, 24, 8, 4)
+        self.panel.check_for_changes()
+        self.assertTrue(card.is_changed())
+        self.assertTrue(card.verification.ok)
+
+        write_indexed_png(card.asset.path, 8, 8, 9)  # nine colours
+        self.panel.check_for_changes()
+
+        self.assertFalse(card.verification.ok)
+        self.assertIn("9", card.verdict_label.text())
+        self.assertFalse(card.convert_button.isEnabled())
+
+    def test_a_re_plan_uses_the_rules_the_panel_already_parsed(self):
+        """`plan_for` with no rules re-reads and re-parses the game
+        repository's Makefile. The panel parsed it in `refresh()`; the
+        poll must not do it again."""
+        card = self.card_for("assets/sprites/player_car.png")
+        write_indexed_png(card.asset.path, 24, 8, 4)
+
+        with mock.patch.object(
+            pipeline, "read_rules", wraps=pipeline.read_rules
+        ) as read_rules:
+            self.panel.check_for_changes()
+
+        self.assertTrue(card.is_changed())
+        self.assertEqual(read_rules.call_count, 0)
+        # And the cached rules were the real ones: an empty rule list
+        # would have produced a refusal with no target at all.
+        self.assertEqual(card.plan.targets, ("src/player_sprite.c",))
+
+
 class TestGeneratedFilesAreReadOnly(AssetsPanelTestCase):
     """AC10: Garage offers no way to edit a generated file."""
 

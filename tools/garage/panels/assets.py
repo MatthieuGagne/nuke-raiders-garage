@@ -431,10 +431,30 @@ class AssetsPanel(QWidget):
         # What each listed asset looked like when Garage last stamped it,
         # and which ones are known to have changed since. Both live on the
         # panel rather than on the cards, because `refresh()` destroys and
-        # rebuilds every card. Task 9 is what fills them; a successful
-        # conversion below is what clears a mark.
+        # rebuilds every card. A successful conversion below is what clears
+        # a mark.
         self._stamps: Dict[str, assets_core.Stamp] = {}
         self._changed_paths: set = set()
+        # A second, independent baseline: what each asset looked like when
+        # Garage last *verified* it. The two answer different questions and
+        # move at different times. `_stamps` answers "has this changed since
+        # Garage last watched it?", which drives the CHANGED mark, and it
+        # must not move until a conversion answers the offer. `_verified`
+        # answers "has this changed since Garage last decoded it?", which
+        # decides whether `check_for_changes` needs to re-verify, and it
+        # moves on every verify. One dict cannot do both: a marked asset
+        # stays changed against `_stamps` until it is converted, so a single
+        # baseline meant re-decoding the PNG and re-parsing the game
+        # repository's Makefile on every tick, per marked card, forever
+        # (issue #9, defect 2).
+        self._verified: Dict[str, assets_core.Stamp] = {}
+        # The active worktree's parsed Makefile rules, read once per
+        # `refresh()` and handed to `plan_for` rather than letting it read
+        # the file itself. `None` means they could not be read, which
+        # `plan_for` treats as "read them yourself" -- that branch is what
+        # reproduces the PipelineError as each card's refusal, so `None` and
+        # `[]` are not interchangeable here.
+        self._rules: Optional[List[pipeline.Rule]] = None
 
         self._generated: set = set()
         self._poll = QTimer(self)
@@ -459,6 +479,12 @@ class AssetsPanel(QWidget):
             card.setParent(None)
             card.deleteLater()
         self._cards = []
+        # Both describe the cards this method is about to build, so both
+        # are rebuilt from scratch: an entry for a file that has since
+        # vanished should not survive. `_stamps` and `_changed_paths` are
+        # deliberately *not* reset -- see the `setdefault` below.
+        self._verified = {}
+        self._rules = None
 
         if self.binding is None:
             self.status_label.setText(
@@ -480,6 +506,7 @@ class AssetsPanel(QWidget):
             # cause is stated once; every card should say it too.
             rules = None
             self.append_line(exc.message)
+        self._rules = rules
 
         found = assets_core.discover(self.binding)
         if not found:
@@ -490,6 +517,11 @@ class AssetsPanel(QWidget):
 
         problems = 0
         for asset in found:
+            # Stamped *before* verifying, not after: if the file changes
+            # while this loop runs, the older stamp is what makes the next
+            # poll re-verify it, instead of trusting a verification of a
+            # file that has already moved on.
+            self._verified[asset.relative_path] = assets_core.stamp(asset.path)
             verification = assets_core.verify(self.binding, asset)
             plan = pipeline.plan_for(self.binding, asset, verification, rules)
             image = None
@@ -621,6 +653,16 @@ class AssetsPanel(QWidget):
         `refresh()`, which destroys and rebuilds every card -- a rebuild
         while a converter is running would delete the very widget the run
         reports its result to.
+
+        That re-verify is gated on `_verified`, not on `_stamps`. The mark
+        is sticky by design, so `_stamps` goes on reporting a change every
+        tick until a conversion answers it; gating the decode on the same
+        baseline meant re-decoding the file and re-parsing the Makefile
+        every two seconds, forever, for each marked card. `_verified`
+        moves on every verify, which collapses that to once per edit.
+        Do not replace it with "skip whenever the path is already marked":
+        an asset edited twice would keep the verification from the first
+        edit.
         """
         for card in self._cards:
             relative = card.asset.relative_path
@@ -630,17 +672,25 @@ class AssetsPanel(QWidget):
                 # Defensive: `refresh()` stamps every card it builds, so a
                 # listed asset always has a baseline by the time the timer
                 # fires. A missing one would otherwise reach `has_changed`
-                # as None.
+                # as None. `_verified` is deliberately left alone -- this
+                # card has not been verified against this state, and the
+                # next tick that sees a change should say so.
                 self._stamps[relative] = after
                 continue
-            if assets_core.has_changed(before, after):
-                # Remembered on the panel, not only on the card: the card is
-                # thrown away and rebuilt by every `refresh()`.
-                self._changed_paths.add(relative)
+            if not assets_core.has_changed(before, after):
+                continue
+            # Remembered on the panel, not only on the card: the card is
+            # thrown away and rebuilt by every `refresh()`.
+            self._changed_paths.add(relative)
+            verified = self._verified.get(relative)
+            if verified is None or assets_core.has_changed(verified, after):
                 verification = assets_core.verify(self.binding, card.asset)
-                plan = pipeline.plan_for(self.binding, card.asset, verification)
+                plan = pipeline.plan_for(
+                    self.binding, card.asset, verification, self._rules
+                )
                 card.apply_verification(verification, plan)
-                card.set_changed(True)
+                self._verified[relative] = after
+            card.set_changed(True)
 
     def convert(self, card: AssetCard) -> None:
         """Run the converter for `card`'s asset (R6/R7).
