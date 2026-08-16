@@ -12,6 +12,11 @@ dropping them would make the panel a filtered view that quietly disagrees
 with the directory it claims to list. They are listed as KIND_OTHER, with
 no converter and no preview -- which is the truth about them.
 
+The one thing "every file" does not stretch to is a dotfile. `.gitkeep`
+is there so git will carry an empty directory; it is git's file rather
+than the project's, and hand-verification of the panel rejected the three
+of them on sight. `discover` skips them -- see the comment there.
+
 Every path resolves through `tools.garage.core.project.Binding` (R13).
 """
 from __future__ import annotations
@@ -130,6 +135,15 @@ def discover(binding) -> List[Asset]:
     found: List[Asset] = []
     for path in sorted(root.rglob("*")):
         if not path.is_file():
+            continue
+        if path.name.startswith("."):
+            # Git plumbing, not an asset. `.gitkeep` exists so git will
+            # carry an otherwise empty directory; it has nothing to
+            # preview, nothing to cost and no converter, and the three in
+            # this project landed in two different groups by the accident
+            # of which directory held them. A dotfile rule rather than a
+            # `.gitkeep` one so the next of them is covered the day it
+            # appears rather than the day someone spots it on a card.
             continue
         relative = path.relative_to(worktree).as_posix()
         stat = path.stat()

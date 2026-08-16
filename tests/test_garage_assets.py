@@ -159,6 +159,39 @@ class TestDiscover(unittest.TestCase):
                 ],
             )
 
+    def test_a_dotfile_is_not_an_asset(self):
+        """AC1 asks for every file under assets/, and `.gitkeep` is not one
+        of them in any sense the user cares about: it is a placeholder that
+        exists so git will carry an otherwise empty directory, and there is
+        nothing to preview, cost or convert. Hand-verification of the panel
+        rejected them on sight — three cards for git plumbing, split across
+        two groups by an accident of which directory they sat in.
+
+        The rule is dotfiles rather than `.gitkeep` by name so the next one
+        (`.gitattributes`, `.DS_Store`, an editor's turd) is covered the day
+        it appears rather than the day someone notices it on a card.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = tmp_root(tmp)
+            repo = make_game_repo(
+                root / "nuke-raider",
+                {
+                    "assets/sprites/player_car.png": "x",
+                    "assets/sprites/.gitkeep": "",
+                    "assets/tiles/.gitkeep": "",
+                    "assets/music/.gitkeep": "",
+                    "assets/.gitattributes": "* text=auto",
+                },
+            )
+            binding = bind_over(root, repo)
+
+            found = assets.discover(binding)
+
+            self.assertEqual(
+                [a.relative_path for a in found],
+                ["assets/sprites/player_car.png"],
+            )
+
     def test_it_lists_nothing_and_does_not_raise_without_an_assets_dir(self):
         """A worktree checked out without assets/ is a state Garage must
         report, not crash on."""
