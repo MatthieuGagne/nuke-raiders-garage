@@ -190,6 +190,7 @@ class AssetCard(QWidget):
         self.verification = verification
         self.plan = plan
         self._changed = False
+        self._busy = False
 
         layout = QVBoxLayout(self)
 
@@ -276,10 +277,23 @@ class AssetCard(QWidget):
             self.verdict_label.setText("OK")
             self.convert_button.setText("Convert")
             self._set_verdict_property("pass")
-        self.convert_button.setEnabled(self.plan.can_run)
-        self.convert_button.setToolTip(
-            "" if self.plan.can_run else (self.plan.refusal or "")
-        )
+        # `and not self._busy`: this method is the single place that
+        # decides whether Convert is offered, and it is reached from four
+        # directions -- the card being built, a poll re-verifying it,
+        # `convert()` re-verifying it, and `set_busy` below. Reading the
+        # busy state here is what stops any of the first three from
+        # re-enabling a button a run in flight disabled (issue #9,
+        # defect 1). Before this, `_set_busy` and `_apply_verdict` both
+        # wrote that button's enabled state and disagreed about it.
+        self.convert_button.setEnabled(self.plan.can_run and not self._busy)
+        if self._busy:
+            tooltip = (
+                "A converter is running. This is offered again when it "
+                "finishes."
+            )
+        else:
+            tooltip = "" if self.plan.can_run else (self.plan.refusal or "")
+        self.convert_button.setToolTip(tooltip)
 
     def _set_verdict_property(self, value: str) -> None:
         for widget in (self, self.verdict_label):
@@ -297,6 +311,24 @@ class AssetCard(QWidget):
         if changed == self._changed:
             return
         self._changed = changed
+        self._apply_verdict()
+
+    def set_busy(self, busy: bool) -> None:
+        """A converter is running somewhere in the panel (or has just
+        stopped). While one is, this card offers neither action: two runs
+        at once would interleave two tools' output in one log and race
+        over the same generated file, and Open is withheld with it so the
+        user is not editing an asset a converter is mid-way through
+        reading.
+
+        The state is remembered rather than applied straight to the
+        buttons, because a card recomputes its own Convert button every
+        time it is re-verified -- see `_apply_verdict`.
+        """
+        if busy == self._busy:
+            return
+        self._busy = busy
+        self.open_button.setEnabled(not busy)
         self._apply_verdict()
 
     def apply_verification(self, verification, plan) -> None:
@@ -489,6 +521,10 @@ class AssetsPanel(QWidget):
         for card in self._cards:
             if card.asset.relative_path in self._changed_paths:
                 card.set_changed(True)
+        # A rebuilt card is a fresh widget that knows nothing of a run in
+        # flight -- and a worktree switch, which is one of the things that
+        # rebuilds this grid, can happen while one is.
+        self._set_busy(self._runs.is_running())
         # R10's read-only set, derived from the Makefile rather than
         # listed: a converter rule added to the game repository is covered
         # the day it lands. `rules or []`: a missing Makefile (rules is
@@ -668,9 +704,17 @@ class AssetsPanel(QWidget):
         self.append_line(f"$ {label}")
 
     def _set_busy(self, busy: bool) -> None:
+        """Every card learns that a run started or finished.
+
+        Pushed into the cards rather than applied to their buttons from
+        here: a card that is re-verified while a run is in flight redraws
+        its own Convert button, and this loop cannot reach forward in time
+        to stop it (issue #9, defect 1). `AssetCard.set_busy` is where the
+        two facts -- "a run is in flight" and "this asset's plan can run"
+        -- are combined, in one place.
+        """
         for card in self._cards:
-            card.convert_button.setEnabled(not busy and card.plan.can_run)
-            card.open_button.setEnabled(not busy)
+            card.set_busy(busy)
 
     def _on_run_finished(self, results) -> None:
         card, self._running_card = self._running_card, None

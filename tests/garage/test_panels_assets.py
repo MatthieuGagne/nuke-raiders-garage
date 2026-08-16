@@ -562,6 +562,78 @@ class TestConvert(AssetsPanelTestCase):
         self.assertIn("music_wire_check.py", commands[1].label)
 
 
+class TestBusyDuringARun(AssetsPanelTestCase):
+    """Issue #9, defect 1: while a converter runs, no card offers an
+    action -- and nothing that redraws a card in the meantime may put one
+    back. `_set_busy(True)` is what disables the buttons; a poll tick, a
+    refused second Convert and a grid rebuild all redraw cards, and each
+    one used to undo it."""
+
+    def setUp(self):
+        super().setUp()
+        self.panel._runs.stop_and_wait()
+        self.fake = _FakeRuns(self.panel)
+        self.panel._runs = self.fake
+
+    def test_a_poll_during_a_run_leaves_every_convert_button_disabled(self):
+        """The defect itself: `check_for_changes` re-verifies a card that
+        moved on disk, and re-verifying used to re-enable its Convert
+        button -- a button that looks live for up to two seconds and
+        answers by refusing."""
+        running = self.card_for("assets/sprites/player_car.png")
+        other = self.card_for("assets/maps/tileset.png")
+        self.panel.convert(running)
+        self.assertFalse(other.convert_button.isEnabled())
+
+        write_indexed_png(other.asset.path, 32, 8, 4)
+        self.panel.check_for_changes()
+
+        # The poll really did re-verify it -- otherwise this test would
+        # pass against a panel that simply never polls.
+        self.assertTrue(other.is_changed())
+        self.assertFalse(other.convert_button.isEnabled())
+        self.assertFalse(other.open_button.isEnabled())
+
+    def test_a_refused_second_convert_leaves_the_button_disabled(self):
+        """The same defect through the other door: `convert()` re-verifies
+        and redraws the card *before* it discovers a run is already in
+        flight."""
+        card = self.card_for("assets/sprites/player_car.png")
+        self.panel.convert(card)
+
+        self.panel.convert(card)
+
+        self.assertIn("already running", self.panel.log_text())
+        self.assertFalse(card.convert_button.isEnabled())
+
+    def test_a_grid_rebuilt_during_a_run_offers_no_action(self):
+        """`refresh()` builds fresh widgets that know nothing of the run,
+        and a worktree switch -- which rebuilds this grid -- can happen
+        while one is in flight."""
+        card = self.card_for("assets/sprites/player_car.png")
+        self.panel.convert(card)
+
+        self.panel.refresh()
+
+        rebuilt = self.card_for("assets/sprites/player_car.png")
+        self.assertFalse(rebuilt.convert_button.isEnabled())
+        self.assertFalse(rebuilt.open_button.isEnabled())
+
+    def test_the_actions_come_back_when_the_run_finishes(self):
+        """The disable must be exactly as long as the run: a card left
+        dead after a successful conversion would be worse than the
+        defect."""
+        card = self.card_for("assets/sprites/player_car.png")
+        other = self.card_for("assets/maps/tileset.png")
+        self.panel.convert(card)
+
+        self.fake.finish([_Result(ok=True)])
+
+        self.assertTrue(other.convert_button.isEnabled())
+        self.assertTrue(other.open_button.isEnabled())
+        self.assertTrue(card.open_button.isEnabled())
+
+
 class TestConvertEchoesOnlyCommandsThatRan(AssetsPanelTestCase):
     """FIX 6: the log must attribute a `$ ...` line only to a command that
     actually started -- not to every command in a plan, echoed up front,
