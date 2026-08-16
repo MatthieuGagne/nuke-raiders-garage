@@ -560,23 +560,25 @@ Expected: a dialog titled for the active worktree, showing a status line, a row 
 
 - [ ] **Step 3: Check 1 — AC1, every file under `assets/` appears in its correct group**
 
-The status line should read `C:\Code\nuke-raider\assets · 54 files · N need attention` — the same 54 Step 1 counted.
+The status line should read `C:\Code\nuke-raider\assets · 32 files · N need attention` — not the 54 Step 1 counted. `discover` lists the kinds Garage handles and drops everything else, so 22 of the 54 never reach a card: three `.gitkeep` placeholders, the twelve reference screenshots, the two `.tsx`, the map-side `.aseprite`/`.xcf`, `create_assets.py` and the Tiled project file. See the module docstring in `tools/garage/core/assets.py` for what earns a group, and for what the change still costs.
 
 Click each chip and count the cards:
 
 | Chip | Expected | The interesting members |
 |---|---|---|
-| Sprites | 22 | the 11 `.png`, the 9 `.aseprite`, `car-2.xcf`, and `.gitkeep` |
-| Tiles | 3 | `assets/maps/tileset.png` and `assets/maps/overmap_tiles.png` — tilesets live beside the maps but belong here — plus `assets/tiles/.gitkeep` |
+| Sprites | 21 | the 11 `.png`, the 9 `.aseprite`, and `car-2.xcf` — the directory decides, so the source art is here beside what it exports to |
+| Tiles | 2 | `assets/maps/tileset.png` and `assets/maps/overmap_tiles.png` — tilesets live beside the maps but belong here |
 | Maps | 5 | `overmap.tmx`, `track.tmx`, `track2.tmx`, `track3.tmx`, `track_template.tmx` |
 | Music | 2 | `BeepBox-Song.uge` and `BeepBox-Song.mid` |
-| Other | 22 | `assets/dialog/hubs.json` and `npcs.json`; the twelve `v*_race*.png` reference screenshots; `overmap.tsx` and `track.tsx`; `create_assets.py`; `nuke-raider.tiled-project`; the two map-side `.aseprite`/`.xcf`; `assets/music/.gitkeep` |
+| Dialog | 2 | `assets/dialog/npcs.json` and `hubs.json` — no preview, but a working Convert: one rule writes `src/dialog_data.c` and `src/hub_data.c` from them |
 
-The three groups' worth of `Other` entries are there by design: AC1 asks for *every* file, and dropping the ones the four named kinds do not cover would make the panel a filtered view that quietly disagrees with the directory it claims to list.
+Confirm the row of chips reads **All · Sprites · Tiles · Maps · Music · Dialog** and nothing more. Press Convert on `npcs.json` and check the log echoes `make -W assets/dialog/npcs.json src/dialog_data.c src/hub_data.c` — both targets, since converting one without the other leaves the worktree half converted.
 
-Two things to judge rather than assume:
-- A `.gitkeep` gets a card. It is a file under `assets/`, so AC1 says it should — but decide whether you agree.
-- The three `.gitkeep` files land in *different* groups: the ones under `sprites/` and `tiles/` take their directory's kind, while the one under `music/` falls to Other, because music is decided by suffix and there is no music directory rule. If you judge that wrong, it is a finding — file it, do not fix it here.
+**Settled during the first hand-verification pass, 2026-08-16.** The panel originally read AC1 literally — *every* file under `assets/`, in a fifth group called Other for anything the four kinds did not claim. Seen against the real repository that group held twenty-one cards of which seventeen were inert, and the three `.gitkeep` placeholders split across two groups by the accident of which directory held them. Both were rejected on sight, in two passes: dotfiles first, then the fifth group entirely.
+
+Stating the cost is what changed the answer. Dropping the group would have taken `assets/dialog/{npcs,hubs}.json` with it — two files with a converter Garage can run — so dialog became a kind of its own instead. The rule that replaced "the four R1 names" is: a group is earned when a converter reads the file, or when Garage can show it.
+
+One cost remains, and is worth re-reading if the panel ever feels like it is missing something: `assets/maps/{track,overmap}.tsx` are build inputs the tileset rules read via `--tsx`, and they have no card. A `.tsx` is edited in Tiled beside its map rather than on its own. If that proves wrong, file it under Tiles beside the `tileset.png` it describes.
 
 - [ ] **Step 4: Check 2 — AC2, a sprite preview reads as the art, in four shades, with a line every 8 pixels**
 
@@ -647,7 +649,7 @@ Press **Open** on the `player_car.png` card.
 
 Expected: whatever application Windows associates with `.png` starts and shows the sprite, and the log says `Opened player_car.png in the application Windows associates with that file type.` Garage names no editor and holds no setting for one, so this is entirely the Windows association — if the wrong program opens, that is the association, not a defect.
 
-**Do not press Open on a `.gitkeep`, `.aseprite` or `.xcf` card unless you want the "How do you want to open this file?" chooser.** A file type with no association either raises and produces a log line naming the file and suggesting Explorer's *Open with ▸ Choose another app*, or opens that chooser. Both are acceptable; the chooser is a modal dialog, so dismiss it before touching the window again.
+**Do not press Open on an `.aseprite` or `.xcf` card unless you want the "How do you want to open this file?" chooser.** A file type with no association either raises and produces a log line naming the file and suggesting Explorer's *Open with ▸ Choose another app*, or opens that chooser. Both are acceptable; the chooser is a modal dialog, so dismiss it before touching the window again.
 
 - [ ] **Step 9: Check 7 — AC9, the change is noticed, marked, and survives a reopen**
 

@@ -4,13 +4,43 @@ file operations the panel needs (open, and "did it change?").
 No Qt import belongs in this module or anywhere under tools/garage/core/
 (R12): everything here is testable with no display.
 
-R1 names four kinds -- sprites, tiles, maps and music -- and AC1 asks for
-*every* file under assets/ in its correct group. Those two together mean a
-fifth group: `assets/dialog/*.json`, `assets/reference/**` and the Tiled
-project files are real files under assets/ that are none of the four, and
-dropping them would make the panel a filtered view that quietly disagrees
-with the directory it claims to list. They are listed as KIND_OTHER, with
-no converter and no preview -- which is the truth about them.
+R1 names four kinds -- sprites, tiles, maps and music -- and dialog is a
+fifth, added when the four proved to be a list of what R1 happened to
+name rather than a rule. `discover` drops everything else.
+
+**What earns a group.** A converter reads it, so Garage has something to
+run; or Garage can show it, so there is something to look at. Dialog
+qualifies on the first count -- `dialog_to_c.py` turns
+`assets/dialog/*.json` into `src/dialog_data.c` and `src/hub_data.c` --
+and it is the test to apply to the next candidate rather than asking
+whether R1 listed it.
+
+**This was not the first reading.** AC1 asks for *every* file under
+assets/ in its correct group, and that was taken literally: a fifth group,
+KIND_OTHER, held whatever the four kinds did not claim, on the argument
+that dropping files would make the panel a filtered view that quietly
+disagrees with the directory it claims to list. Hand-verifying AC1 against
+the real repository settled it the other way (2026-08-16). The literal
+reading produced twenty-one cards of which seventeen were inert -- twelve
+reference screenshots, a Tiled project file, a build script, three
+`.gitkeep` placeholders, and source art the converters never read -- none
+of them previewable, costable or convertible. A group where five cards in
+six can only be opened is a file browser bolted to an asset panel, and
+Explorer already exists.
+
+Dialog was in that group, and losing it was named as the cost of the
+change. It did not survive the naming: two files with a converter Garage
+can run is exactly what a card is for, and P3's dialog editor (issue #4)
+is a way off. So dialog became a kind rather than a casualty -- which is
+what the docstring above means by asking what earns a group instead of
+what R1 listed.
+
+**What the change still costs.** `assets/maps/{track,overmap}.tsx` are
+build inputs too -- the tileset rules read them via `--tsx` -- and they
+have no card. A `.tsx` is a Tiled tileset definition, edited in Tiled
+beside the map it belongs to and never on its own; if that turns out to be
+wrong, the answer is to file it under KIND_TILES beside the `tileset.png`
+it describes, not to bring back a junk drawer.
 
 Every path resolves through `tools.garage.core.project.Binding` (R13).
 """
@@ -31,16 +61,24 @@ KIND_SPRITES = "sprites"
 KIND_TILES = "tiles"
 KIND_MAPS = "maps"
 KIND_MUSIC = "music"
-KIND_OTHER = "other"
+KIND_DIALOG = "dialog"
+# Not a group. `classify` returns this for a file none of the four kinds
+# claims, and `discover` drops it -- so it never reaches a card, a label
+# or a filter chip. It stays a named value rather than a `None` because
+# "this file is not one of ours" is an answer `classify` should be able to
+# give in words, and its tests read better for it.
+KIND_UNHANDLED = "unhandled"
 
 # The order the panel shows the groups in, and the order `discover` sorts
-# by. R1's four kinds first, in the order R1 names them.
+# by. R1's four kinds first, in the order R1 names them, then dialog --
+# which R1 does not name but which earns a group the same way the others
+# do: `dialog_to_c.py` reads it, so it is an asset Garage can convert.
 KIND_ORDER: Tuple[str, ...] = (
     KIND_SPRITES,
     KIND_TILES,
     KIND_MAPS,
     KIND_MUSIC,
-    KIND_OTHER,
+    KIND_DIALOG,
 )
 
 KIND_LABELS: Dict[str, str] = {
@@ -48,7 +86,7 @@ KIND_LABELS: Dict[str, str] = {
     KIND_TILES: "Tiles",
     KIND_MAPS: "Maps",
     KIND_MUSIC: "Music",
-    KIND_OTHER: "Other",
+    KIND_DIALOG: "Dialog",
 }
 
 # Suffixes that decide a kind on their own, wherever the file sits.
@@ -60,6 +98,7 @@ IMAGE_SUFFIXES = (".png",)
 _SPRITE_DIR = "sprites"
 _TILE_DIR = "tiles"
 _MAP_DIR = "maps"
+_DIALOG_DIR = "dialog"
 
 
 @dataclass(frozen=True)
@@ -86,7 +125,8 @@ def classify(relative_path: str) -> str:
 
     Suffix decides first, then directory: a `.tmx` is a map wherever it
     lives, and a `.png` beside the maps is a tileset rather than a map.
-    Anything left is KIND_OTHER -- see the module docstring.
+    Anything left is KIND_UNHANDLED, which `discover` drops -- see the
+    module docstring for why.
     """
     parts = relative_path.split("/")
     suffix = ("." + parts[-1].rsplit(".", 1)[1].lower()) if "." in parts[-1] else ""
@@ -106,7 +146,12 @@ def classify(relative_path: str) -> str:
         return KIND_TILES
     if directory == _SPRITE_DIR:
         return KIND_SPRITES
-    return KIND_OTHER
+    if directory == _DIALOG_DIR:
+        # By directory rather than by `.json` suffix, for the same reason
+        # sprites are: what makes a file dialog is where the project keeps
+        # it, and a second format later should not need a rule of its own.
+        return KIND_DIALOG
+    return KIND_UNHANDLED
 
 
 def assets_dir(binding) -> Path:
@@ -131,13 +176,23 @@ def discover(binding) -> List[Asset]:
     for path in sorted(root.rglob("*")):
         if not path.is_file():
             continue
+        if path.name.startswith("."):
+            # Git plumbing, not an asset. `.gitkeep` exists so git will
+            # carry an otherwise empty directory. Checked separately from
+            # `classify` below because a dotfile under sprites/ would
+            # otherwise be classified a sprite by its directory, which is
+            # how three of them ended up on cards.
+            continue
         relative = path.relative_to(worktree).as_posix()
+        kind = classify(relative)
+        if kind == KIND_UNHANDLED:
+            continue
         stat = path.stat()
         found.append(
             Asset(
                 path=path,
                 relative_path=relative,
-                kind=classify(relative),
+                kind=kind,
                 size_bytes=stat.st_size,
                 mtime_ns=stat.st_mtime_ns,
             )

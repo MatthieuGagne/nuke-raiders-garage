@@ -74,9 +74,10 @@ def bind_over(tmp_path: Path, game_repo: Path) -> project.Binding:
 
 
 class TestClassify(unittest.TestCase):
-    """R1: sprites, tiles, maps and music. AC1 says *every* file under
-    assets/ lands in a group, so anything that is none of the four gets
-    KIND_OTHER rather than being dropped."""
+    """R1: sprites, tiles, maps and music. Anything that is none of the
+    four classifies as KIND_UNHANDLED, which `discover` drops -- see its
+    tests below and the module docstring for why that reading of AC1 won
+    over the literal one."""
 
     def test_a_png_under_sprites_is_a_sprite(self):
         self.assertEqual(
@@ -114,15 +115,33 @@ class TestClassify(unittest.TestCase):
             assets.classify("assets/music/BeepBox-Song.mid"), assets.KIND_MUSIC
         )
 
-    def test_dialog_json_is_other_not_dropped(self):
+    def test_dialog_json_is_its_own_kind(self):
+        """Dialog earns a group of its own rather than being dropped with
+        the inert files: `dialog_to_c.py` reads it, so it is a build input
+        with a converter Garage can run, which is the whole job of a
+        card."""
         self.assertEqual(
-            assets.classify("assets/dialog/npcs.json"), assets.KIND_OTHER
+            assets.classify("assets/dialog/npcs.json"), assets.KIND_DIALOG
         )
 
-    def test_a_reference_image_is_other(self):
+    def test_anything_under_dialog_is_dialog(self):
+        """The directory decides, as it does for sprites and tiles -- so a
+        second dialog format later does not need a rule of its own."""
+        self.assertEqual(
+            assets.classify("assets/dialog/hubs.json"), assets.KIND_DIALOG
+        )
+
+    def test_a_reference_image_is_unhandled(self):
         self.assertEqual(
             assets.classify("assets/reference/micro-machines/v01_race01.png"),
-            assets.KIND_OTHER,
+            assets.KIND_UNHANDLED,
+        )
+
+    def test_a_tsx_beside_the_maps_is_unhandled(self):
+        """A Tiled tileset definition is a prerequisite of the tileset
+        rules, but it is not one of the four kinds and has no preview."""
+        self.assertEqual(
+            assets.classify("assets/maps/track.tsx"), assets.KIND_UNHANDLED
         )
 
 
@@ -147,6 +166,9 @@ class TestDiscover(unittest.TestCase):
 
             found = assets.discover(binding)
 
+            # `notes.txt` is here because the directory decides a kind as
+            # much as the suffix does: anything under sprites/ is a sprite
+            # whatever it is spelled.
             self.assertEqual(
                 sorted(a.relative_path for a in found),
                 [
@@ -157,6 +179,74 @@ class TestDiscover(unittest.TestCase):
                     "assets/sprites/notes.txt",
                     "assets/sprites/player_car.png",
                 ],
+            )
+
+    def test_a_file_of_no_handled_kind_is_not_listed(self):
+        """Settled by hand-verification, 2026-08-16: a file gets a card
+        when it is one of the kinds Garage handles, and not otherwise. The
+        literal reading of AC1 -- every file under assets/ -- filled a
+        fifth group with twelve reference screenshots, a Tiled project
+        file and a build script, none of which Garage can preview, cost or
+        convert.
+
+        Every file listed here is a real one from the game repository, and
+        each is dropped for the same reason: a converter never reads it.
+        The `.tsx` is the one to watch -- it *is* a build input (the
+        tileset rules take it via `--tsx`), and it is dropped anyway
+        because it is edited in Tiled beside its map rather than from here.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = tmp_root(tmp)
+            repo = make_game_repo(
+                root / "nuke-raider",
+                {
+                    "assets/sprites/player_car.png": "x",
+                    "assets/maps/track.tsx": "<tileset/>",
+                    "assets/maps/nuke-raider.tiled-project": "{}",
+                    "assets/maps/create_assets.py": "# build script",
+                    "assets/reference/shots/v01_race01.png": "x",
+                },
+            )
+            binding = bind_over(root, repo)
+
+            found = assets.discover(binding)
+
+            self.assertEqual(
+                [a.relative_path for a in found],
+                ["assets/sprites/player_car.png"],
+            )
+
+    def test_a_dotfile_is_not_an_asset(self):
+        """AC1 asks for every file under assets/, and `.gitkeep` is not one
+        of them in any sense the user cares about: it is a placeholder that
+        exists so git will carry an otherwise empty directory, and there is
+        nothing to preview, cost or convert. Hand-verification of the panel
+        rejected them on sight — three cards for git plumbing, split across
+        two groups by an accident of which directory they sat in.
+
+        The rule is dotfiles rather than `.gitkeep` by name so the next one
+        (`.gitattributes`, `.DS_Store`, an editor's turd) is covered the day
+        it appears rather than the day someone notices it on a card.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = tmp_root(tmp)
+            repo = make_game_repo(
+                root / "nuke-raider",
+                {
+                    "assets/sprites/player_car.png": "x",
+                    "assets/sprites/.gitkeep": "",
+                    "assets/tiles/.gitkeep": "",
+                    "assets/music/.gitkeep": "",
+                    "assets/.gitattributes": "* text=auto",
+                },
+            )
+            binding = bind_over(root, repo)
+
+            found = assets.discover(binding)
+
+            self.assertEqual(
+                [a.relative_path for a in found],
+                ["assets/sprites/player_car.png"],
             )
 
     def test_it_lists_nothing_and_does_not_raise_without_an_assets_dir(self):
@@ -590,16 +680,6 @@ class TestVerify(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertIsNone(result.png)
 
-    def test_an_other_kind_asset_has_nothing_to_verify(self):
-        (self.repo / "assets/dialog").mkdir(parents=True, exist_ok=True)
-        (self.repo / "assets/dialog/npcs.json").write_text("{}", encoding="utf-8")
-
-        result = assets.verify(
-            self.binding, self._asset("assets/dialog/npcs.json")
-        )
-
-        self.assertTrue(result.ok)
-
     def test_a_missing_converter_is_reported_as_a_problem_not_a_crash(self):
         write_indexed_png(self.repo / "assets/sprites/car.png", 8, 8, 4)
         (self.repo / "tools" / "png_to_tiles.py").unlink()
@@ -659,6 +739,9 @@ src/track_map.c: assets/maps/track.tmx build/track_tile_id_map.json tools/tmx_to
 
 src/player_sprite.c: assets/sprites/player_car.png tools/png_to_tiles.py
 \tpython tools/png_to_tiles.py --bank 255 assets/sprites/player_car.png src/player_sprite.c player_tile_data
+
+src/dialog_data.c src/hub_data.c: assets/dialog/npcs.json assets/dialog/hubs.json tools/dialog_to_c.py
+\tpython tools/dialog_to_c.py assets/dialog/npcs.json src/dialog_data.c --hubs-json assets/dialog/hubs.json --hubs-out src/hub_data.c
 
 $(TARGET): src/player_sprite.c
 
@@ -912,13 +995,36 @@ class TestPlanFor(unittest.TestCase):
         self.assertEqual(plan.converters, ("tmx_to_c.py",))
 
     def test_an_asset_no_rule_reads_refuses_and_says_so(self):
-        (self.repo / "assets/reference").mkdir(parents=True, exist_ok=True)
-        write_indexed_png(self.repo / "assets/reference/shot.png", 8, 8, 4)
+        """A sprite, so it is discovered and previewed like any other --
+        but no Makefile rule names it, so there is nothing to run. Art that
+        has been drawn but not yet wired into the build is the ordinary
+        case for this."""
+        write_indexed_png(self.repo / "assets/sprites/unused.png", 8, 8, 4)
 
-        plan = self._plan("assets/reference/shot.png")
+        plan = self._plan("assets/sprites/unused.png")
 
         self.assertFalse(plan.can_run)
         self.assertIn("Makefile", plan.refusal)
+
+    def test_dialog_json_gets_the_make_command_for_both_its_targets(self):
+        """The reason dialog has a group of its own rather than being
+        dropped with the inert files: it is a build input Garage can
+        actually convert. One rule writes two sources from it, and both
+        have to be named -- converting one without the other would leave
+        the worktree half converted."""
+        (self.repo / "assets/dialog").mkdir(parents=True, exist_ok=True)
+        (self.repo / "assets/dialog/npcs.json").write_text("{}", encoding="utf-8")
+        (self.repo / "assets/dialog/hubs.json").write_text("{}", encoding="utf-8")
+
+        plan = self._plan("assets/dialog/npcs.json")
+
+        self.assertTrue(plan.can_run)
+        self.assertEqual(
+            list(plan.commands[0].argv),
+            ["make", "-W", "assets/dialog/npcs.json",
+             "src/dialog_data.c", "src/hub_data.c"],
+        )
+        self.assertIn("dialog_to_c.py", plan.converters)
 
     def test_a_uge_gets_the_two_music_validators(self):
         """R11/AC11."""
