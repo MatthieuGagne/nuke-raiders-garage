@@ -16,6 +16,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from PySide6.QtCore import QCoreApplication, QEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
@@ -691,6 +692,74 @@ class TestBusyDuringARun(AssetsPanelTestCase):
         self.assertTrue(card.convert_button.isEnabled())
 
 
+class TestARunThatOutlivesItsCard(AssetsPanelTestCase):
+    """Issue #11, defect 1: `refresh()` destroys every card and builds new
+    ones, and `open_assets()` in app.py calls it unconditionally -- so a
+    run started before the dialog was closed reports its result to a widget
+    that no longer exists. `_running_card` has to be re-pointed at the
+    rebuilt card, or the result is lost and, once Qt has processed the
+    deferred delete, the completion handler raises.
+
+    The reachable path: press Reconvert on a CHANGED card, close the Assets
+    dialog, reopen it via View > Assets... before the run finishes.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.panel._runs.stop_and_wait()
+        self.fake = _FakeRuns(self.panel)
+        self.panel._runs = self.fake
+
+    def _mark_and_convert(self):
+        """A CHANGED card with a run in flight -- the state the defect
+        needs. CHANGED matters: `set_changed(False)` early-returns on an
+        unmarked card, so an OK card loses the result quietly instead of
+        raising."""
+        card = self.card_for("assets/sprites/player_car.png")
+        write_indexed_png(card.asset.path, 24, 8, 4)
+        self.panel.check_for_changes()
+        self.assertTrue(card.is_changed())
+        self.panel.convert(card)
+        return card
+
+    def test_the_result_lands_on_the_rebuilt_card(self):
+        """Without the remap the mark is cleared on a discarded widget, so
+        the rebuilt card keeps a CHANGED it has no way to lose."""
+        self._mark_and_convert()
+
+        self.panel.refresh()
+        self.fake.finish([_Result(ok=True)])
+
+        rebuilt = self.card_for("assets/sprites/player_car.png")
+        self.assertFalse(rebuilt.is_changed())
+        self.assertIn("converted", self.panel.log_text())
+        # And the panel's own memory agrees, so the next rebuild does not
+        # put the mark back: `refresh()` re-applies marks from
+        # `_changed_paths`, not from the widgets.
+        self.panel.refresh()
+        self.assertFalse(
+            self.card_for("assets/sprites/player_car.png").is_changed()
+        )
+
+    def test_a_finished_run_does_not_call_into_a_deleted_widget(self):
+        """`refresh()` calls `deleteLater()`, which a live event loop acts
+        on. Once it has, any Qt call on the old card raises `RuntimeError:
+        Internal C++ object ... already deleted` out of a signal handler,
+        and `run_finished` never fires. `sendPostedEvents` is what a real
+        event loop does here; the test does it by hand because it runs
+        without one."""
+        self._mark_and_convert()
+        self.panel.refresh()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+
+        self.fake.finish([_Result(ok=True)])
+
+        self.assertIn("converted", self.panel.log_text())
+        self.assertFalse(
+            self.card_for("assets/sprites/player_car.png").is_changed()
+        )
+
+
 class TestConvertEchoesOnlyCommandsThatRan(AssetsPanelTestCase):
     """FIX 6: the log must attribute a `$ ...` line only to a command that
     actually started -- not to every command in a plan, echoed up front,
@@ -927,6 +996,89 @@ class TestVerificationBaseline(AssetsPanelTestCase):
         # And the cached rules were the real ones: an empty rule list
         # would have produced a refusal with no target at all.
         self.assertEqual(card.plan.targets, ("src/player_sprite.c",))
+
+
+class TestAnEditDuringARun(AssetsPanelTestCase):
+    """Issue #11, defect 2: a save that lands while the converter is
+    running is answered by nothing, and used to be forgotten anyway.
+
+    `_on_run_finished` re-baselined `_stamps` to the asset's stamp at
+    *completion* time and discarded the mark, so the edit was absorbed into
+    the new baseline: never converted, and the card said OK. The poll timer
+    is not stopped during a run, so the tick that marks the card CHANGED
+    lands inside the same window."""
+
+    def setUp(self):
+        super().setUp()
+        self.panel._runs.stop_and_wait()
+        self.fake = _FakeRuns(self.panel)
+        self.panel._runs = self.fake
+        self.card = self.card_for("assets/sprites/player_car.png")
+
+    def test_an_edit_made_while_the_converter_ran_keeps_the_mark(self):
+        self.panel.convert(self.card)
+
+        write_indexed_png(self.card.asset.path, 24, 8, 4)
+        self.panel.check_for_changes()
+        self.fake.finish([_Result(ok=True)])
+
+        self.assertTrue(self.card.is_changed())
+        self.assertEqual(self.card.convert_button.text(), "Reconvert")
+
+    def test_that_edit_is_still_unanswered_after_the_next_rebuild(self):
+        """The baseline is what makes the mark stick. Clearing the widget's
+        mark while leaving `_stamps` behind, or the reverse, both read as
+        "answered" one rebuild later."""
+        self.panel.convert(self.card)
+
+        write_indexed_png(self.card.asset.path, 24, 8, 4)
+        self.panel.check_for_changes()
+        self.fake.finish([_Result(ok=True)])
+        self.panel.refresh()
+
+        self.assertTrue(
+            self.card_for("assets/sprites/player_car.png").is_changed()
+        )
+
+    def test_an_edit_the_poll_has_not_seen_yet_still_keeps_the_mark(self):
+        """The same loss without a poll tick to help: the two-second timer
+        need not have fired between the save and the converter finishing,
+        and the run's own completion is the last chance to notice."""
+        self.panel.convert(self.card)
+
+        write_indexed_png(self.card.asset.path, 24, 8, 4)
+        self.fake.finish([_Result(ok=True)])
+
+        self.assertTrue(self.card.is_changed())
+
+    def test_the_log_says_why_the_card_still_reads_changed(self):
+        """A success line followed by a card that still says CHANGED is a
+        contradiction unless the panel accounts for it."""
+        self.panel.convert(self.card)
+
+        write_indexed_png(self.card.asset.path, 24, 8, 4)
+        self.fake.finish([_Result(ok=True)])
+
+        log = self.panel.log_text()
+        self.assertIn("changed while the converter ran", log)
+        self.assertIn("player_car.png", log)
+
+    def test_an_untouched_asset_still_has_its_mark_cleared(self):
+        """The case the guard must not break: a conversion that answers the
+        edit it was started for withdraws the offer, which is what makes
+        the mark mean anything."""
+        write_indexed_png(self.card.asset.path, 24, 8, 4)
+        self.panel.check_for_changes()
+        self.assertTrue(self.card.is_changed())
+
+        self.panel.convert(self.card)
+        self.fake.finish([_Result(ok=True)])
+
+        self.assertFalse(self.card.is_changed())
+        self.panel.refresh()
+        self.assertFalse(
+            self.card_for("assets/sprites/player_car.png").is_changed()
+        )
 
 
 class TestGeneratedFilesAreReadOnly(AssetsPanelTestCase):
