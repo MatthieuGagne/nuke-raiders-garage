@@ -2,6 +2,8 @@
 
 No Qt import anywhere in this file. Must pass with PySide6 absent.
 """
+import contextlib
+import io
 import json
 import subprocess
 import sys
@@ -73,6 +75,26 @@ def write_tunables(path: Path, data: dict) -> Path:
     return tunables_path
 
 
+def run_lint(**kwargs):
+    """`garage_lint.run` with its stdout captured, as `(code, output)`.
+
+    Captured rather than let through, for two reasons. Half the calls
+    below drive deliberately drifted fixtures, so a *passing* `make test`
+    printed `garage_lint: FAIL -- ...` several times over -- exit codes
+    were never affected and the suite was genuinely green, but a passing
+    run that prints "FAIL" trains a reader to skim past the word, which is
+    the one word this check exists to make them read.
+
+    And the messages are the check's whole product: a drift report nobody
+    can act on is no better than a silent failure. Asserting on the text
+    turns the noise into coverage of what the report actually says.
+    """
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        code = garage_lint.run(**kwargs)
+    return code, buffer.getvalue()
+
+
 class TestTheBoundGameRepositoryIsInStep(unittest.TestCase):
     """AC9's first half: a `#define` added to the game repository's
     `src/config.h` with no classification makes *this repository's* test
@@ -118,7 +140,9 @@ class TestTheBoundGameRepositoryIsInStep(unittest.TestCase):
     def test_the_drift_check_script_agrees_with_it(self):
         # The script is what a developer and CI run by hand; this keeps it
         # from drifting away from the test above.
-        self.assertEqual(garage_lint.run(), 0)
+        code, output = run_lint()
+        self.assertEqual(code, 0)
+        self.assertIn("garage_lint:", output)
 
 
 class TestGarageLint(unittest.TestCase):
@@ -129,9 +153,13 @@ class TestGarageLint(unittest.TestCase):
             garage_root.mkdir()
             # Deliberately no sibling "nuke-raider" checkout.
 
-            code = garage_lint.run(garage_root=garage_root)
+            code, output = run_lint(garage_root=garage_root)
 
             self.assertEqual(code, 0)
+            # It exits 0, so it has to say why it did nothing -- silence
+            # here reads as "checked, and clean".
+            self.assertIn("no game repository is bound", output)
+            self.assertIn("skipping the drift check", output)
 
     def test_clean_schema_succeeds(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -141,9 +169,12 @@ class TestGarageLint(unittest.TestCase):
             make_game_repo(tmp_path / "nuke-raider", SAMPLE_CONFIG)
             tunables_path = write_tunables(tmp_path, MATCHING_TUNABLES)
 
-            code = garage_lint.run(garage_root=garage_root, schema_path=tunables_path)
+            code, output = run_lint(
+                garage_root=garage_root, schema_path=tunables_path
+            )
 
             self.assertEqual(code, 0)
+            self.assertIn("garage_lint: OK", output)
 
     def test_unclassified_define_fails_and_names_it(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -157,9 +188,16 @@ class TestGarageLint(unittest.TestCase):
             make_game_repo(tmp_path / "nuke-raider", config_with_extra)
             tunables_path = write_tunables(tmp_path, MATCHING_TUNABLES)
 
-            code = garage_lint.run(garage_root=garage_root, schema_path=tunables_path)
+            code, output = run_lint(
+                garage_root=garage_root, schema_path=tunables_path
+            )
 
             self.assertEqual(code, 1)
+            # "names it" is in this test's name and was never asserted:
+            # a report that says only "drifted" leaves the reader to
+            # diff the header against tunables.json by hand.
+            self.assertIn("NEW_UNCLASSIFIED_DEFINE", output)
+            self.assertIn("tunable/structural/derived/marker", output)
 
     def test_stale_schema_entry_fails_and_names_it(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -174,9 +212,13 @@ class TestGarageLint(unittest.TestCase):
             }
             tunables_path = write_tunables(tmp_path, stale_data)
 
-            code = garage_lint.run(garage_root=garage_root, schema_path=tunables_path)
+            code, output = run_lint(
+                garage_root=garage_root, schema_path=tunables_path
+            )
 
             self.assertEqual(code, 1)
+            self.assertIn("GONE_FROM_HEADER", output)
+            self.assertIn("remove it from tunables.json", output)
 
     def test_find_drift_reports_both_directions(self):
         from tools.garage.core import config_io
