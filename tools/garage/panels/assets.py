@@ -21,6 +21,23 @@ text label naming where the converter writes — no control offers to open
 one. `open()` also refuses a path in the generated set outright, so the
 rule holds for any caller rather than only for a user clicking a button
 that was never drawn.
+
+**The panel's state, and when each piece moves.** `refresh()` destroys
+every card and builds new ones, and it runs every time the Assets dialog
+is opened — so anything that must outlive a rebuild lives on the panel and
+is keyed by relative path, the only identity a card keeps. Every defect
+this file has had was a piece of this table moving at the wrong moment.
+
+| State | The question it answers | Written by | Survives `refresh()` |
+|---|---|---|---|
+| `_stamps` | Has this asset changed since Garage last watched it? Drives the CHANGED mark, so it is sticky: only a conversion that answers the edit may move it. | `refresh` (`setdefault` only), `open`, `check_for_changes` (first sight), `_on_run_finished` (success that answered the edit) | yes, deliberately |
+| `_changed_paths` | Which assets are marked? The panel's copy of the mark, because the card holding it is thrown away. | `check_for_changes` adds, `_on_run_finished` adds or discards | yes, and `refresh` re-applies it to the rebuilt cards |
+| `_verified` | Has this asset changed since Garage last *decoded* it? Gates the re-verify, and moves on every verify — a separate baseline from `_stamps`, or a marked card is re-decoded every tick forever (issue #9, defect 2). | `refresh`, `check_for_changes` | no, rebuilt from scratch |
+| `_rules` | The active worktree's parsed Makefile. `None` means unreadable, which `plan_for` treats as "read it yourself" — not interchangeable with `[]`. | `refresh` | no |
+| `_generated` | Which paths a converter writes, for R10's refusal. | `refresh` | no |
+| `_running_card` | Which card the run in flight reports to. Re-pointed at the rebuilt widget by `refresh`, or the result lands on a deleted one (issue #11, defect 1). | `convert`, `refresh`, `_on_run_finished` | yes, remapped by path |
+| `_running_stamp` | What the asset looked like when the run started, so a save made while it ran is not mistaken for something the run answered (issue #11, defect 2). | `convert`, `_on_run_finished` | yes, untouched by the rebuild |
+| `AssetCard._busy` | Is a converter running anywhere in the panel? Held per card, because a card recomputes its own buttons whenever it is re-verified (issue #9, defect 1). | `_set_busy`, which `refresh` calls for the rebuilt cards | no, re-pushed |
 """
 from __future__ import annotations
 
@@ -427,6 +444,7 @@ class AssetsPanel(QWidget):
         self._runs.command_started.connect(self._append_command)
         self._runs.finished.connect(self._on_run_finished)
         self._running_card: Optional[AssetCard] = None
+        self._running_stamp: Optional[assets_core.Stamp] = None
 
         # What each listed asset looked like when Garage last stamped it,
         # and which ones are known to have changed since. Both live on the
@@ -567,6 +585,25 @@ class AssetsPanel(QWidget):
         # squarely in the middle of a run the user started before closing
         # it.
         self._set_busy(self._runs.is_running())
+        # The run in flight names one of the cards this method just
+        # destroyed, and `_on_run_finished` reports into it. Re-point it at
+        # the rebuilt widget for the same asset, by path -- the only
+        # identity a card keeps across a rebuild (issue #11, defect 1).
+        # Without this the result lands on a discarded widget: the mark is
+        # cleared where nobody can see it, and once Qt has processed the
+        # `deleteLater` above, the call raises `RuntimeError: Internal C++
+        # object ... already deleted` out of a signal handler.
+        #
+        # `None` when the asset is gone from the list -- deleted mid-run --
+        # which `_on_run_finished` already handles by reporting nothing.
+        # There is no card left to report to, and inventing one would mean
+        # keeping a widget alive that the grid no longer contains.
+        if self._running_card is not None:
+            relative = self._running_card.asset.relative_path
+            self._running_card = next(
+                (c for c in self._cards if c.asset.relative_path == relative),
+                None,
+            )
         # R10's read-only set, derived from the Makefile rather than
         # listed: a converter rule added to the game repository is covered
         # the day it lands. `rules or []`: a missing Makefile (rules is
@@ -753,10 +790,17 @@ class AssetsPanel(QWidget):
             return
 
         self._running_card = card
+        # What the asset looked like when this run started, so
+        # `_on_run_finished` can tell "the converter answered the file it
+        # was given" from "the user saved again while it ran" (issue #11,
+        # defect 2). Taken here rather than at completion because that is
+        # the state the converter actually read.
+        self._running_stamp = assets_core.stamp(card.asset.path)
         if not self._runs.start(
             list(plan.commands), self.binding.active_worktree.path
         ):
             self._running_card = None
+            self._running_stamp = None
             return
         self._set_busy(True)
 
@@ -789,6 +833,7 @@ class AssetsPanel(QWidget):
 
     def _on_run_finished(self, results) -> None:
         card, self._running_card = self._running_card, None
+        started, self._running_stamp = self._running_stamp, None
         self._set_busy(False)
         if card is None:
             return
@@ -797,16 +842,33 @@ class AssetsPanel(QWidget):
                 f"{card.asset.name} converted — wrote "
                 f"{', '.join(card.plan.targets)}"
             )
-            # The asset and its outputs now agree, so whatever change
-            # brought the user here is answered (R9).
-            self._stamps[card.asset.relative_path] = assets_core.stamp(
-                card.asset.path
-            )
-            # The offer is answered, so it is withdrawn -- from the panel's
-            # own memory as well as from the card, or the next refresh
-            # would put the mark back (see `refresh`).
-            self._changed_paths.discard(card.asset.relative_path)
-            card.set_changed(False)
+            relative = card.asset.relative_path
+            current = assets_core.stamp(card.asset.path)
+            if started is not None and assets_core.has_changed(started, current):
+                # The user saved again while the converter ran, so what it
+                # read is not what is on disk now and this run answered
+                # nothing (issue #11, defect 2). Re-baselining here would
+                # absorb that edit into the new baseline: never converted,
+                # and the card saying OK about it.
+                #
+                # The mark is set rather than merely left alone, because
+                # the poll tick that would have set it need not have fired
+                # inside the seconds this run took.
+                self.append_line(
+                    f"{card.asset.name} changed while the converter ran, so "
+                    f"that edit is still unconverted — the mark stands."
+                )
+                self._changed_paths.add(relative)
+                card.set_changed(True)
+            else:
+                # The asset and its outputs now agree, so whatever change
+                # brought the user here is answered (R9).
+                self._stamps[relative] = current
+                # The offer is answered, so it is withdrawn -- from the
+                # panel's own memory as well as from the card, or the next
+                # refresh would put the mark back (see `refresh`).
+                self._changed_paths.discard(relative)
+                card.set_changed(False)
         else:
             codes = ", ".join(str(r.exit_code) for r in results) or "no result"
             self.append_line(
