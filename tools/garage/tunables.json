@@ -80,6 +80,10 @@
       "max": 10,
       "reason": "Block comment explicitly labels this a 'tunable placeholder'; its own comment says the turning system is 'not yet implemented', so no code currently reads it for anything -- there is no correctness dependency to break. Range mirrors the small integer scale of sibling player-stat placeholders."
     },
+    "PLAYER_TURN_FRAMES_TABLE": {
+      "class": "structural",
+      "reason": "A brace-initialiser table of per-handling-level turn durations, indexed by PLAYER_HANDLING (gmb-nuke-raider#628 / PR #644). Not a scalar dial -- Garage does not edit it; see nuke-raiders-garage#18 R6. Classified so the game repo's config.h drift gate (gmb-nuke-raider#612 R4) can tell 'deliberately not tunable' from 'not yet looked at'."
+    },
     "PLAYER_ARMOR": {
       "class": "tunable",
       "category": "Combat",
