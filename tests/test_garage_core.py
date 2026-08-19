@@ -32,7 +32,11 @@ from tools.garage.core import (  # noqa: E402
     project,
     worktrees,
 )
-from tools.garage.core.schema import Schema, SchemaError  # noqa: E402
+from tools.garage.core.schema import (  # noqa: E402
+    Schema,
+    SchemaError,
+    find_range_drift,
+)
 
 
 GAME_REPO_REMOTE_URL = "https://github.com/MatthieuGagne/gmb-nuke-raider.git"
@@ -756,6 +760,118 @@ class TestConfigIOGuards(unittest.TestCase):
         ):
             with self.subTest(condition=condition):
                 self.assertIsNone(config_io.parse_guard_condition(condition))
+
+
+class TestFindRangeDrift(unittest.TestCase):
+    """#18 R3's second half: does a tunable's declared [min, max] agree
+    with the range the header's own guard permits?
+
+    The comparison lives in schema.py and takes the parsed guards rather
+    than a ConfigFile, for the same reason `find_drift` takes bare names:
+    this module classifies, it does not parse C -- and config_io imports
+    it, so the dependency may only point one way.
+    """
+
+    def setUp(self):
+        self.tunables_path = write_json(
+            Path(tempfile.mkdtemp()) / "tunables.json", SAMPLE_TUNABLES_FOR_CONFIG_IO
+        )
+        self.schema = Schema.load(self.tunables_path)
+
+    def test_a_guard_that_agrees_is_clean_and_counted_as_checked(self):
+        config = config_io.parse(GUARDED_CONFIG_TEXT, schema=self.schema)
+
+        report = find_range_drift(self.schema, config.guards)
+
+        self.assertTrue(report.clean)
+        self.assertEqual(report.checked, ["GEAR1_MAX_SPEED"])
+        self.assertEqual(report.summary(), "no range drift")
+
+    def test_a_guard_that_disagrees_is_reported_with_both_ranges(self):
+        # AC2, at the unit: tunables.json says 1-15, the header says 1-7.
+        narrowed = GUARDED_CONFIG_TEXT.replace(
+            "(GEAR1_MAX_SPEED) > 15", "(GEAR1_MAX_SPEED) > 7"
+        )
+        config = config_io.parse(narrowed, schema=self.schema)
+
+        report = find_range_drift(self.schema, config.guards)
+
+        self.assertFalse(report.clean)
+        self.assertEqual([m.name for m in report.mismatches], ["GEAR1_MAX_SPEED"])
+        mismatch = report.mismatches[0]
+        self.assertEqual((mismatch.schema_min, mismatch.schema_max), (1, 15))
+        self.assertEqual((mismatch.guard_min, mismatch.guard_max), (1, 7))
+        # Both ranges in the message, or the reader cannot tell which side
+        # is wrong without opening two files.
+        described = mismatch.describe()
+        self.assertIn("GEAR1_MAX_SPEED", described)
+        self.assertIn("1-15", described)
+        self.assertIn("1-7", described)
+        self.assertEqual(report.summary(), "1 range mismatch")
+
+    def test_a_tunable_with_no_guard_is_skipped_not_flagged(self):
+        # R4/AC3. Every tunable in the real file except PLAYER_HANDLING is
+        # in this case, so "skipped" has to mean silence -- not a warning,
+        # not an entry in `checked`.
+        config = config_io.parse(SAMPLE_CONFIG_TEXT, schema=self.schema)
+
+        report = find_range_drift(self.schema, config.guards)
+
+        self.assertTrue(report.clean)
+        self.assertEqual(report.checked, [])
+        self.assertEqual(report.mismatches, [])
+
+    def test_a_guard_over_a_non_tunable_define_is_skipped(self):
+        # A structural/derived/marker entry declares no min or max, so
+        # there is nothing for its guard to disagree with.
+        guarded_structural = SAMPLE_CONFIG_TEXT.replace(
+            "#define MAX_SPRITES  32",
+            "#define MAX_SPRITES  32\n#if (MAX_SPRITES) < 1 || (MAX_SPRITES) > 40",
+        ).replace("#endif /* CONFIG_H */", "#endif\n\n#endif /* CONFIG_H */")
+        config = config_io.parse(guarded_structural, schema=self.schema)
+
+        report = find_range_drift(self.schema, config.guards)
+
+        self.assertIn("MAX_SPRITES", config.guards)  # it was parsed...
+        self.assertTrue(report.clean)  # ...and then skipped
+        self.assertEqual(report.checked, [])
+
+    def test_two_mismatches_are_both_reported(self):
+        both = GUARDED_CONFIG_TEXT.replace(
+            "(GEAR1_MAX_SPEED) > 15", "(GEAR1_MAX_SPEED) > 7"
+        ).replace(
+            "#define PLAYER_ARMOR     5   /* reduces damage */",
+            "#define PLAYER_ARMOR     5   /* reduces damage */\n"
+            "#if (PLAYER_ARMOR) < 0 || (PLAYER_ARMOR) > 9\n#endif",
+        )
+        config = config_io.parse(both, schema=self.schema)
+
+        report = find_range_drift(self.schema, config.guards)
+
+        self.assertEqual(
+            sorted(m.name for m in report.mismatches),
+            ["GEAR1_MAX_SPEED", "PLAYER_ARMOR"],
+        )
+        self.assertEqual(report.summary(), "2 range mismatches")
+
+    @unittest.skipIf(NO_GAME_REPO, NO_GAME_REPO_REASON)
+    def test_the_real_header_and_the_real_tunables_json_agree(self):
+        # AC2/AC3 against the real pair, not a fixture. The `checked`
+        # assertion is the important half: R4 makes an unparsed guard
+        # invisible, so a `clean` report proves nothing on its own -- this
+        # pins that PLAYER_HANDLING's guard is actually being read.
+        text = REAL_CONFIG_H_PATH.read_text(encoding="utf-8")
+        schema = Schema.load(REAL_TUNABLES_PATH)
+        config = config_io.parse(text, schema=schema)
+
+        report = find_range_drift(schema, config.guards)
+
+        self.assertIn("PLAYER_HANDLING", report.checked)
+        self.assertTrue(
+            report.clean,
+            "tunables.json disagrees with a range guard in src/config.h:\n"
+            + "".join(f"  - {m.describe()}\n" for m in report.mismatches),
+        )
 
 
 class TestConfigIOApplyChanges(unittest.TestCase):

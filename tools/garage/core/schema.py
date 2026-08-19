@@ -241,3 +241,84 @@ def find_drift(schema: "Schema", define_names) -> DriftReport:
         unclassified=sorted(header_names - schema_names),
         stale=sorted(schema_names - header_names),
     )
+
+
+@dataclass(frozen=True)
+class RangeMismatch:
+    """One tunable whose declared [min, max] disagrees with the range the
+    header's own `#if ... #error` guard permits (#18 R3).
+    """
+
+    name: str
+    schema_min: int
+    schema_max: int
+    guard_min: int
+    guard_max: int
+    line_no: int
+
+    def describe(self) -> str:
+        return (
+            f"'{self.name}' is {self.schema_min}-{self.schema_max} in "
+            f"tunables.json but src/config.h line {self.line_no} guards it "
+            f"to {self.guard_min}-{self.guard_max}"
+        )
+
+
+@dataclass
+class RangeDriftReport:
+    """How `tunables.json`'s clamps and `src/config.h`'s range guards
+    disagree. `checked` names the tunables that had a guard at all --
+    every other tunable was skipped, which R4 asks to be silent, and which
+    makes `clean` alone a weak claim: a report can be clean because
+    nothing was compared.
+    """
+
+    mismatches: List[RangeMismatch]
+    checked: List[str]
+
+    @property
+    def clean(self) -> bool:
+        return not self.mismatches
+
+    def summary(self) -> str:
+        if not self.mismatches:
+            return "no range drift"
+        count = len(self.mismatches)
+        return f"{count} range mismatch" + ("es" if count > 1 else "")
+
+
+def find_range_drift(schema: "Schema", guards) -> RangeDriftReport:
+    """Compare every tunable's declared [min, max] against the range the
+    header guards it to (#18 R3).
+
+    `guards` maps a #define name to an object carrying `min`, `max` and
+    `line_no` -- `config_io.GuardRange`. Taken duck-typed rather than
+    imported for the same reason `find_drift` takes bare names: this
+    module classifies, it does not parse C, and config_io imports this
+    one, so the dependency may only point one way.
+
+    Two kinds of entry are skipped in silence, per R4:
+      - a tunable with no guard (today, every tunable but PLAYER_HANDLING);
+      - a guard over a name that is not a tunable entry -- structural,
+        derived, marker or unclassified -- which declares no range for the
+        guard to disagree with.
+    """
+    mismatches: List[RangeMismatch] = []
+    checked: List[str] = []
+    for entry in schema.tunables():
+        guard = guards.get(entry.name)
+        if guard is None:
+            continue
+        checked.append(entry.name)
+        if (entry.min, entry.max) != (guard.min, guard.max):
+            mismatches.append(
+                RangeMismatch(
+                    name=entry.name,
+                    schema_min=entry.min,
+                    schema_max=entry.max,
+                    guard_min=guard.min,
+                    guard_max=guard.max,
+                    line_no=guard.line_no,
+                )
+            )
+    return RangeDriftReport(mismatches=mismatches, checked=checked)
