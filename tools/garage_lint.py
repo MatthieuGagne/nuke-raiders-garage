@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Garage's drift check (R8 / AC9).
+"""Garage's drift check (R8 / AC9, and #18 R3/R5).
 
 tools/garage/tunables.json is the single source of truth for which
 #defines in the game repository's src/config.h Garage may edit. This
@@ -8,7 +8,13 @@ script fails when the two disagree:
   - a #define exists in config.h but tunables.json places it in none of
     the four classes ("unclassified" -- config.h has drifted ahead), or
   - tunables.json names a #define that no longer exists in config.h
-    ("stale" -- config.h has since dropped it).
+    ("stale" -- config.h has since dropped it), or
+  - config.h guards a tunable with `#if (NAME) < min || (NAME) > max` and
+    tunables.json declares a different min/max. That one is not cosmetic:
+    the Tuner's spin box offers whatever tunables.json declares, so a
+    wider clamp hands the user a value the next build rejects with the
+    guard's own #error. A tunable the header does not guard is skipped,
+    silently (#18 R4).
 
 When no game repository is bound (no sibling checkout, or a recorded
 binding that no longer resolves), this succeeds and says so -- CI without
@@ -31,6 +37,7 @@ from tools.garage.core.schema import (
     Schema,
     SchemaError,
     find_drift as schema_drift,
+    find_range_drift,
 )
 
 
@@ -67,26 +74,44 @@ def run(garage_root: Path = None, schema_path: Path = None) -> int:
 
     config = config_io.read(binding, schema)
     report = find_drift(schema, config)
+    range_report = find_range_drift(schema, config.guards)
 
-    if report.clean:
+    if report.clean and range_report.clean:
         print(
             "garage_lint: OK -- every #define in "
-            f"'{binding.config_h}' is classified in tunables.json, and "
-            "every tunables.json entry still exists in the header."
+            f"'{binding.config_h}' is classified in tunables.json, every "
+            "tunables.json entry still exists in the header, and the "
+            f"{len(range_report.checked)} tunable(s) the header guards "
+            "with an #if declare the guarded range."
         )
         return 0
 
-    print("garage_lint: FAIL -- tunables.json has drifted from src/config.h")
-    for name in report.unclassified:
+    if not report.clean:
+        print("garage_lint: FAIL -- tunables.json has drifted from src/config.h")
+        for name in report.unclassified:
+            print(
+                f"  - '{name}' is defined in src/config.h but is not classified "
+                "in tunables.json (add it as tunable/structural/derived/marker)."
+            )
+        for name in report.stale:
+            print(
+                f"  - '{name}' is classified in tunables.json but no longer "
+                "exists in src/config.h (remove it from tunables.json)."
+            )
+
+    if not range_report.clean:
         print(
-            f"  - '{name}' is defined in src/config.h but is not classified "
-            "in tunables.json (add it as tunable/structural/derived/marker)."
+            "garage_lint: FAIL -- a tunable's declared range disagrees with "
+            "the #if guard src/config.h states for it"
         )
-    for name in report.stale:
-        print(
-            f"  - '{name}' is classified in tunables.json but no longer "
-            "exists in src/config.h (remove it from tunables.json)."
-        )
+        for mismatch in range_report.mismatches:
+            print(
+                f"  - {mismatch.describe()} (fix 'min'/'max' in "
+                "tunables.json, or the guard in the header -- the Tuner "
+                "offers what tunables.json declares, and the build rejects "
+                "what the guard forbids)."
+            )
+
     return 1
 
 

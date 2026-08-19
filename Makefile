@@ -12,10 +12,11 @@ test:
 test-garage:
 	python -m unittest discover -s tests/garage -p 'test_*.py'
 
-# The R8/AC9 drift check on its own: is every #define in the game
-# repository's src/config.h classified in tunables.json, and does every
-# tunables.json entry still exist in the header? `make test` fails on the
-# same drift; this prints the names without running the suite, and exits 0
-# with an explanation when no game repository is bound.
+# The drift check on its own (R8/AC9 and #18 R3): is every #define in the
+# game repository's src/config.h classified in tunables.json, does every
+# tunables.json entry still exist in the header, and does every tunable
+# the header range-guards with an #if declare that same range? `make test`
+# fails on the same drift; this prints the names without running the
+# suite, and exits 0 with an explanation when no game repository is bound.
 lint:
 	python tools/garage_lint.py
