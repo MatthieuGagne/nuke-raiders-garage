@@ -440,6 +440,40 @@ class TestSchemaValidation(unittest.TestCase):
         self.assertNotEqual(schema.classify("MAX_SPRITES"), "tunable")
         self.assertEqual(schema.classify("MAX_RACERS"), "derived")
 
+    def test_the_turn_frames_table_is_classified_and_never_offered(self):
+        # #19 AC1/AC2: the game repo's config.h drift gate needs this name
+        # to carry *some* class, and #18 R6 says it must not be a tunable
+        # -- a brace-initialiser table is not a dial the Tuner can edit.
+        schema = Schema.load(REAL_TUNABLES_PATH)
+        # exact class, not just assertNotEqual "tunable" -- the reason field
+        # argues specifically for structural, so a silent drift to derived
+        # or marker should require a deliberate edit of this test
+        self.assertEqual(schema.classify("PLAYER_TURN_FRAMES_TABLE"), "structural")
+        self.assertFalse(schema.is_tunable("PLAYER_TURN_FRAMES_TABLE"))
+        offered = [entry.name for entry in schema.tunables()]
+        self.assertNotIn("PLAYER_TURN_FRAMES_TABLE", offered)
+
+    @unittest.skipIf(NO_GAME_REPO, NO_GAME_REPO_REASON)
+    def test_the_turn_frames_table_carries_no_writable_value(self):
+        # The Tuner builds a row only from schema.tunables(), and skips any
+        # entry whose #define has no parseable value; config_io refuses the
+        # write outright. Both halves are asserted here so a later edit
+        # cannot make the table editable by accident.
+        text = REAL_CONFIG_H_PATH.read_text(encoding="utf-8")
+        schema = Schema.load(REAL_TUNABLES_PATH)
+        config = config_io.parse(text, schema=schema)
+
+        define = config.defines["PLAYER_TURN_FRAMES_TABLE"]
+        self.assertEqual(define.cls, "structural")
+        self.assertFalse(define.has_value)
+
+        with self.assertRaises(config_io.ConfigIOError) as ctx:
+            config_io.apply_changes(config, schema, {"PLAYER_TURN_FRAMES_TABLE": 4})
+        self.assertIn("PLAYER_TURN_FRAMES_TABLE", str(ctx.exception))
+        # pins the class refusal, not the no-parseable-value refusal --
+        # both paths name the define, so only this fragment proves it
+        self.assertIn("not 'tunable'", str(ctx.exception))
+
     def test_valid_sample_loads(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = write_json(tmp_root(tmp) / "tunables.json", SAMPLE_TUNABLES)
