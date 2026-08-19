@@ -761,6 +761,24 @@ class TestConfigIOGuards(unittest.TestCase):
             with self.subTest(condition=condition):
                 self.assertIsNone(config_io.parse_guard_condition(condition))
 
+    def test_a_fully_parenthesized_half_is_still_read(self):
+        # An equally idiomatic way to write the same guard as
+        # "(X) < 0 || (X) > 7" -- wrapping each whole comparison in its
+        # own parens. Left unrecognized, this turns the check into a
+        # silent no-op: R4 already asks an unguarded tunable to be
+        # skipped without comment, so an unrecognized guard *shape*
+        # reads exactly like "no guard" instead of like a bug.
+        self.assertEqual(
+            config_io.parse_guard_condition("((X) < 0) || ((X) > 7)"),
+            ("X", 0, 7),
+        )
+
+    def test_a_partly_parenthesized_half_is_still_read(self):
+        self.assertEqual(
+            config_io.parse_guard_condition("(X < 0) || (X > 7)"),
+            ("X", 0, 7),
+        )
+
 
 class TestFindRangeDrift(unittest.TestCase):
     """#18 R3's second half: does a tunable's declared [min, max] agree

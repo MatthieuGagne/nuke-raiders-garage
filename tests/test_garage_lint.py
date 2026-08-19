@@ -281,6 +281,38 @@ class TestGarageLint(unittest.TestCase):
             self.assertIn("1-15", output)  # what the header permits
             self.assertIn("tunables.json", output)
 
+    def test_unclassified_define_and_range_drift_both_reported(self):
+        # Finding 2: name-drift and range-drift firing at the same time.
+        # Each is covered in isolation above; this pins that run_lint
+        # still reports both problems, by name, when a single header has
+        # both an unclassified #define and a guard that disagrees with
+        # tunables.json's declared range.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            garage_root = tmp_path / "nuke-raider-garage"
+            garage_root.mkdir()
+            config_with_extra = GUARDED_CONFIG.replace(
+                "#define GEAR1_MAX_SPEED        2u\n",
+                "#define GEAR1_MAX_SPEED        2u\n#define NEW_UNCLASSIFIED_DEFINE 5u\n",
+            )
+            make_game_repo(tmp_path / "nuke-raider", config_with_extra)
+            wrong = json.loads(json.dumps(MATCHING_TUNABLES))
+            wrong["entries"]["GEAR1_MAX_SPEED"]["max"] = 20
+            tunables_path = write_tunables(tmp_path, wrong)
+
+            code, output = run_lint(
+                garage_root=garage_root, schema_path=tunables_path
+            )
+
+            self.assertEqual(code, 1)
+            # The unclassified #define, by name.
+            self.assertIn("NEW_UNCLASSIFIED_DEFINE", output)
+            self.assertIn("tunable/structural/derived/marker", output)
+            # The mismatched tunable, by name, with both ranges.
+            self.assertIn("GEAR1_MAX_SPEED", output)
+            self.assertIn("1-20", output)  # what tunables.json declares
+            self.assertIn("1-15", output)  # what the header permits
+
     def test_the_same_check_is_green_once_the_range_is_corrected(self):
         # AC4, green half -- the flip. Same header, same fixture, only the
         # declared max corrected back to the guarded one.

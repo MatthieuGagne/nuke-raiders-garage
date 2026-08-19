@@ -83,9 +83,36 @@ class GuardRange:
     raw_line: str
 
 
+def _strip_balanced_outer_parens(text: str) -> str:
+    """Strip one balanced outer parenthesis pair from `text`, if it has
+    one: `text` starts with `(`, ends with `)`, and that opening paren is
+    the one the closing paren matches.
+
+    Not just `text[0] == "(" and text[-1] == ")"` -- that would also
+    strip (and mangle) something like `"(A) < (B)"`, whose leading `(`
+    closes well before the end of the string. Scanning depth is what
+    tells the two apart.
+    """
+    if len(text) < 2 or text[0] != "(" or text[-1] != ")":
+        return text
+    depth = 0
+    for idx, ch in enumerate(text):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                # The opening paren at index 0 closes here. Only a strip
+                # when that close is also the final character -- i.e. the
+                # parens truly wrap the whole string.
+                return text[1:-1] if idx == len(text) - 1 else text
+    return text
+
+
 def _parse_guard_half(half: str) -> Optional[Tuple[str, str, int]]:
     """`(name, operator, literal)` for one side of the `||`, or None."""
-    match = _GUARD_HALF_RE.match(half.strip())
+    stripped = _strip_balanced_outer_parens(half.strip())
+    match = _GUARD_HALF_RE.match(stripped)
     if match is None:
         return None
     text = match.group("literal")

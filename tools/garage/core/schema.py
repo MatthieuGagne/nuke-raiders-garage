@@ -19,7 +19,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 VALID_CLASSES = {"tunable", "structural", "derived", "marker"}
 
@@ -287,7 +287,7 @@ class RangeDriftReport:
         return f"{count} range mismatch" + ("es" if count > 1 else "")
 
 
-def find_range_drift(schema: "Schema", guards) -> RangeDriftReport:
+def find_range_drift(schema: "Schema", guards: Mapping[str, Any]) -> RangeDriftReport:
     """Compare every tunable's declared [min, max] against the range the
     header guards it to (#18 R3).
 
@@ -295,7 +295,8 @@ def find_range_drift(schema: "Schema", guards) -> RangeDriftReport:
     `line_no` -- `config_io.GuardRange`. Taken duck-typed rather than
     imported for the same reason `find_drift` takes bare names: this
     module classifies, it does not parse C, and config_io imports this
-    one, so the dependency may only point one way.
+    one, so the dependency may only point one way. `Mapping[str, Any]`
+    documents that duck-typed contract without importing config_io.
 
     Two kinds of entry are skipped in silence, per R4:
       - a tunable with no guard (today, every tunable but PLAYER_HANDLING);
