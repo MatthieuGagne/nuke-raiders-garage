@@ -621,6 +621,30 @@ SAMPLE_TUNABLES_FOR_CONFIG_IO = {
     },
 }
 
+# The same header, plus the shape #18 R3 is about: a two-sided #if guard
+# with an #error, as gmb-nuke-raider PR #644 added for PLAYER_HANDLING.
+# GEAR1_MAX_SPEED carries it here so the fixture needs no new #define,
+# and PLAYER_ARMOR deliberately carries none -- R4's skipped case.
+GUARDED_CONFIG_TEXT = """\
+#ifndef CONFIG_H
+#define CONFIG_H
+
+#define GEAR1_MAX_SPEED        2u
+#define GEAR1_ACCEL            2u
+
+#if (GEAR1_MAX_SPEED) < 1 || (GEAR1_MAX_SPEED) > 15
+#error "GEAR1_MAX_SPEED must be 1-15"
+#endif
+
+#define PLAYER_ARMOR     5   /* reduces damage */
+#define PLAYER_MAX_HP              100u  /* max HP pool */
+#define DEBUG_LOG_ADDR    0xDF80U  /* WRAM: ring buffer content (64 bytes) */
+#define MAX_SPRITES  32
+#define LOADER_BG_START  ((uint8_t)(HUD_FONT_BASE + HUD_FONT_COUNT))
+
+#endif /* CONFIG_H */
+"""
+
 
 class TestConfigIOParse(unittest.TestCase):
     def setUp(self):
@@ -660,6 +684,78 @@ class TestConfigIOParse(unittest.TestCase):
     def test_line_numbers_are_1_based_and_correct(self):
         config = config_io.parse(SAMPLE_CONFIG_TEXT, schema=self.schema)
         self.assertEqual(config.defines["GEAR1_MAX_SPEED"].line_no, 4)
+
+
+class TestConfigIOGuards(unittest.TestCase):
+    """#18 R3's first half: the header's own `#if ... #error` range guard,
+    read off the same parse that reads the #defines.
+
+    Only the two-sided shape is a range guard. Everything else -- the
+    include guard, `#if defined(...)`, a one-sided comparison, a guard
+    naming two different #defines -- is not one, and R4 asks for silence
+    rather than a report, so those cases must leave `guards` empty rather
+    than raise or half-record.
+    """
+
+    def test_a_two_sided_guard_is_recorded_with_its_range(self):
+        config = config_io.parse(GUARDED_CONFIG_TEXT)
+        guard = config.guards["GEAR1_MAX_SPEED"]
+        self.assertEqual((guard.min, guard.max), (1, 15))
+        self.assertEqual(guard.line_no, 7)
+        self.assertIn("#if", guard.raw_line)
+
+    def test_an_unguarded_define_has_no_guard(self):
+        config = config_io.parse(GUARDED_CONFIG_TEXT)
+        self.assertNotIn("PLAYER_ARMOR", config.guards)
+
+    def test_a_header_with_no_guards_at_all_parses_to_an_empty_map(self):
+        # The include guard's `#ifndef` must not be mistaken for one.
+        config = config_io.parse(SAMPLE_CONFIG_TEXT)
+        self.assertEqual(config.guards, {})
+
+    def test_parentheses_are_optional(self):
+        self.assertEqual(
+            config_io.parse_guard_condition("X < 0 || X > 7"), ("X", 0, 7)
+        )
+
+    def test_either_order_of_the_two_halves_is_read(self):
+        # The header could just as well be written high-side first; a
+        # guard this check silently stops seeing is a check that quietly
+        # stops guarding anything (R4 makes an unread guard invisible).
+        self.assertEqual(
+            config_io.parse_guard_condition("(X) > 7 || (X) < 0"), ("X", 0, 7)
+        )
+
+    def test_inclusive_operators_shift_the_bound_by_one(self):
+        # `#if X <= -1` fails the build at -1, so the legal minimum is 0.
+        self.assertEqual(
+            config_io.parse_guard_condition("(X) <= -1 || (X) >= 8"), ("X", 0, 7)
+        )
+
+    def test_hex_and_u_suffixed_literals_are_read(self):
+        self.assertEqual(
+            config_io.parse_guard_condition("(X) < 0x0 || (X) > 0x1F"), ("X", 0, 31)
+        )
+        self.assertEqual(
+            config_io.parse_guard_condition("(X) < 0u || (X) > 7u"), ("X", 0, 7)
+        )
+
+    def test_a_trailing_comment_does_not_hide_the_guard(self):
+        self.assertEqual(
+            config_io.parse_guard_condition("(X) < 0 || (X) > 7 /* 8 entries */"),
+            ("X", 0, 7),
+        )
+
+    def test_shapes_that_are_not_range_guards_are_not_read(self):
+        for condition in (
+            "defined(FOO)",
+            "(X) < 0",  # one-sided
+            "(X) < 0 || (Y) > 7",  # two different names
+            "(X) < 0 || (X) < 7",  # two lower bounds
+            "(X) < 8 || (X) > 7",  # empty legal range
+        ):
+            with self.subTest(condition=condition):
+                self.assertIsNone(config_io.parse_guard_condition(condition))
 
 
 class TestConfigIOApplyChanges(unittest.TestCase):
