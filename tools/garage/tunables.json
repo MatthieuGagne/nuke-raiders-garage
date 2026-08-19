@@ -77,8 +77,8 @@
       "class": "tunable",
       "category": "Player Stats",
       "min": 0,
-      "max": 10,
-      "reason": "Block comment explicitly labels this a 'tunable placeholder'; its own comment says the turning system is 'not yet implemented', so no code currently reads it for anything -- there is no correctness dependency to break. Range mirrors the small integer scale of sibling player-stat placeholders."
+      "max": 7,
+      "reason": "Turning responsiveness; indexes the 8-entry PLAYER_TURN_FRAMES_TABLE to get the frames the car spends per 45 degree facing step (gmb-nuke-raider#628 / PR #644). Read by src/player.c and by the turn tests, which derive their frame counts from it. Range is 0-7 because src/config.h guards it with an #error at exactly that range -- a wider clamp here lets Garage write a value that will not compile."
     },
     "PLAYER_TURN_FRAMES_TABLE": {
       "class": "structural",

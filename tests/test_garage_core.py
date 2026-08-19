@@ -550,6 +550,20 @@ class TestSchemaClamp(unittest.TestCase):
     def test_clamp_below_min_is_clamped(self):
         self.assertEqual(self.schema.clamp("GEAR1_MAX_SPEED", -5), 1)
 
+    def test_player_handling_clamps_to_the_headers_error_guard(self):
+        # #21 AC2. src/config.h guards this one with
+        # `#if (PLAYER_HANDLING) < 0 || (PLAYER_HANDLING) > 7` / #error,
+        # because the value indexes the 8-entry PLAYER_TURN_FRAMES_TABLE
+        # (src/player.c:368). A wider clamp here is not a cosmetic
+        # disagreement: the Tuner's spin box happily persists 8, and the
+        # next build dies on the #error. The drift check compares *names*,
+        # never values, so this pin is the only thing watching the range
+        # until #18 R3 teaches the check to parse the guard itself.
+        self.assertEqual(self.schema.clamp("PLAYER_HANDLING", 8), 7)
+        self.assertEqual(self.schema.clamp("PLAYER_HANDLING", -1), 0)
+        entry = self.schema.tunable("PLAYER_HANDLING")
+        self.assertEqual((entry.min, entry.max), (0, 7))
+
     def test_clamp_on_structural_raises(self):
         with self.assertRaises(SchemaError) as ctx:
             self.schema.clamp("MAX_SPRITES", 10)
