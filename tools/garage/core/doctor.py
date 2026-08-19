@@ -40,7 +40,12 @@ from typing import Callable, List, Optional
 
 from tools.garage.core import config_io, project
 from tools.garage.core.project import Binding, BindingError
-from tools.garage.core.schema import Schema, SchemaError, find_drift
+from tools.garage.core.schema import (
+    Schema,
+    SchemaError,
+    find_drift,
+    find_range_drift,
+)
 
 PASS = "PASS"
 FAIL = "FAIL"
@@ -197,6 +202,13 @@ def check_classification(
     matters — a `#define` added to the game repository since Garage last
     ran is a value the Tuner silently does not offer, and silence is
     exactly what R8 exists to end.
+
+    #18 R3 adds the second disagreement this row answers for: a tunable
+    whose declared [min, max] is not the range src/config.h guards it to.
+    It shares this row rather than adding its own, because it is the same
+    question -- does tunables.json still describe this header -- and the
+    user acts on it in the same place. A tunable the header does not
+    guard is not mentioned at all (R4).
     """
     name = "tunables.json — the classification of src/config.h"
     if binding is None:
@@ -230,12 +242,16 @@ def check_classification(
         )
 
     drift = find_drift(schema, config.defines.keys())
-    if drift.clean:
+    range_drift = find_range_drift(schema, config.guards)
+    if drift.clean and range_drift.clean:
         return CheckResult(
             key="classification",
             name=name,
             status=PASS,
-            detail=f"{len(config.defines)} #defines, all classified",
+            detail=(
+                f"{len(config.defines)} #defines, all classified; "
+                f"{len(range_drift.checked)} range guard(s) in step"
+            ),
             tag="in step",
         )
 
@@ -244,6 +260,13 @@ def check_classification(
         details.append("unclassified in tunables.json: " + ", ".join(drift.unclassified))
     if drift.stale:
         details.append("gone from src/config.h: " + ", ".join(drift.stale))
+    for mismatch in range_drift.mismatches:
+        details.append(mismatch.describe())
+    tags = [
+        report.summary()
+        for report in (drift, range_drift)
+        if not report.clean
+    ]
     return CheckResult(
         key="classification",
         name=name,
@@ -252,10 +275,12 @@ def check_classification(
         prevents=(
             "The Tuner does not offer an unclassified #define, and says "
             "nothing about it — the drift has to be fixed in tunables.json "
-            "before that value can be tuned. This repository's test suite "
-            "fails until it is."
+            "before that value can be tuned. A tunable whose range is wider "
+            "than the header's guard is worse than silent: the Tuner offers "
+            "the value and the build rejects it. This repository's test "
+            "suite fails until both are fixed."
         ),
-        tag=drift.summary(),
+        tag=", ".join(tags),
     )
 
 

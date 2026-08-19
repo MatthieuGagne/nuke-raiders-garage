@@ -1815,6 +1815,44 @@ class TestDoctorClassification(unittest.TestCase):
             self.assertIn("GONE_FROM_HEADER", check.detail)
             self.assertIn("gone from src/config.h", check.detail)
 
+    def test_a_range_that_disagrees_with_the_headers_guard_fails(self):
+        # #18 R3, in the window: the classification is in perfect step and
+        # the row still has to go red, because the Tuner is about to offer
+        # a value the next build rejects.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = tmp_root(tmp)
+            binding = self._bound(tmp_path, GUARDED_CONFIG_TEXT)
+            wrong = json.loads(json.dumps(SAMPLE_TUNABLES_FOR_CONFIG_IO))
+            wrong["entries"]["GEAR1_MAX_SPEED"]["max"] = 20
+            schema = Schema.load(write_json(tmp_path / "t.json", wrong))
+
+            check = doctor.check_classification(binding, schema)
+
+            self.assertEqual(check.status, doctor.FAIL)
+            self.assertIn("GEAR1_MAX_SPEED", check.detail)
+            self.assertIn("1-20", check.detail)
+            self.assertIn("1-15", check.detail)
+            self.assertIn("tunables.json", check.prevents)
+            self.assertEqual(check.tag, "1 range mismatch")
+
+    def test_a_guard_that_agrees_passes_and_says_how_many_were_checked(self):
+        # The pass has to state the coverage: R4 skips an unguarded
+        # tunable in silence, so "in step" alone cannot distinguish a
+        # header whose guards agree from one whose guards were never read.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = tmp_root(tmp)
+            binding = self._bound(tmp_path, GUARDED_CONFIG_TEXT)
+            schema = Schema.load(
+                write_json(tmp_path / "t.json", SAMPLE_TUNABLES_FOR_CONFIG_IO)
+            )
+
+            check = doctor.check_classification(binding, schema)
+
+            self.assertEqual(check.status, doctor.PASS)
+            self.assertIn("all classified", check.detail)
+            self.assertIn("1 range guard", check.detail)
+            self.assertEqual(check.tag, "in step")
+
     def test_without_a_binding_it_says_it_cannot_check(self):
         check = doctor.check_classification(None)
 
