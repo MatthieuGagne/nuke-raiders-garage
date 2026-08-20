@@ -17,7 +17,11 @@ if str(REPO_ROOT) not in sys.path:
 
 from tools import garage_lint  # noqa: E402
 from tools.garage.core import config_io, project  # noqa: E402
-from tools.garage.core.schema import Schema, find_drift  # noqa: E402
+from tools.garage.core.schema import (  # noqa: E402
+    Schema,
+    find_drift,
+    find_range_drift,
+)
 
 SAMPLE_CONFIG = """\
 #ifndef CONFIG_H
@@ -45,6 +49,17 @@ MATCHING_TUNABLES = {
         "LOADER_BG_START": {"class": "derived", "reason": "computed"},
     },
 }
+
+
+# The same header with the shape #18 R3 reads: a two-sided #if guard, as
+# gmb-nuke-raider PR #644 added for PLAYER_HANDLING. Its range agrees with
+# MATCHING_TUNABLES' 1-15 for GEAR1_MAX_SPEED.
+GUARDED_CONFIG = SAMPLE_CONFIG.replace(
+    "#endif /* CONFIG_H */",
+    "#if (GEAR1_MAX_SPEED) < 1 || (GEAR1_MAX_SPEED) > 15\n"
+    '#error "GEAR1_MAX_SPEED must be 1-15"\n'
+    "#endif\n\n#endif /* CONFIG_H */",
+)
 
 
 def _run_git(args, cwd):
@@ -144,6 +159,28 @@ class TestTheBoundGameRepositoryIsInStep(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("garage_lint:", output)
 
+    def test_the_declared_ranges_match_the_headers_guards(self):
+        # AC2 against the real pair. Like the classification test above,
+        # this runs the comparison against whatever this checkout is bound
+        # to, and skips when nothing is bound (the CI case).
+        try:
+            binding = project.bind()
+        except project.BindingError as exc:
+            self.skipTest(f"no game repository bound: {exc}")
+
+        schema = Schema.load()
+        config = config_io.read(binding, schema)
+        report = find_range_drift(schema, config.guards)
+
+        # A clean report proves nothing unless something was compared: R4
+        # skips an unguarded -- or unparsed -- tunable in silence.
+        self.assertIn("PLAYER_HANDLING", report.checked)
+        self.assertTrue(
+            report.clean,
+            f"tunables.json disagrees with {binding.config_h}:\n"
+            + "".join(f"  - {m.describe()}\n" for m in report.mismatches),
+        )
+
 
 class TestGarageLint(unittest.TestCase):
     def test_no_game_repo_bound_succeeds(self):
@@ -219,6 +256,98 @@ class TestGarageLint(unittest.TestCase):
             self.assertEqual(code, 1)
             self.assertIn("GONE_FROM_HEADER", output)
             self.assertIn("remove it from tunables.json", output)
+
+    def test_a_range_that_disagrees_with_the_headers_guard_fails(self):
+        # AC4, red half. The classification is in perfect step -- every
+        # #define classified, no stale entry -- and the check still has to
+        # fail, because the Tuner would otherwise offer a value the guard
+        # turns into an #error.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            garage_root = tmp_path / "nuke-raider-garage"
+            garage_root.mkdir()
+            make_game_repo(tmp_path / "nuke-raider", GUARDED_CONFIG)
+            wrong = json.loads(json.dumps(MATCHING_TUNABLES))
+            wrong["entries"]["GEAR1_MAX_SPEED"]["max"] = 20
+            tunables_path = write_tunables(tmp_path, wrong)
+
+            code, output = run_lint(
+                garage_root=garage_root, schema_path=tunables_path
+            )
+
+            self.assertEqual(code, 1)
+            self.assertIn("GEAR1_MAX_SPEED", output)
+            self.assertIn("1-20", output)  # what tunables.json declares
+            self.assertIn("1-15", output)  # what the header permits
+            self.assertIn("tunables.json", output)
+
+    def test_unclassified_define_and_range_drift_both_reported(self):
+        # Finding 2: name-drift and range-drift firing at the same time.
+        # Each is covered in isolation above; this pins that run_lint
+        # still reports both problems, by name, when a single header has
+        # both an unclassified #define and a guard that disagrees with
+        # tunables.json's declared range.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            garage_root = tmp_path / "nuke-raider-garage"
+            garage_root.mkdir()
+            config_with_extra = GUARDED_CONFIG.replace(
+                "#define GEAR1_MAX_SPEED        2u\n",
+                "#define GEAR1_MAX_SPEED        2u\n#define NEW_UNCLASSIFIED_DEFINE 5u\n",
+            )
+            make_game_repo(tmp_path / "nuke-raider", config_with_extra)
+            wrong = json.loads(json.dumps(MATCHING_TUNABLES))
+            wrong["entries"]["GEAR1_MAX_SPEED"]["max"] = 20
+            tunables_path = write_tunables(tmp_path, wrong)
+
+            code, output = run_lint(
+                garage_root=garage_root, schema_path=tunables_path
+            )
+
+            self.assertEqual(code, 1)
+            # The unclassified #define, by name.
+            self.assertIn("NEW_UNCLASSIFIED_DEFINE", output)
+            self.assertIn("tunable/structural/derived/marker", output)
+            # The mismatched tunable, by name, with both ranges.
+            self.assertIn("GEAR1_MAX_SPEED", output)
+            self.assertIn("1-20", output)  # what tunables.json declares
+            self.assertIn("1-15", output)  # what the header permits
+
+    def test_the_same_check_is_green_once_the_range_is_corrected(self):
+        # AC4, green half -- the flip. Same header, same fixture, only the
+        # declared max corrected back to the guarded one.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            garage_root = tmp_path / "nuke-raider-garage"
+            garage_root.mkdir()
+            make_game_repo(tmp_path / "nuke-raider", GUARDED_CONFIG)
+            tunables_path = write_tunables(tmp_path, MATCHING_TUNABLES)
+
+            code, output = run_lint(
+                garage_root=garage_root, schema_path=tunables_path
+            )
+
+            self.assertEqual(code, 0)
+            self.assertIn("garage_lint: OK", output)
+
+    def test_guard_less_tunables_pass_unchanged(self):
+        # AC3/R4. SAMPLE_CONFIG declares no guard at all, which is every
+        # tunable in the real file but PLAYER_HANDLING. The check must
+        # stay silent about them rather than call them unverified.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            garage_root = tmp_path / "nuke-raider-garage"
+            garage_root.mkdir()
+            make_game_repo(tmp_path / "nuke-raider", SAMPLE_CONFIG)
+            tunables_path = write_tunables(tmp_path, MATCHING_TUNABLES)
+
+            code, output = run_lint(
+                garage_root=garage_root, schema_path=tunables_path
+            )
+
+            self.assertEqual(code, 0)
+            self.assertNotIn("unverified", output)
+            self.assertNotIn("GEAR1_MAX_SPEED", output)
 
     def test_find_drift_reports_both_directions(self):
         from tools.garage.core import config_io

@@ -32,7 +32,11 @@ from tools.garage.core import (  # noqa: E402
     project,
     worktrees,
 )
-from tools.garage.core.schema import Schema, SchemaError  # noqa: E402
+from tools.garage.core.schema import (  # noqa: E402
+    Schema,
+    SchemaError,
+    find_range_drift,
+)
 
 
 GAME_REPO_REMOTE_URL = "https://github.com/MatthieuGagne/gmb-nuke-raider.git"
@@ -621,6 +625,30 @@ SAMPLE_TUNABLES_FOR_CONFIG_IO = {
     },
 }
 
+# The same header, plus the shape #18 R3 is about: a two-sided #if guard
+# with an #error, as gmb-nuke-raider PR #644 added for PLAYER_HANDLING.
+# GEAR1_MAX_SPEED carries it here so the fixture needs no new #define,
+# and PLAYER_ARMOR deliberately carries none -- R4's skipped case.
+GUARDED_CONFIG_TEXT = """\
+#ifndef CONFIG_H
+#define CONFIG_H
+
+#define GEAR1_MAX_SPEED        2u
+#define GEAR1_ACCEL            2u
+
+#if (GEAR1_MAX_SPEED) < 1 || (GEAR1_MAX_SPEED) > 15
+#error "GEAR1_MAX_SPEED must be 1-15"
+#endif
+
+#define PLAYER_ARMOR     5   /* reduces damage */
+#define PLAYER_MAX_HP              100u  /* max HP pool */
+#define DEBUG_LOG_ADDR    0xDF80U  /* WRAM: ring buffer content (64 bytes) */
+#define MAX_SPRITES  32
+#define LOADER_BG_START  ((uint8_t)(HUD_FONT_BASE + HUD_FONT_COUNT))
+
+#endif /* CONFIG_H */
+"""
+
 
 class TestConfigIOParse(unittest.TestCase):
     def setUp(self):
@@ -660,6 +688,208 @@ class TestConfigIOParse(unittest.TestCase):
     def test_line_numbers_are_1_based_and_correct(self):
         config = config_io.parse(SAMPLE_CONFIG_TEXT, schema=self.schema)
         self.assertEqual(config.defines["GEAR1_MAX_SPEED"].line_no, 4)
+
+
+class TestConfigIOGuards(unittest.TestCase):
+    """#18 R3's first half: the header's own `#if ... #error` range guard,
+    read off the same parse that reads the #defines.
+
+    Only the two-sided shape is a range guard. Everything else -- the
+    include guard, `#if defined(...)`, a one-sided comparison, a guard
+    naming two different #defines -- is not one, and R4 asks for silence
+    rather than a report, so those cases must leave `guards` empty rather
+    than raise or half-record.
+    """
+
+    def test_a_two_sided_guard_is_recorded_with_its_range(self):
+        config = config_io.parse(GUARDED_CONFIG_TEXT)
+        guard = config.guards["GEAR1_MAX_SPEED"]
+        self.assertEqual((guard.min, guard.max), (1, 15))
+        self.assertEqual(guard.line_no, 7)
+        self.assertIn("#if", guard.raw_line)
+
+    def test_an_unguarded_define_has_no_guard(self):
+        config = config_io.parse(GUARDED_CONFIG_TEXT)
+        self.assertNotIn("PLAYER_ARMOR", config.guards)
+
+    def test_a_header_with_no_guards_at_all_parses_to_an_empty_map(self):
+        # The include guard's `#ifndef` must not be mistaken for one.
+        config = config_io.parse(SAMPLE_CONFIG_TEXT)
+        self.assertEqual(config.guards, {})
+
+    def test_parentheses_are_optional(self):
+        self.assertEqual(
+            config_io.parse_guard_condition("X < 0 || X > 7"), ("X", 0, 7)
+        )
+
+    def test_either_order_of_the_two_halves_is_read(self):
+        # The header could just as well be written high-side first; a
+        # guard this check silently stops seeing is a check that quietly
+        # stops guarding anything (R4 makes an unread guard invisible).
+        self.assertEqual(
+            config_io.parse_guard_condition("(X) > 7 || (X) < 0"), ("X", 0, 7)
+        )
+
+    def test_inclusive_operators_shift_the_bound_by_one(self):
+        # `#if X <= -1` fails the build at -1, so the legal minimum is 0.
+        self.assertEqual(
+            config_io.parse_guard_condition("(X) <= -1 || (X) >= 8"), ("X", 0, 7)
+        )
+
+    def test_hex_and_u_suffixed_literals_are_read(self):
+        self.assertEqual(
+            config_io.parse_guard_condition("(X) < 0x0 || (X) > 0x1F"), ("X", 0, 31)
+        )
+        self.assertEqual(
+            config_io.parse_guard_condition("(X) < 0u || (X) > 7u"), ("X", 0, 7)
+        )
+
+    def test_a_trailing_comment_does_not_hide_the_guard(self):
+        self.assertEqual(
+            config_io.parse_guard_condition("(X) < 0 || (X) > 7 /* 8 entries */"),
+            ("X", 0, 7),
+        )
+
+    def test_shapes_that_are_not_range_guards_are_not_read(self):
+        for condition in (
+            "defined(FOO)",
+            "(X) < 0",  # one-sided
+            "(X) < 0 || (Y) > 7",  # two different names
+            "(X) < 0 || (X) < 7",  # two lower bounds
+            "(X) < 8 || (X) > 7",  # empty legal range
+        ):
+            with self.subTest(condition=condition):
+                self.assertIsNone(config_io.parse_guard_condition(condition))
+
+    def test_a_fully_parenthesized_half_is_still_read(self):
+        # An equally idiomatic way to write the same guard as
+        # "(X) < 0 || (X) > 7" -- wrapping each whole comparison in its
+        # own parens. Left unrecognized, this turns the check into a
+        # silent no-op: R4 already asks an unguarded tunable to be
+        # skipped without comment, so an unrecognized guard *shape*
+        # reads exactly like "no guard" instead of like a bug.
+        self.assertEqual(
+            config_io.parse_guard_condition("((X) < 0) || ((X) > 7)"),
+            ("X", 0, 7),
+        )
+
+    def test_a_partly_parenthesized_half_is_still_read(self):
+        self.assertEqual(
+            config_io.parse_guard_condition("(X < 0) || (X > 7)"),
+            ("X", 0, 7),
+        )
+
+
+class TestFindRangeDrift(unittest.TestCase):
+    """#18 R3's second half: does a tunable's declared [min, max] agree
+    with the range the header's own guard permits?
+
+    The comparison lives in schema.py and takes the parsed guards rather
+    than a ConfigFile, for the same reason `find_drift` takes bare names:
+    this module classifies, it does not parse C -- and config_io imports
+    it, so the dependency may only point one way.
+    """
+
+    def setUp(self):
+        self.tunables_path = write_json(
+            Path(tempfile.mkdtemp()) / "tunables.json", SAMPLE_TUNABLES_FOR_CONFIG_IO
+        )
+        self.schema = Schema.load(self.tunables_path)
+
+    def test_a_guard_that_agrees_is_clean_and_counted_as_checked(self):
+        config = config_io.parse(GUARDED_CONFIG_TEXT, schema=self.schema)
+
+        report = find_range_drift(self.schema, config.guards)
+
+        self.assertTrue(report.clean)
+        self.assertEqual(report.checked, ["GEAR1_MAX_SPEED"])
+        self.assertEqual(report.summary(), "no range drift")
+
+    def test_a_guard_that_disagrees_is_reported_with_both_ranges(self):
+        # AC2, at the unit: tunables.json says 1-15, the header says 1-7.
+        narrowed = GUARDED_CONFIG_TEXT.replace(
+            "(GEAR1_MAX_SPEED) > 15", "(GEAR1_MAX_SPEED) > 7"
+        )
+        config = config_io.parse(narrowed, schema=self.schema)
+
+        report = find_range_drift(self.schema, config.guards)
+
+        self.assertFalse(report.clean)
+        self.assertEqual([m.name for m in report.mismatches], ["GEAR1_MAX_SPEED"])
+        mismatch = report.mismatches[0]
+        self.assertEqual((mismatch.schema_min, mismatch.schema_max), (1, 15))
+        self.assertEqual((mismatch.guard_min, mismatch.guard_max), (1, 7))
+        # Both ranges in the message, or the reader cannot tell which side
+        # is wrong without opening two files.
+        described = mismatch.describe()
+        self.assertIn("GEAR1_MAX_SPEED", described)
+        self.assertIn("1-15", described)
+        self.assertIn("1-7", described)
+        self.assertEqual(report.summary(), "1 range mismatch")
+
+    def test_a_tunable_with_no_guard_is_skipped_not_flagged(self):
+        # R4/AC3. Every tunable in the real file except PLAYER_HANDLING is
+        # in this case, so "skipped" has to mean silence -- not a warning,
+        # not an entry in `checked`.
+        config = config_io.parse(SAMPLE_CONFIG_TEXT, schema=self.schema)
+
+        report = find_range_drift(self.schema, config.guards)
+
+        self.assertTrue(report.clean)
+        self.assertEqual(report.checked, [])
+        self.assertEqual(report.mismatches, [])
+
+    def test_a_guard_over_a_non_tunable_define_is_skipped(self):
+        # A structural/derived/marker entry declares no min or max, so
+        # there is nothing for its guard to disagree with.
+        guarded_structural = SAMPLE_CONFIG_TEXT.replace(
+            "#define MAX_SPRITES  32",
+            "#define MAX_SPRITES  32\n#if (MAX_SPRITES) < 1 || (MAX_SPRITES) > 40",
+        ).replace("#endif /* CONFIG_H */", "#endif\n\n#endif /* CONFIG_H */")
+        config = config_io.parse(guarded_structural, schema=self.schema)
+
+        report = find_range_drift(self.schema, config.guards)
+
+        self.assertIn("MAX_SPRITES", config.guards)  # it was parsed...
+        self.assertTrue(report.clean)  # ...and then skipped
+        self.assertEqual(report.checked, [])
+
+    def test_two_mismatches_are_both_reported(self):
+        both = GUARDED_CONFIG_TEXT.replace(
+            "(GEAR1_MAX_SPEED) > 15", "(GEAR1_MAX_SPEED) > 7"
+        ).replace(
+            "#define PLAYER_ARMOR     5   /* reduces damage */",
+            "#define PLAYER_ARMOR     5   /* reduces damage */\n"
+            "#if (PLAYER_ARMOR) < 0 || (PLAYER_ARMOR) > 9\n#endif",
+        )
+        config = config_io.parse(both, schema=self.schema)
+
+        report = find_range_drift(self.schema, config.guards)
+
+        self.assertEqual(
+            sorted(m.name for m in report.mismatches),
+            ["GEAR1_MAX_SPEED", "PLAYER_ARMOR"],
+        )
+        self.assertEqual(report.summary(), "2 range mismatches")
+
+    @unittest.skipIf(NO_GAME_REPO, NO_GAME_REPO_REASON)
+    def test_the_real_header_and_the_real_tunables_json_agree(self):
+        # AC2/AC3 against the real pair, not a fixture. The `checked`
+        # assertion is the important half: R4 makes an unparsed guard
+        # invisible, so a `clean` report proves nothing on its own -- this
+        # pins that PLAYER_HANDLING's guard is actually being read.
+        text = REAL_CONFIG_H_PATH.read_text(encoding="utf-8")
+        schema = Schema.load(REAL_TUNABLES_PATH)
+        config = config_io.parse(text, schema=schema)
+
+        report = find_range_drift(schema, config.guards)
+
+        self.assertIn("PLAYER_HANDLING", report.checked)
+        self.assertTrue(
+            report.clean,
+            "tunables.json disagrees with a range guard in src/config.h:\n"
+            + "".join(f"  - {m.describe()}\n" for m in report.mismatches),
+        )
 
 
 class TestConfigIOApplyChanges(unittest.TestCase):
@@ -1602,6 +1832,44 @@ class TestDoctorClassification(unittest.TestCase):
             self.assertEqual(check.status, doctor.FAIL)
             self.assertIn("GONE_FROM_HEADER", check.detail)
             self.assertIn("gone from src/config.h", check.detail)
+
+    def test_a_range_that_disagrees_with_the_headers_guard_fails(self):
+        # #18 R3, in the window: the classification is in perfect step and
+        # the row still has to go red, because the Tuner is about to offer
+        # a value the next build rejects.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = tmp_root(tmp)
+            binding = self._bound(tmp_path, GUARDED_CONFIG_TEXT)
+            wrong = json.loads(json.dumps(SAMPLE_TUNABLES_FOR_CONFIG_IO))
+            wrong["entries"]["GEAR1_MAX_SPEED"]["max"] = 20
+            schema = Schema.load(write_json(tmp_path / "t.json", wrong))
+
+            check = doctor.check_classification(binding, schema)
+
+            self.assertEqual(check.status, doctor.FAIL)
+            self.assertIn("GEAR1_MAX_SPEED", check.detail)
+            self.assertIn("1-20", check.detail)
+            self.assertIn("1-15", check.detail)
+            self.assertIn("tunables.json", check.prevents)
+            self.assertEqual(check.tag, "1 range mismatch")
+
+    def test_a_guard_that_agrees_passes_and_says_how_many_were_checked(self):
+        # The pass has to state the coverage: R4 skips an unguarded
+        # tunable in silence, so "in step" alone cannot distinguish a
+        # header whose guards agree from one whose guards were never read.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = tmp_root(tmp)
+            binding = self._bound(tmp_path, GUARDED_CONFIG_TEXT)
+            schema = Schema.load(
+                write_json(tmp_path / "t.json", SAMPLE_TUNABLES_FOR_CONFIG_IO)
+            )
+
+            check = doctor.check_classification(binding, schema)
+
+            self.assertEqual(check.status, doctor.PASS)
+            self.assertIn("all classified", check.detail)
+            self.assertIn("1 range guard", check.detail)
+            self.assertEqual(check.tag, "in step")
 
     def test_without_a_binding_it_says_it_cannot_check(self):
         check = doctor.check_classification(None)
