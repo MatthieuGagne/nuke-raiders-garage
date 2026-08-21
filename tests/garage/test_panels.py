@@ -2,6 +2,7 @@
 `python -m unittest discover -s tests` (tests/garage/ has no __init__.py,
 so default discovery never descends into it). Run via `make test-garage`.
 """
+import datetime
 import json
 import os
 import re
@@ -16,49 +17,96 @@ from unittest import mock
 # The GitHub Windows runner fails one of those tests about half the time, and
 # has done it two different ways: once a fifteen-second wait for git's
 # index.lock expired, once the interpreter died eleven milliseconds into a
-# test with exit code 1 and no output at all. Neither reproduces on a
-# developer machine -- eight consecutive local runs of that class pass -- so
-# the runner has to narrate what it does. Off unless the workflow asks.
+# test with exit code 1 and no output at all. Off unless the workflow asks.
+#
+# #8 recorded that neither signature reproduced on a developer machine.
+# That is no longer true: unmodified main, run six times on Windows 11 on
+# 2026-08-20, failed three -- twice on the index.lock assertion and once
+# on `False is not true`. The hunt is not CI-only any more, and a local
+# failure is the cheaper loop.
+#
+# Everything here has to stay cheap. The first attempt at this narration
+# spawned a PowerShell inside setUp and a tasklist around every kill, and
+# eight consecutive samples then passed: sub-second subprocesses in the
+# middle of a race are enough to decide it. What those spawns were for --
+# who existed, who their parent was, what a PID really is, what a process
+# died of -- is now recorded from outside the interpreter by
+# tools/garage/ci/watch_processes.ps1, which pays nothing here and, unlike
+# anything in this process, still reports a death by TerminateProcess.
+# What is left below is string writes.
 TRACE = os.environ.get("GARAGE_TEST_TRACE") == "1"
 
 
+def _open_trace_log():
+    """The file `trace` appends to, or None to fall back to stderr.
+
+    A log on disk rather than the runner's console because the interesting
+    run is the one that dies: stderr belongs to an interpreter that is
+    gone, and unittest's own summary never gets printed. The workflow
+    uploads this file whatever the job's outcome.
+    """
+    path = os.environ.get("GARAGE_TEST_TRACE_LOG")
+    if not TRACE or not path:
+        return None
+    try:
+        return open(path, "a", encoding="utf-8", buffering=1)
+    except OSError:
+        return None
+
+
+_TRACE_LOG = _open_trace_log()
+
+
 def trace(message):
-    """A progress marker, flushed, so a process that dies mid-test still
-    leaves the last line it reached behind."""
-    if TRACE:
-        sys.stderr.write("[trace] {}\n".format(message))
-        sys.stderr.flush()
+    """A progress marker, stamped and flushed, so a process that dies
+    mid-test still leaves the last line it reached behind.
 
-
-def process_snapshot(label):
-    """Every git, sh, sleep, python and pwsh process with its parent.
-
-    `_kill_tree` runs `taskkill /F /T` on a child PID, and a victim of that
-    exits with code 1 and prints nothing -- which is exactly what the runner
-    showed. This says which processes existed, and who their parents were,
-    at the moments around a kill.
+    Stamped in UTC, and carrying the interpreter's PID, because these
+    lines are read next to watch_processes.ps1's: this log says what the
+    suite was about to do, that one says what the machine did about it.
+    Line them up by PID rather than by clock -- the watcher's stamps are
+    WMI delivery times and run about a second late, which the calibration
+    marker below measures for each run.
     """
     if not TRACE:
         return
-    script = (
-        "Get-CimInstance Win32_Process | "
-        "Where-Object { $_.Name -match 'git|sh\\.exe|sleep|python|pwsh' } | "
-        "ForEach-Object { \"$($_.ProcessId) parent=$($_.ParentProcessId) $($_.Name)\" }"
-    )
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%H:%M:%S.%f")[:-3]
+    line = "[trace] {} pid={} {}\n".format(stamp, os.getpid(), message)
+    stream = _TRACE_LOG if _TRACE_LOG is not None else sys.stderr
+    stream.write(line)
+    stream.flush()
+
+
+def _calibrate_against_the_watcher():
+    """Spawn one throwaway process and name its PID, so the two logs can
+    be aligned.
+
+    watch_processes.ps1 stamps its records with WMI's delivery time, which
+    runs about a second behind the event and varies. That makes "did the
+    taskkill start before or after git took the lock" unanswerable by
+    comparing the two clocks -- so this measures the offset instead: the
+    watcher's `start pid=N cmd.exe` for the PID named below must, in real
+    time, fall between this line and the next one, and whatever it says
+    instead is that run's offset.
+
+    Called once at import, before any test exists, so the one subprocess
+    it costs cannot land inside the race being hunted. Everything else in
+    this module stays spawn-free for exactly that reason.
+    """
+    if not TRACE:
+        return
+    trace("calibration: spawning the marker process now")
     try:
-        out = subprocess.run(
-            ["powershell", "-NoProfile", "-Command", script],
-            capture_output=True,
-            text=True,
-            timeout=60,
-        ).stdout.strip()
-    except (OSError, subprocess.SubprocessError) as exc:
-        out = "snapshot failed: {}".format(exc)
-    trace(
-        "processes at {} -- this interpreter is pid {}:\n{}".format(
-            label, os.getpid(), out
+        marker = subprocess.Popen(
+            ["cmd", "/c", "exit"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
-    )
+    except OSError as exc:
+        trace("calibration: no marker ({})".format(exc))
+        return
+    trace("calibration: the marker was cmd.exe pid {}".format(marker.pid))
+    marker.wait()
 
 
 def _trace_kills():
@@ -79,20 +127,16 @@ def _trace_kills():
     original = runner_module._kill_tree
 
     def traced(process):
+        # No tasklist here any more: asking what the PID currently is cost
+        # a subprocess at the exact moment the race is decided. The watcher
+        # answers it better anyway -- it recorded when that PID was created
+        # and under which parent, so a PID that has been recycled since
+        # this Popen captured it shows up as two start records.
         pid = process.pid
-        alive = process.poll() is None
-        try:
-            listing = subprocess.run(
-                ["tasklist", "/FI", "PID eq {}".format(pid), "/FO", "CSV", "/NH"],
-                capture_output=True,
-                text=True,
-                timeout=60,
-            ).stdout.strip()
-        except (OSError, subprocess.SubprocessError) as exc:
-            listing = "tasklist failed: {}".format(exc)
         trace(
-            "killing tree of pid {} (still running: {}) -- that pid is now: {}"
-            " -- this interpreter is pid {}".format(pid, alive, listing, os.getpid())
+            "killing tree of pid {} (still running: {})".format(
+                pid, process.poll() is None
+            )
         )
         result = original(process)
         trace("kill of pid {} returned".format(pid))
@@ -101,6 +145,7 @@ def _trace_kills():
     runner_module._kill_tree = traced
 
 
+_calibrate_against_the_watcher()
 _trace_kills()
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -3240,11 +3285,13 @@ class TestCommitPanelStopLeavesTheWorktreeUsable(
     def setUp(self):
         super().setUp()
         trace("=== {} body starting".format(self.id()))
-        process_snapshot("start of {}".format(self.id()))
-        # Registered after the fixture's temp cleanup, so it runs before it:
-        # what is still alive when the test is over, while its tree is still
-        # on disk to be blamed.
-        self.addCleanup(process_snapshot, "end of {}".format(self.id()))
+        # No process snapshot at either end of the test any more. It was
+        # here to say what was alive around a kill and who its parent was,
+        # and it spawned a PowerShell to find out -- inside setUp, which is
+        # where the interpreter has been dying. The watcher records the
+        # same lineage continuously and from outside, so this marker and
+        # its timestamp are all the test itself needs to contribute.
+        self.addCleanup(trace, "=== {} over".format(self.id()))
 
     def wait_for_lock(self, panel, lock):
         """Wait for git to take the index lock, and explain a timeout.
@@ -3272,7 +3319,7 @@ class TestCommitPanelStopLeavesTheWorktreeUsable(
         if lock.exists():
             trace("the lock appeared after {}ms".format(waited))
             return
-        process_snapshot("the lock wait timing out")
+        trace("the lock wait timed out after {}ms".format(waited))
         self.fail(
             "git never took the index lock at {}\n"
             "  hook marker exists: {}\n"
