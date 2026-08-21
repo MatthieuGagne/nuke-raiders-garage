@@ -29,5 +29,17 @@ jobs:
       # was retired with the issue -- `git log -- tools/garage/ci` has it,
       # and it is worth restoring rather than reinventing if a job ever
       # again ends without saying why.
+      #
+      # The exit code is echoed because a job whose log ends in `OK` and
+      # still fails is the exact shape #8 wasted weeks on. `1` there is
+      # usually the shell's, standing in for a child that died some other
+      # way; 0xC0000409 is a Windows fail-fast, which faulthandler cannot
+      # see and which Qt reaches by destroying a QThread that is still
+      # running.
       - name: Run panel test suite
-        run: python -u -X faulthandler -m unittest discover -s tests/garage -p 'test_*.py' -v
+        run: |
+          python -u -X faulthandler -m unittest discover -s tests/garage -p 'test_*.py' -v
+          $code = $LASTEXITCODE
+          $hex = '0x{0:X8}' -f ([int64] $code -band 0xFFFFFFFF)
+          Write-Host "python exited $code ($hex)"
+          exit $code
