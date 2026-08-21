@@ -3093,10 +3093,18 @@ class CommitPanelFixture:
         self.binding = project.bind(self.garage_root)
         return self.binding
 
-    def change_config(self):
+    def change_config(self, speed="7u"):
+        """One tracked edit, ready to commit. `speed` exists so a test can
+        make a *second*, different edit: `git commit -a` with nothing to
+        commit exits non-zero, so re-writing the same value would not give
+        a later commit anything to do.
+        """
         path = self.game_repo / "src" / "config.h"
         path.write_text(
-            PANEL_CONFIG_TEXT.replace("GEAR1_MAX_SPEED        2u", "GEAR1_MAX_SPEED        7u"),
+            PANEL_CONFIG_TEXT.replace(
+                "GEAR1_MAX_SPEED        2u",
+                "GEAR1_MAX_SPEED        {}".format(speed),
+            ),
             encoding="utf-8",
         )
 
@@ -3335,6 +3343,80 @@ class TestCommitPanelStopLeavesTheWorktreeUsable(
             )
         )
 
+    def test_a_stop_whose_kill_missed_still_reads_as_stopped_in_the_bar(self):
+        """The compile bar's half of the same fact.
+
+        A stop whose kill missed leaves a result that *succeeded*, and for
+        a sequence that is not a pass: "clean build" stopped while `make
+        clean` was running can end with the clean ok and the build never
+        started. Reporting that as "ok" would claim a build that never
+        happened.
+        """
+        clean = make_runner.make_command("clean")
+        outran_its_stop = make_runner.RunResult(
+            clean, exit_code=0, duration_s=1.2, cancelled=False, stop_requested=True
+        )
+
+        self.assertEqual(CompileBar._outcome_state([outran_its_stop]), "idle")
+        self.assertIn("stopped", CompileBar._outcome_text([outran_its_stop]))
+        self.assertNotIn("ok in", CompileBar._outcome_text([outran_its_stop]))
+
+    def assert_the_report_matches_the_repository(self, panel, before):
+        """The invariant a stop must hold, whichever way the race went.
+
+        Stop kills a process tree, and `taskkill /F /T` can miss one that
+        is still growing (#8), so a stop pressed while git is committing
+        genuinely has two possible outcomes: the commit was prevented, or
+        it was not. Both are acceptable -- the race cannot be closed, only
+        narrowed, since a stop pressed a microsecond after git finishes can
+        never be honoured. What is never acceptable is the panel saying one
+        and the repository saying the other, which is what #8 caught.
+        """
+        committed = self.git_log() != before
+        status = panel.status_text()
+        if committed:
+            self.assertNotIn(
+                "nothing was committed",
+                status,
+                "the commit is on the branch and the panel denies it:\n"
+                "  status: {}\n  log:\n{}".format(status, panel.log_text()),
+            )
+            self.assertIn("too late", status)
+        else:
+            self.assertIn("stopped", status)
+
+    def test_a_stop_whose_kill_missed_reports_the_commit_anyway(self):
+        """The #8 sequence, forced: the kill misses, git commits, and the
+        panel has to own up to it rather than announce a stop.
+
+        Neutering `_kill_tree` is the only part of that sequence a test can
+        make happen on purpose; everything after it is the real code.
+        """
+        self.on_branch()
+        self.change_config()
+        self.install_slow_hook()
+        panel = self.panel()
+        panel.set_message("tune the gears")
+        received = []
+        panel.committed.connect(received.append)
+        before = self.git_log()
+
+        lock = commit_core.git_dir(self.game_repo) / "index.lock"
+        with mock.patch.object(make_runner, "_kill_tree", lambda process: None):
+            panel.commit()
+            self.wait_for_lock(panel, lock)
+            panel.stop()
+            self.assertTrue(self.wait_until(lambda: not panel.is_running()))
+
+        self.assertNotEqual(
+            self.git_log(), before, "the neutered kill should have let it commit"
+        )
+        self.assertNotIn("nothing was committed", panel.status_text())
+        self.assertIn("too late", panel.status_text())
+        # The header and the diff follow this signal. Without it they would
+        # keep describing a worktree that is now one commit behind.
+        self.assertEqual(len(received), 1)
+
     def test_stopping_a_commit_leaves_no_lock_behind(self):
         self.on_branch()
         self.change_config()
@@ -3343,6 +3425,7 @@ class TestCommitPanelStopLeavesTheWorktreeUsable(
         panel.set_message("tune the gears")
 
         lock = commit_core.git_dir(self.game_repo) / "index.lock"
+        before = self.git_log()
         panel.commit()
         # Wait for git to actually take the lock -- it stages the -a
         # changes into index.lock *before* running the hook, and stopping
@@ -3351,13 +3434,26 @@ class TestCommitPanelStopLeavesTheWorktreeUsable(
         panel.stop()
         self.assertTrue(self.wait_until(lambda: not panel.is_running()))
 
-        self.assertIn("stopped", panel.status_text())
+        self.assert_the_report_matches_the_repository(panel, before)
+        # No lock left behind is the property; which of three routes got
+        # there is not, and the test cannot choose between them. Garage
+        # removes it after a kill that left git no chance to; git removes
+        # it itself when the kill took only the hook and git aborted
+        # cleanly, or when the kill missed and the commit completed. Only
+        # the first writes a line about it, and that line is covered where
+        # it can be forced -- see TestStaleIndexLock in
+        # tests/test_garage_core.py.
         self.assertFalse(lock.exists(), "the killed commit left its index lock")
-        self.assertIn("index.lock", panel.log_text())
 
         # The real proof: git can write again. Without the cleanup this
         # fails with "Unable to create ... index.lock: File exists".
+        #
+        # A fresh edit first, because the stop may have lost its race and
+        # committed the previous one -- and `git commit -a` with nothing
+        # staged exits non-zero, which would fail this on the wrong
+        # grounds. That is the `False is not true` half of #8.
         hook.unlink()
+        self.change_config("9u")
         after = make_runner.run(
             commit_core.commit_command("after the stop"),
             self.game_repo,
@@ -3366,7 +3462,12 @@ class TestCommitPanelStopLeavesTheWorktreeUsable(
         self.assertTrue(after.ok)
         self.assertIn("after the stop", self.git_log())
 
-    def test_nothing_is_committed_by_the_stopped_run(self):
+    def test_a_stopped_run_never_hides_a_commit_it_failed_to_prevent(self):
+        """This asserted `git_log() == before` until #8, and that was the
+        wrong expectation rather than a flaky one: a stop whose kill misses
+        does commit, about one run in three on Windows. The report matching
+        the repository is the property that actually has to hold.
+        """
         self.on_branch()
         self.change_config()
         self.install_slow_hook()
@@ -3380,7 +3481,7 @@ class TestCommitPanelStopLeavesTheWorktreeUsable(
         panel.stop()
         self.assertTrue(self.wait_until(lambda: not panel.is_running()))
 
-        self.assertEqual(self.git_log(), before)
+        self.assert_the_report_matches_the_repository(panel, before)
 
     def test_closing_the_window_mid_commit_cleans_up_too(self):
         # `_on_done` never runs on this path -- its signal is queued to an

@@ -105,6 +105,11 @@ class RunResult:
     exit_code: int
     duration_s: float
     cancelled: bool = False
+    # Whether a stop was asked for, whatever came of it. `cancelled` says
+    # the stop worked; this says it was pressed. They differ exactly when
+    # the kill lost the race, and a caller that wants to tell the user
+    # "too late" rather than "nothing happened" needs both.
+    stop_requested: bool = False
 
     @property
     def ok(self) -> bool:
@@ -292,7 +297,9 @@ def run(
     started = time.monotonic()
 
     if cancellation is not None and cancellation.cancelled:
-        return RunResult(command, EXIT_CANCELLED, 0.0, cancelled=True)
+        return RunResult(
+            command, EXIT_CANCELLED, 0.0, cancelled=True, stop_requested=True
+        )
 
     try:
         process = subprocess.Popen(
@@ -322,7 +329,23 @@ def run(
         if cancellation is not None:
             cancellation._attach(None)
 
-    was_cancelled = cancellation is not None and cancellation.cancelled
+    stop_requested = cancellation is not None and cancellation.cancelled
+    # A stop is only a stop if it ended something. `_kill_tree` runs
+    # `taskkill /F /T`, which enumerates a process tree and then kills what
+    # it enumerated -- so a tree still growing underneath it can outlive
+    # the kill, and the command runs to completion regardless. That is not
+    # a hypothesis: nuke-raiders-garage#8 caught taskkill returning 128
+    # having failed on git itself, git going on to finish the commit, and
+    # the panel announcing "stopped -- nothing was committed" over a commit
+    # that was on the branch.
+    #
+    # An exit code of zero is the evidence that it finished: a process
+    # ended by TerminateProcess cannot produce one. The reverse is not
+    # decidable -- a non-zero exit after a stop may be the kill or may be
+    # the command failing on its own -- and between those two readings
+    # "the user stopped it" is the one that must not be shown as a broken
+    # build, so it stays.
+    was_cancelled = stop_requested and exit_code != 0
     if was_cancelled:
         # A killed process reports whatever the kill produced; the run's
         # own outcome is "the user stopped it", which is not a failure of
@@ -333,6 +356,7 @@ def run(
         exit_code,
         time.monotonic() - started,
         cancelled=was_cancelled,
+        stop_requested=stop_requested,
     )
 
 

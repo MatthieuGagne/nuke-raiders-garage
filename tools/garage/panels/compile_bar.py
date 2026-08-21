@@ -448,7 +448,12 @@ class CompileBar(QWidget):
     def _outcome_state(results: List[make_runner.RunResult]) -> str:
         if not results:
             return "idle"
-        if any(r.cancelled for r in results):
+        # `stop_requested` as well as `cancelled`, because a stop whose
+        # kill missed leaves a result that succeeded (#8). For a sequence
+        # that matters: "clean build" stopped during `make clean` can end
+        # with the clean reported ok and the build never started, and
+        # "pass" there would claim a build that did not happen.
+        if any(r.cancelled or r.stop_requested for r in results):
             return "idle"
         return "pass" if all(r.ok for r in results) else "fail"
 
@@ -461,9 +466,11 @@ class CompileBar(QWidget):
         if not results:
             return "stopped"
         total = sum(r.duration_s for r in results)
-        cancelled = next((r for r in results if r.cancelled), None)
-        if cancelled is not None:
-            return f"{cancelled.command.label} — stopped after {total:.1f}s"
+        stopped = next(
+            (r for r in results if r.cancelled or r.stop_requested), None
+        )
+        if stopped is not None:
+            return f"{stopped.command.label} — stopped after {total:.1f}s"
         failed = next((r for r in results if not r.ok), None)
         if failed is not None:
             return (
