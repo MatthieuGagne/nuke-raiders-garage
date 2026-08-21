@@ -17,111 +17,17 @@ jobs:
       - name: Install requirements (PySide6)
         run: pip install -r requirements.txt
 
-      # What the hook the stop tests install actually depends on. Its first
-      # line is `#!/bin/sh` and its body calls `sleep`, and if either is
-      # missing on this image the commit ends before it can be stopped.
-      # -CommandType Application because the last run of this probe reported
-      # `sleep` with a blank Source: PowerShell had resolved its own alias
-      # for Start-Sleep, which says nothing about what git's sh will find.
-      - name: Probe what the stop tests depend on
-        run: |
-          git --version
-          Get-Command sh, sleep, taskkill, tasklist `
-            -CommandType Application -ErrorAction SilentlyContinue |
-            Select-Object Name, Source | Format-Table -AutoSize
-          Get-ChildItem 'C:\Program Files\Git\usr\bin\sleep.exe' -ErrorAction SilentlyContinue |
-            Select-Object FullName
-
-      # #8 has two signatures, and one of them cannot be observed from
-      # inside the suite at all: an interpreter ended by TerminateProcess
-      # exits 1, prints nothing, and never reaches faulthandler. So the
-      # process timeline is recorded by a separate process that outlives
-      # every step below and is stopped, and uploaded, at the end.
-      #
-      # The previous attempt narrated from inside instead -- a PowerShell
-      # snapshot in setUp, a tasklist around each kill -- and eight
-      # consecutive samples then passed, because sub-second subprocesses in
-      # the middle of a race decide it. Nothing in the test process spawns
-      # anything any more; it writes trace lines to a file, on the same UTC
-      # clock as the watcher, and the two logs are read together.
-      - name: Start the process watcher
-        run: |
-          $huntDir = Join-Path $env:RUNNER_TEMP 'garage-hunt'
-          New-Item -ItemType Directory -Force -Path $huntDir | Out-Null
-          $processLog = Join-Path $huntDir 'processes.log'
-          $watcher = Start-Process pwsh -PassThru -WindowStyle Hidden -ArgumentList @(
-            '-NoProfile', '-ExecutionPolicy', 'Bypass',
-            '-File', 'tools/garage/ci/watch_processes.ps1',
-            '-LogPath', $processLog)
-          # Give the CIM subscriptions a moment, so the suite's first
-          # processes are inside the record rather than before it.
-          Start-Sleep -Seconds 3
-          if ($watcher.HasExited) {
-            Get-Content $processLog -ErrorAction SilentlyContinue
-            throw "the process watcher exited immediately"
-          }
-          Write-Host "watcher pid $($watcher.Id), log $processLog"
-          "GARAGE_HUNT_DIR=$huntDir" | Out-File $env:GITHUB_ENV -Append
-          "GARAGE_WATCHER_PID=$($watcher.Id)" | Out-File $env:GITHUB_ENV -Append
-          "GARAGE_TEST_TRACE_LOG=$(Join-Path $huntDir 'trace.log')" |
-            Out-File $env:GITHUB_ENV -Append
-
       # -u, -v and faulthandler are diagnostics, not noise. A Qt suite can
       # die on an abort rather than a failure, unittest prints its summary
       # last, and buffered output is lost when a process is terminated -- so
       # an abort otherwise leaves a log that names nothing. This run failed
       # once with exactly `...................F` and nothing else.
       #
-      # This step is the gate and stays the gate: when the flake hits, the
-      # job goes red. #8 argues why, and it is about the product, not the
-      # test -- if the stop is intermittently failing to clean git's index
-      # lock on a slow machine, a green job here would be a false report
-      # that pressing Stop cannot strand a worktree.
+      # They were not enough on their own: #8's interpreter died by Windows
+      # fail-fast, which bypasses faulthandler entirely, and naming it took
+      # a process watcher running outside the interpreter. That apparatus
+      # was retired with the issue -- `git log -- tools/garage/ci` has it,
+      # and it is worth restoring rather than reinventing if a job ever
+      # again ends without saying why.
       - name: Run panel test suite
-        env:
-          GARAGE_TEST_TRACE: "1"
         run: python -u -X faulthandler -m unittest discover -s tests/garage -p 'test_*.py' -v
-
-      # The flake is about one job in two, so one sample per push is a slow
-      # way to learn anything. Three more runs of just that class cost about
-      # twenty seconds each and never decide the job -- the run above is the
-      # gate. `if: always()` because the interesting case is the one where
-      # the gate already died.
-      - name: Sample the stop tests three more times
-        if: always()
-        continue-on-error: true
-        env:
-          GARAGE_TEST_TRACE: "1"
-        run: |
-          foreach ($i in 1..3) {
-            Write-Host "=== sample $i"
-            python -u -X faulthandler -m unittest -v `
-              tests.garage.test_panels.TestCommitPanelStopLeavesTheWorktreeUsable
-            Write-Host "=== sample $i exited $LASTEXITCODE"
-          }
-
-      - name: Stop the process watcher
-        if: always()
-        run: |
-          if (-not $env:GARAGE_HUNT_DIR) { return }
-          $stopFile = Join-Path $env:GARAGE_HUNT_DIR 'processes.log.stop'
-          Set-Content -Path $stopFile -Value ''
-          # The watcher notices the stop file when its event queue runs dry
-          # or every hundred events, whichever comes first, and WMI delivers
-          # about a second late -- so give it room to drain and write its
-          # summary before the kill below, which is only a backstop.
-          Start-Sleep -Seconds 8
-          if ($env:GARAGE_WATCHER_PID) {
-            Stop-Process -Id $env:GARAGE_WATCHER_PID -Force -ErrorAction SilentlyContinue
-          }
-          Get-ChildItem $env:GARAGE_HUNT_DIR | Select-Object Name, Length
-
-      # `if: always()`, and deliberately not conditioned on failure: the
-      # green samples are the control the failing one is read against.
-      - name: Upload the hunt logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: garage-hunt-logs
-          path: ${{ runner.temp }}/garage-hunt/
-          if-no-files-found: warn
