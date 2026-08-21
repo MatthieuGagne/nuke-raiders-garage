@@ -55,6 +55,9 @@ class CommitPanel(QWidget):
         self.binding = binding
         self.binding_error = binding_error
         self._summary: Optional[diff_core.ChangeSummary] = None
+        # HEAD as it was when the running commit started, so a stopped run
+        # can be compared against the repository rather than trusted (#8).
+        self._head_before: Optional[str] = None
 
         self._runs = RunController(self)
         self._runs.line.connect(self._append_line)
@@ -173,6 +176,14 @@ class CommitPanel(QWidget):
             return refusal
 
         self.log_view.clear()
+        # Remembered so a stopped run can be checked against the repository
+        # rather than against its own exit code. Stop kills a process tree,
+        # and git can be killed in the gap between writing the commit and
+        # exiting -- so a non-zero exit is no evidence that nothing was
+        # committed. Only HEAD is (#8).
+        self._head_before = commit_core.head_line(
+            self.binding.active_worktree.path
+        )
         self._set_running(True)
         self.status_label.setText(
             "committing — the pre-commit verification runs the tool suite, "
@@ -185,9 +196,14 @@ class CommitPanel(QWidget):
         return None
 
     def stop(self) -> None:
-        """Stop the verification. git is killed with its hook, so nothing
-        is committed -- a half-verified commit is exactly what R6 exists to
-        prevent.
+        """Stop the verification, by killing git along with its hook -- a
+        half-verified commit is exactly what R6 exists to prevent.
+
+        It usually prevents the commit, but it cannot promise to. The kill
+        walks a process tree that git is still growing, and it can also
+        land after git has written the commit; either way the commit
+        stands, and `_on_done` reports the one that got through rather than
+        claiming none did (#8).
         """
         if not self.is_running():
             return
@@ -239,6 +255,13 @@ class CommitPanel(QWidget):
         result = results[0] if results else None
 
         if result is None or result.cancelled:
+            # A stop that killed git before it committed is the ordinary
+            # case, but it is not the only one: the kill can miss a process
+            # tree that is still growing, and it can land after git has
+            # already written the commit. Ask the repository instead of
+            # believing the exit code (#8).
+            if self._announce_a_commit_the_stop_did_not_prevent():
+                return
             # Garage killed git mid-stage, so the index lock it was holding
             # is still there — and every later git write in this worktree
             # (including the next Build, which runs git through the
@@ -268,7 +291,45 @@ class CommitPanel(QWidget):
         branch = self.binding.active_worktree.branch
         self.message_edit.clear()
         self.refresh()
-        self.status_label.setText(
-            f"committed in {result.duration_s:.0f}s — {head} on {branch}"
-        )
+        if result.stop_requested:
+            self.status_label.setText(self._stopped_too_late_text(head, branch))
+        else:
+            self.status_label.setText(
+                f"committed in {result.duration_s:.0f}s — {head} on {branch}"
+            )
+        # Emitted on both paths. The window refreshes its header and diff
+        # from this, and a commit it was not told about is one it goes on
+        # displaying the worktree from before.
         self.committed.emit(head or "")
+
+    @staticmethod
+    def _stopped_too_late_text(head: Optional[str], branch: str) -> str:
+        """What Stop says when the commit happened anyway.
+
+        "stopped — nothing was committed", which is what Garage used to say
+        here, leaves the user believing their branch is clean while the
+        commit is on it (#8).
+        """
+        return f"stopped too late — the commit was already made: {head} on {branch}"
+
+    def _announce_a_commit_the_stop_did_not_prevent(self) -> bool:
+        """Report a commit that outran its stop, and say whether there was
+        one.
+
+        HEAD is the only witness worth asking. The run's exit code cannot
+        answer it: `taskkill /F /T` can miss a process tree that is still
+        growing, in which case git finishes and exits zero, and it can also
+        land after git has written the commit but before git has exited, in
+        which case git dies non-zero with the commit already on the branch.
+        Both were observed on Windows in #8, and both used to be announced
+        as "nothing was committed".
+        """
+        head = commit_core.head_line(self.binding.active_worktree.path)
+        if head is None or head == self._head_before:
+            return False
+        branch = self.binding.active_worktree.branch
+        self.message_edit.clear()
+        self.refresh()
+        self.status_label.setText(self._stopped_too_late_text(head, branch))
+        self.committed.emit(head)
+        return True

@@ -2564,6 +2564,68 @@ class TestCancellation(unittest.TestCase):
         # A stopped run is not a failed build, and must not read as one.
         self.assertFalse(result.ok)
 
+    def test_a_stop_that_lost_the_race_reports_the_run_that_finished(self):
+        """A stop whose kill missed must not be reported as a stop.
+
+        `taskkill /F /T` enumerates a process tree and then kills what it
+        enumerated, so a tree still growing underneath it -- git spawning
+        the hook, the hook spawning its own children -- can outlive the
+        kill. Observed on Windows in nuke-raiders-garage#8: the kill
+        returned 128 having failed on git itself, git finished the commit,
+        and the panel still announced "stopped -- nothing was committed"
+        over a commit that was on the branch.
+
+        The kill is neutered here to stand for one that missed, which is
+        the only part of that sequence a test can force.
+        """
+        cancellation = make_runner.Cancellation()
+
+        def on_line(line):
+            # Cancel while the child is alive, which is the real order.
+            cancellation.cancel()
+
+        with unittest.mock.patch.object(make_runner, "_kill_tree", lambda p: None):
+            result = make_runner.run(
+                python_command("print('done', flush=True)"),
+                Path.cwd(),
+                on_line,
+                cancellation,
+            )
+
+        self.assertFalse(result.cancelled, "a run that succeeded is not a stop")
+        self.assertTrue(result.ok)
+        self.assertEqual(result.exit_code, 0)
+        # The caller still needs to know a stop was asked for, so it can say
+        # the stop was too late rather than pretending none was pressed.
+        self.assertTrue(result.stop_requested)
+
+    def test_a_stop_whose_kill_worked_is_still_a_stop(self):
+        """The counterpart: a non-zero exit after a stop stays cancelled.
+
+        A killed process cannot be told apart from one that failed on its
+        own, and between those two readings "the user stopped it" is the
+        one that must not be displayed as a broken build.
+        """
+        cancellation = make_runner.Cancellation()
+
+        def on_line(line):
+            cancellation.cancel()
+
+        with unittest.mock.patch.object(make_runner, "_kill_tree", lambda p: None):
+            result = make_runner.run(
+                python_command(
+                    "import sys\nprint('x', flush=True)\nsys.exit(3)\n"
+                ),
+                Path.cwd(),
+                on_line,
+                cancellation,
+            )
+
+        self.assertTrue(result.cancelled)
+        self.assertTrue(result.stop_requested)
+        self.assertEqual(result.exit_code, make_runner.EXIT_CANCELLED)
+        self.assertFalse(result.ok)
+
     def test_a_command_started_after_a_cancellation_never_runs(self):
         cancellation = make_runner.Cancellation()
         cancellation.cancel()

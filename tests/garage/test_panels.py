@@ -2,6 +2,7 @@
 `python -m unittest discover -s tests` (tests/garage/ has no __init__.py,
 so default discovery never descends into it). Run via `make test-garage`.
 """
+import datetime
 import json
 import os
 import re
@@ -16,49 +17,96 @@ from unittest import mock
 # The GitHub Windows runner fails one of those tests about half the time, and
 # has done it two different ways: once a fifteen-second wait for git's
 # index.lock expired, once the interpreter died eleven milliseconds into a
-# test with exit code 1 and no output at all. Neither reproduces on a
-# developer machine -- eight consecutive local runs of that class pass -- so
-# the runner has to narrate what it does. Off unless the workflow asks.
+# test with exit code 1 and no output at all. Off unless the workflow asks.
+#
+# #8 recorded that neither signature reproduced on a developer machine.
+# That is no longer true: unmodified main, run six times on Windows 11 on
+# 2026-08-20, failed three -- twice on the index.lock assertion and once
+# on `False is not true`. The hunt is not CI-only any more, and a local
+# failure is the cheaper loop.
+#
+# Everything here has to stay cheap. The first attempt at this narration
+# spawned a PowerShell inside setUp and a tasklist around every kill, and
+# eight consecutive samples then passed: sub-second subprocesses in the
+# middle of a race are enough to decide it. What those spawns were for --
+# who existed, who their parent was, what a PID really is, what a process
+# died of -- is now recorded from outside the interpreter by
+# tools/garage/ci/watch_processes.ps1, which pays nothing here and, unlike
+# anything in this process, still reports a death by TerminateProcess.
+# What is left below is string writes.
 TRACE = os.environ.get("GARAGE_TEST_TRACE") == "1"
 
 
+def _open_trace_log():
+    """The file `trace` appends to, or None to fall back to stderr.
+
+    A log on disk rather than the runner's console because the interesting
+    run is the one that dies: stderr belongs to an interpreter that is
+    gone, and unittest's own summary never gets printed. The workflow
+    uploads this file whatever the job's outcome.
+    """
+    path = os.environ.get("GARAGE_TEST_TRACE_LOG")
+    if not TRACE or not path:
+        return None
+    try:
+        return open(path, "a", encoding="utf-8", buffering=1)
+    except OSError:
+        return None
+
+
+_TRACE_LOG = _open_trace_log()
+
+
 def trace(message):
-    """A progress marker, flushed, so a process that dies mid-test still
-    leaves the last line it reached behind."""
-    if TRACE:
-        sys.stderr.write("[trace] {}\n".format(message))
-        sys.stderr.flush()
+    """A progress marker, stamped and flushed, so a process that dies
+    mid-test still leaves the last line it reached behind.
 
-
-def process_snapshot(label):
-    """Every git, sh, sleep, python and pwsh process with its parent.
-
-    `_kill_tree` runs `taskkill /F /T` on a child PID, and a victim of that
-    exits with code 1 and prints nothing -- which is exactly what the runner
-    showed. This says which processes existed, and who their parents were,
-    at the moments around a kill.
+    Stamped in UTC, and carrying the interpreter's PID, because these
+    lines are read next to watch_processes.ps1's: this log says what the
+    suite was about to do, that one says what the machine did about it.
+    Line them up by PID rather than by clock -- the watcher's stamps are
+    WMI delivery times and run about a second late, which the calibration
+    marker below measures for each run.
     """
     if not TRACE:
         return
-    script = (
-        "Get-CimInstance Win32_Process | "
-        "Where-Object { $_.Name -match 'git|sh\\.exe|sleep|python|pwsh' } | "
-        "ForEach-Object { \"$($_.ProcessId) parent=$($_.ParentProcessId) $($_.Name)\" }"
-    )
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%H:%M:%S.%f")[:-3]
+    line = "[trace] {} pid={} {}\n".format(stamp, os.getpid(), message)
+    stream = _TRACE_LOG if _TRACE_LOG is not None else sys.stderr
+    stream.write(line)
+    stream.flush()
+
+
+def _calibrate_against_the_watcher():
+    """Spawn one throwaway process and name its PID, so the two logs can
+    be aligned.
+
+    watch_processes.ps1 stamps its records with WMI's delivery time, which
+    runs about a second behind the event and varies. That makes "did the
+    taskkill start before or after git took the lock" unanswerable by
+    comparing the two clocks -- so this measures the offset instead: the
+    watcher's `start pid=N cmd.exe` for the PID named below must, in real
+    time, fall between this line and the next one, and whatever it says
+    instead is that run's offset.
+
+    Called once at import, before any test exists, so the one subprocess
+    it costs cannot land inside the race being hunted. Everything else in
+    this module stays spawn-free for exactly that reason.
+    """
+    if not TRACE:
+        return
+    trace("calibration: spawning the marker process now")
     try:
-        out = subprocess.run(
-            ["powershell", "-NoProfile", "-Command", script],
-            capture_output=True,
-            text=True,
-            timeout=60,
-        ).stdout.strip()
-    except (OSError, subprocess.SubprocessError) as exc:
-        out = "snapshot failed: {}".format(exc)
-    trace(
-        "processes at {} -- this interpreter is pid {}:\n{}".format(
-            label, os.getpid(), out
+        marker = subprocess.Popen(
+            ["cmd", "/c", "exit"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
-    )
+    except OSError as exc:
+        trace("calibration: no marker ({})".format(exc))
+        return
+    trace("calibration: the marker was cmd.exe pid {}".format(marker.pid))
+    marker.wait()
 
 
 def _trace_kills():
@@ -79,20 +127,16 @@ def _trace_kills():
     original = runner_module._kill_tree
 
     def traced(process):
+        # No tasklist here any more: asking what the PID currently is cost
+        # a subprocess at the exact moment the race is decided. The watcher
+        # answers it better anyway -- it recorded when that PID was created
+        # and under which parent, so a PID that has been recycled since
+        # this Popen captured it shows up as two start records.
         pid = process.pid
-        alive = process.poll() is None
-        try:
-            listing = subprocess.run(
-                ["tasklist", "/FI", "PID eq {}".format(pid), "/FO", "CSV", "/NH"],
-                capture_output=True,
-                text=True,
-                timeout=60,
-            ).stdout.strip()
-        except (OSError, subprocess.SubprocessError) as exc:
-            listing = "tasklist failed: {}".format(exc)
         trace(
-            "killing tree of pid {} (still running: {}) -- that pid is now: {}"
-            " -- this interpreter is pid {}".format(pid, alive, listing, os.getpid())
+            "killing tree of pid {} (still running: {})".format(
+                pid, process.poll() is None
+            )
         )
         result = original(process)
         trace("kill of pid {} returned".format(pid))
@@ -101,6 +145,7 @@ def _trace_kills():
     runner_module._kill_tree = traced
 
 
+_calibrate_against_the_watcher()
 _trace_kills()
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -140,6 +185,7 @@ from tools.garage.panels.diff_view import DiffPanel
 from tools.garage.panels.doctor import DoctorPanel
 from tools.garage.panels.tuner import TunerPanel, compute_derived_dependents
 from tools.garage.panels.worktrees import WorktreesPanel
+from tools.garage.panels import runner as runner_panel
 
 GAME_REPO_REMOTE_URL = "https://github.com/MatthieuGagne/gmb-nuke-raider.git"
 
@@ -2048,6 +2094,71 @@ class CompileBarFixture:
         )
 
 
+class TestRunControllerKeepsAThreadItCouldNotJoin(unittest.TestCase):
+    """Signature B of #8: a run thread that outlives its join must not be
+    destroyed.
+
+    Qt does not report that as an error. It is a qFatal, qFatal calls
+    abort(), and on Windows abort() is a fail-fast -- the process goes with
+    exit code 0xC0000409, no message, no traceback and nothing faulthandler
+    can catch, inside whatever happened to be running when the deferred
+    delete came round. Three interpreters died that way in a single CI job.
+
+    The wait is shortened and the kill neutered here so the thread reliably
+    outlives its join, which on CI took a five-second hook to provoke.
+    """
+
+    SLOW = "import time\nprint('started', flush=True)\ntime.sleep(1.5)\n"
+
+    def test_a_thread_that_outlives_its_join_is_held_not_destroyed(self):
+        controller = runner_panel.RunController()
+        command = make_runner.Command(
+            argv=(sys.executable, "-c", self.SLOW), label="slow"
+        )
+        started = []
+        controller.line.connect(started.append)
+
+        with mock.patch.object(runner_panel, "STOP_TIMEOUT_MS", 50), mock.patch.object(
+            make_runner, "_kill_tree", lambda process: None
+        ):
+            controller.start([command], Path.cwd())
+            waited = 0
+            while waited < 10000 and not started:
+                QTest.qWait(20)
+                waited += 20
+            self.assertTrue(started, "the child never started")
+
+            controller.stop_and_wait()
+
+            # Still running, and therefore still held rather than deleted.
+            self.assertEqual(controller.abandoned_thread_count(), 1)
+
+        # And released once it really has finished, so nothing accumulates.
+        waited = 0
+        while waited < 15000 and controller.abandoned_thread_count():
+            QTest.qWait(20)
+            waited += 20
+        self.assertEqual(controller.abandoned_thread_count(), 0)
+
+    def test_a_thread_that_joins_in_time_is_deleted_as_before(self):
+        controller = runner_panel.RunController()
+        command = make_runner.Command(
+            argv=(sys.executable, "-c", "print('quick', flush=True)"), label="quick"
+        )
+        done = []
+        controller.finished.connect(done.append)
+
+        controller.start([command], Path.cwd())
+        waited = 0
+        while waited < 10000 and not done:
+            QTest.qWait(20)
+            waited += 20
+
+        self.assertTrue(done, "the run never finished")
+        self.assertEqual(controller.abandoned_thread_count(), 0)
+        self.assertFalse(controller.is_running())
+
+
 class TestCompileBar(CompileBarFixture, unittest.TestCase):
     """The compile bar drives `make_runner` on a worker thread. Every test
     below runs a real subprocess -- this interpreter, not `make`, so the
@@ -3048,10 +3159,18 @@ class CommitPanelFixture:
         self.binding = project.bind(self.garage_root)
         return self.binding
 
-    def change_config(self):
+    def change_config(self, speed="7u"):
+        """One tracked edit, ready to commit. `speed` exists so a test can
+        make a *second*, different edit: `git commit -a` with nothing to
+        commit exits non-zero, so re-writing the same value would not give
+        a later commit anything to do.
+        """
         path = self.game_repo / "src" / "config.h"
         path.write_text(
-            PANEL_CONFIG_TEXT.replace("GEAR1_MAX_SPEED        2u", "GEAR1_MAX_SPEED        7u"),
+            PANEL_CONFIG_TEXT.replace(
+                "GEAR1_MAX_SPEED        2u",
+                "GEAR1_MAX_SPEED        {}".format(speed),
+            ),
             encoding="utf-8",
         )
 
@@ -3240,11 +3359,13 @@ class TestCommitPanelStopLeavesTheWorktreeUsable(
     def setUp(self):
         super().setUp()
         trace("=== {} body starting".format(self.id()))
-        process_snapshot("start of {}".format(self.id()))
-        # Registered after the fixture's temp cleanup, so it runs before it:
-        # what is still alive when the test is over, while its tree is still
-        # on disk to be blamed.
-        self.addCleanup(process_snapshot, "end of {}".format(self.id()))
+        # No process snapshot at either end of the test any more. It was
+        # here to say what was alive around a kill and who its parent was,
+        # and it spawned a PowerShell to find out -- inside setUp, which is
+        # where the interpreter has been dying. The watcher records the
+        # same lineage continuously and from outside, so this marker and
+        # its timestamp are all the test itself needs to contribute.
+        self.addCleanup(trace, "=== {} over".format(self.id()))
 
     def wait_for_lock(self, panel, lock):
         """Wait for git to take the index lock, and explain a timeout.
@@ -3272,7 +3393,7 @@ class TestCommitPanelStopLeavesTheWorktreeUsable(
         if lock.exists():
             trace("the lock appeared after {}ms".format(waited))
             return
-        process_snapshot("the lock wait timing out")
+        trace("the lock wait timed out after {}ms".format(waited))
         self.fail(
             "git never took the index lock at {}\n"
             "  hook marker exists: {}\n"
@@ -3288,6 +3409,80 @@ class TestCommitPanelStopLeavesTheWorktreeUsable(
             )
         )
 
+    def test_a_stop_whose_kill_missed_still_reads_as_stopped_in_the_bar(self):
+        """The compile bar's half of the same fact.
+
+        A stop whose kill missed leaves a result that *succeeded*, and for
+        a sequence that is not a pass: "clean build" stopped while `make
+        clean` was running can end with the clean ok and the build never
+        started. Reporting that as "ok" would claim a build that never
+        happened.
+        """
+        clean = make_runner.make_command("clean")
+        outran_its_stop = make_runner.RunResult(
+            clean, exit_code=0, duration_s=1.2, cancelled=False, stop_requested=True
+        )
+
+        self.assertEqual(CompileBar._outcome_state([outran_its_stop]), "idle")
+        self.assertIn("stopped", CompileBar._outcome_text([outran_its_stop]))
+        self.assertNotIn("ok in", CompileBar._outcome_text([outran_its_stop]))
+
+    def assert_the_report_matches_the_repository(self, panel, before):
+        """The invariant a stop must hold, whichever way the race went.
+
+        Stop kills a process tree, and `taskkill /F /T` can miss one that
+        is still growing (#8), so a stop pressed while git is committing
+        genuinely has two possible outcomes: the commit was prevented, or
+        it was not. Both are acceptable -- the race cannot be closed, only
+        narrowed, since a stop pressed a microsecond after git finishes can
+        never be honoured. What is never acceptable is the panel saying one
+        and the repository saying the other, which is what #8 caught.
+        """
+        committed = self.git_log() != before
+        status = panel.status_text()
+        if committed:
+            self.assertNotIn(
+                "nothing was committed",
+                status,
+                "the commit is on the branch and the panel denies it:\n"
+                "  status: {}\n  log:\n{}".format(status, panel.log_text()),
+            )
+            self.assertIn("too late", status)
+        else:
+            self.assertIn("stopped", status)
+
+    def test_a_stop_whose_kill_missed_reports_the_commit_anyway(self):
+        """The #8 sequence, forced: the kill misses, git commits, and the
+        panel has to own up to it rather than announce a stop.
+
+        Neutering `_kill_tree` is the only part of that sequence a test can
+        make happen on purpose; everything after it is the real code.
+        """
+        self.on_branch()
+        self.change_config()
+        self.install_slow_hook()
+        panel = self.panel()
+        panel.set_message("tune the gears")
+        received = []
+        panel.committed.connect(received.append)
+        before = self.git_log()
+
+        lock = commit_core.git_dir(self.game_repo) / "index.lock"
+        with mock.patch.object(make_runner, "_kill_tree", lambda process: None):
+            panel.commit()
+            self.wait_for_lock(panel, lock)
+            panel.stop()
+            self.assertTrue(self.wait_until(lambda: not panel.is_running()))
+
+        self.assertNotEqual(
+            self.git_log(), before, "the neutered kill should have let it commit"
+        )
+        self.assertNotIn("nothing was committed", panel.status_text())
+        self.assertIn("too late", panel.status_text())
+        # The header and the diff follow this signal. Without it they would
+        # keep describing a worktree that is now one commit behind.
+        self.assertEqual(len(received), 1)
+
     def test_stopping_a_commit_leaves_no_lock_behind(self):
         self.on_branch()
         self.change_config()
@@ -3296,6 +3491,7 @@ class TestCommitPanelStopLeavesTheWorktreeUsable(
         panel.set_message("tune the gears")
 
         lock = commit_core.git_dir(self.game_repo) / "index.lock"
+        before = self.git_log()
         panel.commit()
         # Wait for git to actually take the lock -- it stages the -a
         # changes into index.lock *before* running the hook, and stopping
@@ -3304,13 +3500,26 @@ class TestCommitPanelStopLeavesTheWorktreeUsable(
         panel.stop()
         self.assertTrue(self.wait_until(lambda: not panel.is_running()))
 
-        self.assertIn("stopped", panel.status_text())
+        self.assert_the_report_matches_the_repository(panel, before)
+        # No lock left behind is the property; which of three routes got
+        # there is not, and the test cannot choose between them. Garage
+        # removes it after a kill that left git no chance to; git removes
+        # it itself when the kill took only the hook and git aborted
+        # cleanly, or when the kill missed and the commit completed. Only
+        # the first writes a line about it, and that line is covered where
+        # it can be forced -- see TestStaleIndexLock in
+        # tests/test_garage_core.py.
         self.assertFalse(lock.exists(), "the killed commit left its index lock")
-        self.assertIn("index.lock", panel.log_text())
 
         # The real proof: git can write again. Without the cleanup this
         # fails with "Unable to create ... index.lock: File exists".
+        #
+        # A fresh edit first, because the stop may have lost its race and
+        # committed the previous one -- and `git commit -a` with nothing
+        # staged exits non-zero, which would fail this on the wrong
+        # grounds. That is the `False is not true` half of #8.
         hook.unlink()
+        self.change_config("9u")
         after = make_runner.run(
             commit_core.commit_command("after the stop"),
             self.game_repo,
@@ -3319,7 +3528,12 @@ class TestCommitPanelStopLeavesTheWorktreeUsable(
         self.assertTrue(after.ok)
         self.assertIn("after the stop", self.git_log())
 
-    def test_nothing_is_committed_by_the_stopped_run(self):
+    def test_a_stopped_run_never_hides_a_commit_it_failed_to_prevent(self):
+        """This asserted `git_log() == before` until #8, and that was the
+        wrong expectation rather than a flaky one: a stop whose kill misses
+        does commit, about one run in three on Windows. The report matching
+        the repository is the property that actually has to hold.
+        """
         self.on_branch()
         self.change_config()
         self.install_slow_hook()
@@ -3333,7 +3547,7 @@ class TestCommitPanelStopLeavesTheWorktreeUsable(
         panel.stop()
         self.assertTrue(self.wait_until(lambda: not panel.is_running()))
 
-        self.assertEqual(self.git_log(), before)
+        self.assert_the_report_matches_the_repository(panel, before)
 
     def test_closing_the_window_mid_commit_cleans_up_too(self):
         # `_on_done` never runs on this path -- its signal is queued to an

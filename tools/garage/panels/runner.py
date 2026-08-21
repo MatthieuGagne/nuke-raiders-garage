@@ -24,6 +24,13 @@ from tools.garage.core import make_runner
 # How long to wait for a cancelled run's thread to end (milliseconds). The
 # kill has already been sent; this is only the time the process needs to
 # die and the pipe to close.
+#
+# It is not always enough, and what happens when it is not is the point:
+# killing a process tree does not always close the pipe its grandchildren
+# inherited, so the reader can stay blocked until the hook itself exits.
+# The pre-commit hook the stop tests install sleeps five seconds, which
+# puts the thread's end right on this boundary -- see
+# `_teardown`, and nuke-raiders-garage#8.
 STOP_TIMEOUT_MS = 5000
 
 
@@ -77,6 +84,9 @@ class RunController(QObject):
         self._thread: Optional[QThread] = None
         self._worker: Optional[RunWorker] = None
         self._cancellation: Optional[make_runner.Cancellation] = None
+        # Threads that outlived their join, held so Qt cannot destroy one
+        # while it is still running -- see `_teardown`.
+        self._abandoned: List[tuple] = []
 
     def is_running(self) -> bool:
         return self._thread is not None
@@ -137,9 +147,53 @@ class RunController(QObject):
                     signal.disconnect()
                 except (RuntimeError, TypeError):
                     pass
-        if thread is not None:
-            thread.quit()
-            thread.wait(STOP_TIMEOUT_MS)
+        if thread is None:
+            if worker is not None:
+                worker.deleteLater()
+            return
+
+        thread.quit()
+        if thread.wait(STOP_TIMEOUT_MS):
             thread.deleteLater()
-        if worker is not None:
-            worker.deleteLater()
+            if worker is not None:
+                worker.deleteLater()
+            return
+
+        # The wait expired and the thread is still running. Destroying a
+        # running QThread is not an error Qt reports -- it is a qFatal, and
+        # qFatal calls abort(), which on Windows is a fail-fast: the whole
+        # process disappears with exit code 0xC0000409, no message, no
+        # traceback, and nothing for faulthandler to catch. That is
+        # Signature B of nuke-raiders-garage#8, and because deleteLater
+        # defers the destruction to the event loop it went off inside
+        # whatever ran next, which is why it was so hard to place.
+        #
+        # So the thread is kept instead, alive and referenced, until it
+        # says it has finished. A held thread costs a handle for a few
+        # seconds; a destroyed one costs the process.
+        self._abandoned.append((thread, worker))
+        thread.finished.connect(self._release_finished_threads)
+
+    def _release_finished_threads(self) -> None:
+        """Delete the threads that outlived their wait, now they are done.
+
+        Connected to `finished` on a QObject that lives on the UI thread,
+        so Qt queues it there rather than running it on the thread that is
+        ending -- and it re-checks `isRunning` rather than trusting which
+        signal woke it.
+        """
+        still_running = []
+        for thread, worker in self._abandoned:
+            if thread.isRunning():
+                still_running.append((thread, worker))
+                continue
+            if worker is not None:
+                worker.deleteLater()
+            thread.deleteLater()
+        self._abandoned = still_running
+
+    def abandoned_thread_count(self) -> int:
+        """How many threads outlived their wait and are still running. Zero
+        in every ordinary case; a test asserts it is not destroying them.
+        """
+        return len(self._abandoned)
