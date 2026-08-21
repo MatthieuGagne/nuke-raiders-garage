@@ -185,6 +185,7 @@ from tools.garage.panels.diff_view import DiffPanel
 from tools.garage.panels.doctor import DoctorPanel
 from tools.garage.panels.tuner import TunerPanel, compute_derived_dependents
 from tools.garage.panels.worktrees import WorktreesPanel
+from tools.garage.panels import runner as runner_panel
 
 GAME_REPO_REMOTE_URL = "https://github.com/MatthieuGagne/gmb-nuke-raider.git"
 
@@ -2091,6 +2092,71 @@ class CompileBarFixture:
         self.assertTrue(
             self._wait_until(lambda: not bar.is_running()), "the run never finished"
         )
+
+
+class TestRunControllerKeepsAThreadItCouldNotJoin(unittest.TestCase):
+    """Signature B of #8: a run thread that outlives its join must not be
+    destroyed.
+
+    Qt does not report that as an error. It is a qFatal, qFatal calls
+    abort(), and on Windows abort() is a fail-fast -- the process goes with
+    exit code 0xC0000409, no message, no traceback and nothing faulthandler
+    can catch, inside whatever happened to be running when the deferred
+    delete came round. Three interpreters died that way in a single CI job.
+
+    The wait is shortened and the kill neutered here so the thread reliably
+    outlives its join, which on CI took a five-second hook to provoke.
+    """
+
+    SLOW = "import time\nprint('started', flush=True)\ntime.sleep(1.5)\n"
+
+    def test_a_thread_that_outlives_its_join_is_held_not_destroyed(self):
+        controller = runner_panel.RunController()
+        command = make_runner.Command(
+            argv=(sys.executable, "-c", self.SLOW), label="slow"
+        )
+        started = []
+        controller.line.connect(started.append)
+
+        with mock.patch.object(runner_panel, "STOP_TIMEOUT_MS", 50), mock.patch.object(
+            make_runner, "_kill_tree", lambda process: None
+        ):
+            controller.start([command], Path.cwd())
+            waited = 0
+            while waited < 10000 and not started:
+                QTest.qWait(20)
+                waited += 20
+            self.assertTrue(started, "the child never started")
+
+            controller.stop_and_wait()
+
+            # Still running, and therefore still held rather than deleted.
+            self.assertEqual(controller.abandoned_thread_count(), 1)
+
+        # And released once it really has finished, so nothing accumulates.
+        waited = 0
+        while waited < 15000 and controller.abandoned_thread_count():
+            QTest.qWait(20)
+            waited += 20
+        self.assertEqual(controller.abandoned_thread_count(), 0)
+
+    def test_a_thread_that_joins_in_time_is_deleted_as_before(self):
+        controller = runner_panel.RunController()
+        command = make_runner.Command(
+            argv=(sys.executable, "-c", "print('quick', flush=True)"), label="quick"
+        )
+        done = []
+        controller.finished.connect(done.append)
+
+        controller.start([command], Path.cwd())
+        waited = 0
+        while waited < 10000 and not done:
+            QTest.qWait(20)
+            waited += 20
+
+        self.assertTrue(done, "the run never finished")
+        self.assertEqual(controller.abandoned_thread_count(), 0)
+        self.assertFalse(controller.is_running())
 
 
 class TestCompileBar(CompileBarFixture, unittest.TestCase):
