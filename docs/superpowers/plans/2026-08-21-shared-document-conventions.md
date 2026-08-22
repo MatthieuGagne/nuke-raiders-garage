@@ -960,5 +960,5 @@ Expected: `#25 CLOSED`, and the board shows `PRD` / `Done` for it.
   Step 5 runs it again, so Task 2 must report where it saved it.
 - **Tasks 1, 2, 3 and 5 create no commit.** Four of the five deliverables are GitHub state. A task
   report claiming a commit for one of those means something was written that should not have been.
-- **The board is shared with the game repo's ~276 items.** Every command in this plan filters on
+- **The board is shared with the game repo's ~282 items.** Every command in this plan filters on
   `nuke-raiders-garage`. A command that does not is a command that can retype a game-repo issue.

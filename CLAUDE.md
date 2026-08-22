@@ -23,12 +23,14 @@ versioned here. The implementation plans under `docs/superpowers/plans/` are the
 and they are execution artifacts, not specs.
 
 **Title prefixes.** `feat:` for a spec, `fix:` or `bug:` for a defect, `chore:` or `docs:` for
-maintenance. The prefix is what decides `Type` on the board, so it is not decoration.
+maintenance — the table below is the full mapping. The prefix is what decides `Type` on the
+board, so it is not decoration.
 
 **Every issue joins the shared board when it is created, with `Type` and `Status` set** as two
 explicit commands. Both repositories share one project — "Nuke Raider — Documents", project
 number 3 under owner `MatthieuGagne`, id `PVT_kwHOAv4a5M4BepB5`. `Type` says what a document is;
-`Status` says where it is: `Todo` at creation, `Done` when it closes.
+`Status` says where it is: `Todo` at creation, `In Progress` while it is being worked, `Done`
+when it closes.
 
 | Title prefix | Type |
 |---|---|
@@ -45,7 +47,8 @@ number 3 under owner `MatthieuGagne`, id `PVT_kwHOAv4a5M4BepB5`. `Type` says wha
 The project id above is a stable literal. **Field ids and single-select option ids are not** —
 they are regenerated whenever an option set is edited. Resolve them by name, at the moment of
 use, from `gh project field-list 3 --owner MatthieuGagne --format json`. Board *views* are
-UI-only; there is no API that creates one.
+UI-only; there is no API that creates one — confirmed 2026-08-21 against the GitHub Projects v2
+API as reachable through `gh` 2.96.0, falsified by a `gh` or API release that adds one.
 
 **Labels mark document kinds.** `prd`, `epic`, `adr`, `log`, `plan` and `idea` exist here with
 the same colors and descriptions as in the game repository. A `fix:`, `bug:`, `docs:` or
@@ -65,5 +68,7 @@ gh api -X POST repos/MatthieuGagne/nuke-raiders-garage/issues/<parent>/sub_issue
 
 **Decisions are ADRs** filed as `adr`-labeled issues, keyed by the issue number of the work item
 being worked when the decision was taken, one ADR per work item, each decision a `### Dn` inside
-it. Key resolution, lifecycle and citation form are in the game repository's `CLAUDE.md`; do not
-re-derive them here.
+it. Key resolution, lifecycle and citation form are in the game repository's `CLAUDE.md`, which
+also holds the lifecycle for `Idea`, `Log`, `Review` and `Plan` — an idea is never worked
+directly and is promoted by filing a new PRD, never converted in place; do not re-derive any of
+this here.
