@@ -556,5 +556,123 @@ class TestGeneratorRuns(DialogPanelTestCase):
         self.assertFalse((self.repo / "src" / "dialog_data.c").exists())
 
 
+@unittest.skipIf(NO_GAME_REPO, NO_GAME_REPO_REASON)
+class TestAgainstRealGameData(unittest.TestCase):
+    """Task 7's acceptance pass: the real DialogPanel, driven against the
+    real game repository's own eight-NPC production data -- copied into a
+    throwaway temp git repo, never the bound checkout itself, which stays
+    untouched.
+    """
+
+    def setUp(self):
+        theme.apply(_app)
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name).resolve()
+        self.repo = self.root / "nuke-raider"
+        (self.repo / "src").mkdir(parents=True)
+        (self.repo / "tools").mkdir(parents=True)
+        (self.repo / "assets" / "dialog").mkdir(parents=True)
+
+        real_repo = project.bind().active_worktree.path
+        for rel in (
+            "assets/dialog/npcs.json",
+            "assets/dialog/hubs.json",
+            "src/config.h",
+            "tools/dialog_to_c.py",
+        ):
+            src = real_repo / rel
+            dst = self.repo / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            dst.write_bytes(src.read_bytes())
+
+        _run_git(["init", "-b", "master"], self.repo)
+        _run_git(["config", "user.email", "test@example.com"], self.repo)
+        _run_git(["config", "user.name", "Test"], self.repo)
+        _run_git(["add", "."], self.repo)
+        _run_git(["commit", "-m", "init"], self.repo)
+        _run_git(["remote", "add", "origin", GAME_REPO_REMOTE_URL], self.repo)
+
+        self.binding = bind_over(self.root, self.repo)
+        self.panel = DialogPanel(self.binding, None)
+
+    def tearDown(self):
+        self.panel.stop_and_wait()
+        self.panel.deleteLater()
+        self._tmp.cleanup()
+
+    def saved_npcs(self):
+        return json.loads(
+            (self.repo / "assets" / "dialog" / "npcs.json").read_text(
+                encoding="utf-8"))
+
+    def _save_and_wait(self):
+        # Same waiting pattern as TestGeneratorRuns._save_and_wait, above.
+        self.assertTrue(self.panel.save())
+        deadline = 30.0
+        step = 0.05
+        waited = 0.0
+        while self.panel.is_running() and waited < deadline:
+            QApplication.processEvents()
+            time.sleep(step)
+            waited += step
+        QApplication.processEvents()
+        self.assertFalse(self.panel.is_running(), "the generator never ended")
+
+    def test_every_npc_is_listed(self):
+        self.assertEqual(len(self.panel.npc_names()), 8)
+
+    def test_the_selected_npcs_nodes_each_get_a_card(self):
+        npc = self.panel.selected_npc()
+        self.assertEqual(len(self.panel.node_cards()), len(npc["nodes"]))
+
+    def test_an_edit_to_a_nodes_text_survives_a_save(self):
+        card = self.panel.node_cards()[0]
+        card.text_field.setText("A fresh line from the acceptance pass.")
+
+        self._save_and_wait()
+
+        npc = self.panel.selected_npc()
+        self.assertEqual(
+            self.saved_npcs()["npcs"][npc["id"]]["nodes"][0]["text"],
+            "A fresh line from the acceptance pass.",
+        )
+
+    def test_a_node_pushed_to_63_characters_blocks_the_save(self):
+        npc = self.panel.selected_npc()
+        card = self.panel.node_cards()[0]
+        card.text_field.setText("A" * 63)
+
+        self.assertFalse(self.panel.save())
+        self.assertIn(npc["name"], self.panel.refusal_text())
+        self.assertIn("[0]", self.panel.refusal_text())
+
+    def test_adding_a_ninth_npc_is_refused_naming_the_real_ceiling(self):
+        self.panel.add_npc("NINTH")
+
+        self.assertEqual(len(self.panel.npc_names()), 8)
+        self.assertIn("8", self.panel.log_text())
+
+    def test_the_generated_sources_match_a_terminal_run_byte_for_byte(self):
+        self._save_and_wait()
+        from_garage = (self.repo / "src" / "dialog_data.c").read_bytes()
+        hub_from_garage = (self.repo / "src" / "hub_data.c").read_bytes()
+
+        (self.repo / "src" / "dialog_data.c").unlink()
+        (self.repo / "src" / "hub_data.c").unlink()
+        subprocess.run(
+            [sys.executable, "tools/dialog_to_c.py",
+             "assets/dialog/npcs.json", "src/dialog_data.c",
+             "--hubs-json", "assets/dialog/hubs.json",
+             "--hub-out", "src/hub_data.c",
+             "--config-h", "src/config.h"],
+            cwd=str(self.repo), check=True, capture_output=True, text=True,
+        )
+
+        self.assertEqual(
+            from_garage, (self.repo / "src" / "dialog_data.c").read_bytes())
+        self.assertEqual(
+            hub_from_garage, (self.repo / "src" / "hub_data.c").read_bytes())
+
+
 if __name__ == "__main__":
     unittest.main()
