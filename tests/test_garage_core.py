@@ -3721,5 +3721,34 @@ class TestDescribePending(CommitFixture):
         self.assertIn("No tracked change", commit.describe_pending(self.summary()))
 
 
+class TestCoreImportsNoQt(unittest.TestCase):
+    """R12: `tools/garage/core/` must contain no Qt import -- not one
+    module. A real grep over the source, not a one-time claim: the rule
+    only holds while something keeps checking it, and the cost of a break
+    is `make test` failing on every machine without PySide6, which is CI
+    and is not the machine that would have introduced it.
+    """
+
+    def test_no_core_module_imports_qt(self):
+        core_dir = (
+            Path(__file__).resolve().parents[1] / "tools" / "garage" / "core"
+        )
+        offenders = []
+        for path in sorted(core_dir.glob("*.py")):
+            text = path.read_text(encoding="utf-8")
+            for line in text.splitlines():
+                stripped = line.strip()
+                if not (stripped.startswith("import ")
+                        or stripped.startswith("from ")):
+                    continue
+                if "PySide6" in stripped or "shiboken" in stripped:
+                    offenders.append(f"{path.name}: {stripped}")
+        self.assertEqual(
+            offenders, [],
+            "tools/garage/core/ must import no Qt (R12); move the widget "
+            "code into tools/garage/panels/",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
