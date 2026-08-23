@@ -41,3 +41,28 @@ python -m unittest discover -s tests/garage -p 'test_*.py'
 ```
 
 Run the application from the repository root: `garage.bat`, or `python -m tools.garage`.
+
+## Architecture
+
+`tools/garage/` is layered so that everything worth testing can be tested without a display:
+
+- **`core/`** holds the logic and **imports no Qt** — not one module. Everything here is pure: it
+  shells out to `git` or `make`, parses files, returns data. This is the layer `make test` covers,
+  and the reason that target can stay Qt-free. Behaviour that could live here belongs here.
+- **`panels/`** holds the Qt widgets and stays thin — a panel wires a widget to `core/`, it does not
+  reimplement it. Logic that lands here is reachable only by the twelve-minute suite.
+- **`theme/`** is the single place a colour or a typeface may appear as a literal. Panels name a
+  token (`TOKENS["accent"]`, `FONT_MONO`) or select on an object name or Qt dynamic property; no
+  panel spells out a hex value or a font family, and none calls `setStyleSheet` to restyle itself.
+  `theme.apply(app)` installs the stylesheet once, at startup.
+
+Garage edits a **separate** checkout — the game repository is not this repository. It is resolved by
+detection: a sibling `nuke-raider` directory, confirmed by its `origin` remote, with the choice
+recorded in `garage.local.json` at this repository's root — gitignored, per-machine, never
+committed. **No path into the game repository may be hardcoded.** Go through
+`tools.garage.core.project`, whose `Binding` resolves them: `binding.config_h`, `binding.build_dir`,
+`binding.resolve(...)`. A recorded binding that no longer resolves is reported as a failure, never
+silently re-detected.
+
+Anything that reads the game repository skips when none is bound. CI checks this repository out
+alone, so a test that hard-fails on an unbound repository breaks the build.
