@@ -1898,6 +1898,65 @@ class TestDoctorClassification(unittest.TestCase):
             self.assertIn("tunables.json", check.prevents)
             self.assertEqual(check.tag, "1 range mismatch")
 
+    def test_pure_name_drift_says_nothing_about_range_guards(self):
+        # A user whose only problem is one unclassified #define was being
+        # told about a range guard their row does not have. `prevents` is
+        # the sentence that tells them what they lost; a sentence about
+        # someone else's failure is noise in the one place they read.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = tmp_root(tmp)
+            drifted = SAMPLE_CONFIG_TEXT.replace(
+                "#endif /* CONFIG_H */",
+                "#define NEW_UNCLASSIFIED_DEFINE 3u\n\n#endif /* CONFIG_H */",
+            )
+            binding = self._bound(tmp_path, drifted)
+            schema = Schema.load(
+                write_json(tmp_path / "t.json", SAMPLE_TUNABLES_FOR_CONFIG_IO)
+            )
+
+            check = doctor.check_classification(binding, schema)
+
+            self.assertEqual(check.status, doctor.FAIL)
+            self.assertIn("unclassified #define", check.prevents)
+            self.assertNotIn("guard", check.prevents)
+
+    def test_pure_range_drift_says_nothing_about_unclassified_defines(self):
+        # And the mirror: every #define is classified, so "the Tuner does
+        # not offer an unclassified #define" describes nothing here.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = tmp_root(tmp)
+            binding = self._bound(tmp_path, GUARDED_CONFIG_TEXT)
+            wrong = json.loads(json.dumps(SAMPLE_TUNABLES_FOR_CONFIG_IO))
+            wrong["entries"]["GEAR1_MAX_SPEED"]["max"] = 20
+            schema = Schema.load(write_json(tmp_path / "t.json", wrong))
+
+            check = doctor.check_classification(binding, schema)
+
+            self.assertEqual(check.status, doctor.FAIL)
+            self.assertIn("guard", check.prevents)
+            self.assertNotIn("unclassified", check.prevents)
+
+    def test_both_drifts_at_once_name_both(self):
+        # Neither sentence may be dropped when both failures are real --
+        # the composition must add, not choose.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = tmp_root(tmp)
+            both = GUARDED_CONFIG_TEXT.replace(
+                "#endif /* CONFIG_H */",
+                "#define NEW_UNCLASSIFIED_DEFINE 3u\n\n#endif /* CONFIG_H */",
+            )
+            binding = self._bound(tmp_path, both)
+            wrong = json.loads(json.dumps(SAMPLE_TUNABLES_FOR_CONFIG_IO))
+            wrong["entries"]["GEAR1_MAX_SPEED"]["max"] = 20
+            schema = Schema.load(write_json(tmp_path / "t.json", wrong))
+
+            check = doctor.check_classification(binding, schema)
+
+            self.assertEqual(check.status, doctor.FAIL)
+            self.assertIn("unclassified #define", check.prevents)
+            self.assertIn("guard", check.prevents)
+            self.assertIn("both", check.prevents)
+
     def test_a_guard_that_agrees_passes_and_says_how_many_were_checked(self):
         # The pass has to state the coverage: R4 skips an unguarded
         # tunable in silence, so "in step" alone cannot distinguish a

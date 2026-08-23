@@ -461,7 +461,8 @@ with:
         losses.append(
             "A tunable whose declared range is not the one the header "
             "guards is worse than silent: the Tuner offers the value and "
-            "the build rejects it."
+            "the build rejects it — reconcile the range in tunables.json "
+            "or in the header's guard."
         )
     losses.append(
         "This repository's test suite fails until both are fixed."
@@ -484,7 +485,11 @@ Two things to notice. The range sentence is reworded from "wider than the header
 
 Run: `python -m unittest tests.test_garage_core.TestDoctorClassification -v`
 
-Expected: PASS, all methods — including the pre-existing `test_an_unclassified_define_is_reported_by_name` and `test_a_range_that_disagrees_with_the_headers_guard_fails`, which both assert `"tunables.json"` is in `prevents`. Both composed sentences still contain it.
+Expected: PASS, all methods. The name-drift sentence carries "tunables.json", which is what
+`test_an_unclassified_define_is_reported_by_name` requires. The range sentence names both places a
+range can be reconciled — "reconcile the range in tunables.json or in the header's guard" — which is
+what `test_a_range_that_disagrees_with_the_headers_guard_fails` (a *pure* range-drift case, where the
+name-drift sentence never fires) requires when it asserts `"tunables.json"` is in `prevents`.
 
 - [ ] **Step 5: Run the whole suite and the lint**
 
