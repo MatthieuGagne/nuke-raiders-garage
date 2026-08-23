@@ -5,3 +5,7 @@ __pycache__/
 # Scratch for subagent-driven plan execution: ledgers, task briefs, review
 # packages. Working notes for a plan in flight, never part of the product.
 .superpowers/
+
+# Worktrees created for plan execution: a whole second checkout, with its own
+# build/ output and garage.local.json. Never part of the product.
+.claude/worktrees/
