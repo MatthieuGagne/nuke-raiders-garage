@@ -317,12 +317,13 @@ class CommitPanel(QWidget):
         one.
 
         HEAD is the only witness worth asking. The run's exit code cannot
-        answer it: `taskkill /F /T` can miss a process tree that is still
-        growing, in which case git finishes and exits zero, and it can also
-        land after git has written the commit but before git has exited, in
-        which case git dies non-zero with the commit already on the branch.
-        Both were observed on Windows in #8, and both used to be announced
-        as "nothing was committed".
+        answer it: a stop can land after git has written the commit but
+        before git has exited, in which case git dies non-zero with the
+        commit already on the branch, and it can arrive after git has
+        finished entirely, in which case git exits zero. Both were observed
+        on Windows in #8 -- back when the kill was a `taskkill /F /T` tree
+        walk that could also miss a growing tree outright (#26) -- and both
+        used to be announced as "nothing was committed".
         """
         head = commit_core.head_line(self.binding.active_worktree.path)
         if head is None or head == self._head_before:

@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import unittest.mock
 from pathlib import Path
@@ -29,6 +30,7 @@ from tools.garage.core import (  # noqa: E402
     doctor,
     emulicious,
     make_runner,
+    process_group,
     project,
     worktrees,
 )
@@ -2524,6 +2526,47 @@ class TestRun(unittest.TestCase):
         self.assertTrue(result.ok)
 
 
+# A child that spawns a grandchild and then never ends, which is the shape
+# #8 caught: git spawns the pre-commit hook, the hook spawns its own
+# children, and the tree is still growing while the kill enumerates it.
+# argv[1] is the grandchild's source, argv[2] the sentinel path.
+PARENT_THAT_SPAWNS = (
+    "import subprocess, sys, time\n"
+    "subprocess.Popen([sys.executable, '-c', sys.argv[1], sys.argv[2]])\n"
+    "print('spawned', flush=True)\n"
+    "while True:\n"
+    "    time.sleep(0.05)\n"
+)
+
+# The grandchild. It waits long enough that a kill landing now is
+# unambiguous, then records that it survived.
+GRANDCHILD_SENTINEL = (
+    "import pathlib, sys, time\n"
+    "time.sleep(2.5)\n"
+    "pathlib.Path(sys.argv[1]).write_text('ran')\n"
+)
+
+# A child whose tree is still growing while the kill runs, which is the
+# condition `taskkill /F /T` could not handle: it enumerates a tree and
+# then kills what it enumerated, so a process that appears in between
+# survives. One grandchild that already exists is not enough to provoke
+# it -- the enumeration usually wins that race -- so this one keeps
+# spawning. Bounded, so a kill that fails outright cannot fork forever.
+# argv[1] is the grandchild's source, argv[2] the sentinel path stem.
+PARENT_THAT_KEEPS_SPAWNING = (
+    "import subprocess, sys, time\n"
+    "print('spawned', flush=True)\n"
+    "for n in range(25):\n"
+    "    subprocess.Popen([sys.executable, '-c', sys.argv[1], sys.argv[2] + str(n)])\n"
+    "    time.sleep(0.02)\n"
+    "while True:\n"
+    "    time.sleep(0.05)\n"
+)
+
+# Past the grandchild's sleep, with margin for a loaded CI runner.
+GRANDCHILD_DEADLINE_S = 6.0
+
+
 class TestCancellation(unittest.TestCase):
     FOREVER = (
         "import time\n"
@@ -2564,14 +2607,63 @@ class TestCancellation(unittest.TestCase):
         # A stopped run is not a failed build, and must not read as one.
         self.assertFalse(result.ok)
 
+    def test_cancelling_a_run_kills_a_grandchild_the_command_spawned(self):
+        """The #8 shape, end to end through `run`.
+
+        `make` spawns bash, bash spawns lcc, lcc spawns sdcc; git spawns
+        the hook and the hook spawns its own children. A stop that only
+        reaches the direct child leaves the run going and the pipe open,
+        and one that enumerates a tree still being built misses whatever
+        appeared after the enumeration.
+        """
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        stem = Path(tmp.name) / "grandchild-ran"
+        command = make_runner.Command(
+            argv=(
+                sys.executable,
+                "-c",
+                PARENT_THAT_KEEPS_SPAWNING,
+                GRANDCHILD_SENTINEL,
+                str(stem),
+            ),
+            label="spawner",
+        )
+        started = threading.Event()
+        cancellation = make_runner.Cancellation()
+
+        def target():
+            make_runner.run(
+                command, Path.cwd(), lambda line: started.set(), cancellation
+            )
+
+        worker = threading.Thread(target=target)
+        worker.start()
+        try:
+            self.assertTrue(started.wait(10), "the child never started")
+            cancellation.cancel()
+            worker.join(15)
+            self.assertFalse(worker.is_alive(), "the run outlived its cancellation")
+        finally:
+            cancellation.cancel()
+            worker.join(15)
+
+        time.sleep(GRANDCHILD_DEADLINE_S)
+        survivors = sorted(p.name for p in Path(tmp.name).glob("grandchild-ran*"))
+        self.assertEqual(
+            survivors,
+            [],
+            "grandchildren outlived the stop that ended their parent",
+        )
+
     def test_a_stop_that_lost_the_race_reports_the_run_that_finished(self):
         """A stop whose kill missed must not be reported as a stop.
 
-        `taskkill /F /T` enumerates a process tree and then kills what it
-        enumerated, so a tree still growing underneath it -- git spawning
-        the hook, the hook spawning its own children -- can outlive the
-        kill. Observed on Windows in nuke-raiders-garage#8: the kill
-        returned 128 having failed on git itself, git finished the commit,
+        A stop can miss: it can arrive after the command has already
+        finished, and before #26 it could also miss a process tree that
+        was still growing while `taskkill /F /T` enumerated it. Observed
+        on Windows in nuke-raiders-garage#8: the kill returned 128 having
+        failed on git itself, git finished the commit,
         and the panel still announced "stopped -- nothing was committed"
         over a commit that was on the branch.
 
@@ -2584,7 +2676,9 @@ class TestCancellation(unittest.TestCase):
             # Cancel while the child is alive, which is the real order.
             cancellation.cancel()
 
-        with unittest.mock.patch.object(make_runner, "_kill_tree", lambda p: None):
+        with unittest.mock.patch.object(
+            make_runner, "_end_run", lambda process, group=None: None
+        ):
             result = make_runner.run(
                 python_command("print('done', flush=True)"),
                 Path.cwd(),
@@ -2611,7 +2705,9 @@ class TestCancellation(unittest.TestCase):
         def on_line(line):
             cancellation.cancel()
 
-        with unittest.mock.patch.object(make_runner, "_kill_tree", lambda p: None):
+        with unittest.mock.patch.object(
+            make_runner, "_end_run", lambda process, group=None: None
+        ):
             result = make_runner.run(
                 python_command(
                     "import sys\nprint('x', flush=True)\nsys.exit(3)\n"
@@ -2640,6 +2736,122 @@ class TestCancellation(unittest.TestCase):
 
         self.assertEqual(lines, [])
         self.assertTrue(result.cancelled)
+
+
+class TestProcessGroup(unittest.TestCase):
+    """The kernel-owned group a run lives in (#26).
+
+    These tests spawn a real three-generation tree rather than mocking a
+    kill, because the defect they cover is entirely about what the kernel
+    does with processes the killer never enumerated.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.sentinel = Path(self.tmp.name) / "grandchild-ran"
+
+    def spawn_a_tree(self, group):
+        """Start the parent, wait until it says the grandchild exists."""
+        argv = [
+            sys.executable,
+            "-c",
+            PARENT_THAT_SPAWNS,
+            GRANDCHILD_SENTINEL,
+            str(self.sentinel),
+        ]
+        process = subprocess.Popen(
+            argv,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            **group.spawn_kwargs(),
+        )
+        self.addCleanup(self._end, process)
+        self.assertTrue(group.adopt(process), "the child did not join the group")
+        self.assertEqual(process.stdout.readline().strip(), "spawned")
+        return process
+
+    def _end(self, process):
+        try:
+            process.kill()
+        except OSError:
+            pass
+        if process.stdout is not None:
+            process.stdout.close()
+
+    def assert_the_grandchild_never_ran(self):
+        time.sleep(GRANDCHILD_DEADLINE_S)
+        self.assertFalse(
+            self.sentinel.exists(),
+            "the grandchild outlived the group it was in",
+        )
+
+    def test_terminating_the_group_kills_a_grandchild_the_child_spawned(self):
+        group = process_group.ProcessGroup()
+        self.addCleanup(group.close)
+        process = self.spawn_a_tree(group)
+
+        self.assertTrue(group.terminate())
+
+        process.wait(10)
+        self.assert_the_grandchild_never_ran()
+
+    def test_the_control_case_killing_the_child_alone_leaves_the_grandchild(self):
+        """Proof that the test above can fail.
+
+        Killing the direct child -- which is what Garage degrades to when
+        it cannot make a group, and what `taskkill /F /T` effectively did
+        on the run #8 caught -- leaves the grandchild running.
+        """
+        group = process_group.ProcessGroup()
+        self.addCleanup(group.close)
+        process = self.spawn_a_tree(group)
+
+        process.kill()
+        process.wait(10)
+
+        time.sleep(GRANDCHILD_DEADLINE_S)
+        self.assertTrue(
+            self.sentinel.exists(),
+            "the grandchild died without the group being terminated -- this "
+            "test no longer proves anything about the group",
+        )
+
+    def test_closing_the_group_kills_what_is_left_of_it(self):
+        """`close()` is the backstop, not the mechanism.
+
+        The Windows job carries KILL_ON_JOB_CLOSE, so a run whose reader
+        thread was abandoned, or a Garage that dies outright, does not
+        leave a compile running with its output going nowhere.
+        """
+        group = process_group.ProcessGroup()
+        process = self.spawn_a_tree(group)
+
+        group.close()
+
+        process.wait(10)
+        self.assert_the_grandchild_never_ran()
+
+    def test_closing_twice_is_safe(self):
+        group = process_group.ProcessGroup()
+        group.close()
+        group.close()
+
+    def test_terminating_a_group_that_adopted_nothing_does_not_raise(self):
+        group = process_group.ProcessGroup()
+        self.addCleanup(group.close)
+        group.terminate()
+
+    def test_spawn_kwargs_are_accepted_by_popen(self):
+        """Whatever the platform contributes has to be real Popen syntax."""
+        group = process_group.ProcessGroup()
+        self.addCleanup(group.close)
+
+        process = subprocess.Popen(
+            [sys.executable, "-c", "pass"], **group.spawn_kwargs()
+        )
+        self.assertEqual(process.wait(10), 0)
 
 
 class TestRunSequence(unittest.TestCase):

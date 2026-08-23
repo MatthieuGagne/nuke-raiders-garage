@@ -3,7 +3,7 @@ arrives (R11, R6). Pure and Qt-free, like every module under
 tools/garage/core/: it owns a subprocess, a pipe and a stopwatch, and knows
 nothing about the widget that displays what it reads.
 
-Three rules shape it.
+Four rules shape it.
 
 **Output arrives, it does not accumulate.** A compile takes tens of seconds
 and the pre-commit verification R6 names takes about ninety; a display with
@@ -23,6 +23,15 @@ output names the missing executable, so the compile panel reports it the
 same way it reports a compile error. The Doctor (R14) is what tells the
 user this in advance; this is the backstop for the moment they press Build
 anyway.
+
+**A stopped run ends as a group, not as a tree.** Every run is spawned
+into a kernel-owned process group (`process_group.py`), and Stop ends the
+group. The kernel owns the membership, so a process spawned while the
+kill is in flight is already in it -- which the `taskkill /F /T` tree walk
+this replaced could not manage, because it enumerated a tree that was
+still growing (#8, #26). It narrows the race; it cannot close it, since a
+Stop pressed after git has written the commit has nothing left to
+prevent.
 """
 from __future__ import annotations
 
@@ -32,6 +41,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, List, Optional, Sequence
+
+from tools.garage.core import process_group
 
 # The exact four calls R11 names. The key is what a caller asks for; the
 # value is the argument list appended to `make`. The default target is the
@@ -237,16 +248,17 @@ class Cancellation:
     """The handle a caller keeps to stop a run it started.
 
     `cancel()` is called from another thread than `run()` -- the UI thread,
-    while the run thread sits blocked on the pipe -- so both the flag and
-    the process reference are guarded. Killing the process is what actually
-    ends the run: closing the pipe would leave `make` (and whatever it
-    spawned) alive.
+    while the run thread sits blocked on the pipe -- so the flag, the
+    process reference and the group are all guarded. Ending the group is
+    what actually ends the run: closing the pipe would leave `make` (and
+    whatever it spawned) alive.
     """
 
     def __init__(self) -> None:
         self._event = threading.Event()
         self._lock = threading.Lock()
         self._process: Optional[subprocess.Popen] = None
+        self._group: Optional[process_group.ProcessGroup] = None
 
     @property
     def cancelled(self) -> bool:
@@ -256,20 +268,26 @@ class Cancellation:
         with self._lock:
             self._event.set()
             process = self._process
+            group = self._group
         if process is not None:
-            _kill_tree(process)
+            _end_run(process, group)
 
-    def _attach(self, process: Optional[subprocess.Popen]) -> None:
+    def _attach(
+        self,
+        process: Optional[subprocess.Popen],
+        group: Optional[process_group.ProcessGroup] = None,
+    ) -> None:
         """Called by `run` around the life of one subprocess. Attaching a
-        process that is already cancelled kills it immediately, closing the
+        process that is already cancelled ends it immediately, closing the
         window between `cancel()` and the next command in a sequence
         starting.
         """
         with self._lock:
             self._process = process
+            self._group = group
             already = self._event.is_set()
         if already and process is not None:
-            _kill_tree(process)
+            _end_run(process, group)
 
 
 def run(
@@ -301,6 +319,7 @@ def run(
             command, EXIT_CANCELLED, 0.0, cancelled=True, stop_requested=True
         )
 
+    group = process_group.ProcessGroup()
     try:
         process = subprocess.Popen(
             list(command.argv),
@@ -311,13 +330,24 @@ def run(
             encoding="utf-8",
             errors="replace",
             bufsize=1,  # line buffered: the point of the whole module
+            **group.spawn_kwargs(),
         )
     except OSError as exc:
+        group.close()
         on_line(f"{command.argv[0]}: {exc.strerror or exc}")
         return RunResult(command, EXIT_NOT_STARTED, time.monotonic() - started)
 
+    if not group.adopt(process):
+        # Never silent: the old taskkill path degraded to killing the
+        # direct child without saying so, and a Stop that only half works
+        # is worth a line in the log the user is already reading.
+        on_line(
+            "warning: this run is not in a process group — Stop will reach "
+            "the top-level process only."
+        )
+
     if cancellation is not None:
-        cancellation._attach(process)
+        cancellation._attach(process, group)
     try:
         assert process.stdout is not None
         for raw_line in process.stdout:
@@ -326,21 +356,23 @@ def run(
     finally:
         if process.stdout is not None:
             process.stdout.close()
+        # Detach before closing, so a cancel arriving now finds either a
+        # live group or nothing at all, never a closing one.
         if cancellation is not None:
-            cancellation._attach(None)
+            cancellation._attach(None, None)
+        group.close()
 
     stop_requested = cancellation is not None and cancellation.cancelled
-    # A stop is only a stop if it ended something. `_kill_tree` runs
-    # `taskkill /F /T`, which enumerates a process tree and then kills what
-    # it enumerated -- so a tree still growing underneath it can outlive
-    # the kill, and the command runs to completion regardless. That is not
-    # a hypothesis: nuke-raiders-garage#8 caught taskkill returning 128
-    # having failed on git itself, git going on to finish the commit, and
-    # the panel announcing "stopped -- nothing was committed" over a commit
-    # that was on the branch.
+    # A stop is only a stop if it ended something. Terminating the run's
+    # process group is far tighter than the `taskkill /F /T` tree walk it
+    # replaced (#26), but it cannot be tight enough: a stop pressed after
+    # git has written the commit and before git has exited has nothing
+    # left to prevent. nuke-raiders-garage#8 caught exactly that -- the
+    # command completed and the panel announced "stopped -- nothing was
+    # committed" over a commit that was on the branch.
     #
     # An exit code of zero is the evidence that it finished: a process
-    # ended by TerminateProcess cannot produce one. The reverse is not
+    # ended by the kernel cannot produce one. The reverse is not
     # decidable -- a non-zero exit after a stop may be the kill or may be
     # the command failing on its own -- and between those two readings
     # "the user stopped it" is the one that must not be shown as a broken
@@ -388,27 +420,33 @@ def run_sequence(
     return results
 
 
-def _kill_tree(process: subprocess.Popen) -> None:
-    """Kill `process` and everything it started.
+def _end_run(
+    process: subprocess.Popen,
+    group: Optional[process_group.ProcessGroup] = None,
+) -> None:
+    """End `process` and everything it started.
 
     `make` is a parent: it spawns bash, which spawns lcc, which spawns
-    sdcc. Terminating make alone would leave the compile running with its
-    output going nowhere, and the pipe open, so the run would never end.
-    On Windows `taskkill /T` is what walks the tree; elsewhere, and if
-    taskkill is unavailable, killing the direct child is the fallback.
+    sdcc; `git commit` spawns the pre-commit hook, which spawns its own
+    children. Ending the direct child alone would leave the compile
+    running with its output going nowhere, and the pipe open, so the run
+    would never end.
+
+    The group is what ends them, because the kernel owns its membership:
+    a process spawned while the kill is in flight is already a member.
+    The group is terminated even when the direct child has already
+    exited, which is exactly the #8 case -- git finished and left the
+    hook's children behind holding the pipe.
+
+    `process.kill()` is the fallback for a group that could not be made
+    or joined. It reaches the direct child only; `run` says so in the log
+    the moment adoption fails, rather than degrading in silence.
     """
+    if group is not None and group.terminate():
+        return
     if process.poll() is not None:
         return
     try:
-        subprocess.run(
-            ["taskkill", "/F", "/T", "/PID", str(process.pid)],
-            capture_output=True,
-            check=False,
-        )
+        process.kill()
     except OSError:
         pass
-    if process.poll() is None:
-        try:
-            process.kill()
-        except OSError:
-            pass
