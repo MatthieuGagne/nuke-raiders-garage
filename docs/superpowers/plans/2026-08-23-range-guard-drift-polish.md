@@ -50,7 +50,7 @@ Note how the split works: `parse_guard_condition` splits the condition on `||` f
 - Consumes: nothing from other tasks.
 - Produces: nothing other tasks rely on. `config_io.parse_guard_condition(condition: str) -> Optional[Tuple[str, int, int]]` keeps its exact signature and return type.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add these two methods to `TestConfigIOGuards` in `tests/test_garage_core.py`, immediately after `test_a_partly_parenthesized_half_is_still_read` (the last method of the class, ~line 779):
 
@@ -72,13 +72,13 @@ Add these two methods to `TestConfigIOGuards` in `tests/test_garage_core.py`, im
                 self.assertIsNone(config_io.parse_guard_condition(condition))
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `python -m unittest tests.test_garage_core.TestConfigIOGuards -v`
 
 Expected: `test_a_half_whose_parentheses_are_not_its_own_is_not_read` FAILS with `AssertionError: ('X', 0, 7) is not None`. `test_a_half_with_an_unclosed_paren_is_not_read` FAILS on at least the first subTest. Every other test in the class passes.
 
-- [ ] **Step 3: Make each operand's parentheses paired**
+- [x] **Step 3: Make each operand's parentheses paired**
 
 In `tools/garage/core/config_io.py`, replace the `_GUARD_HALF_RE` definition (currently lines 63-67):
 
@@ -109,13 +109,13 @@ _GUARD_HALF_RE = re.compile(
 
 Nothing else in the file changes. `_parse_guard_half` reads `match.group("name")`, `match.group("op")` and `match.group("literal")`, all of which still exist.
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `python -m unittest tests.test_garage_core.TestConfigIOGuards -v`
 
 Expected: PASS, all methods — including the pre-existing `test_parentheses_are_optional`, `test_a_fully_parenthesized_half_is_still_read` and `test_a_partly_parenthesized_half_is_still_read`, which are the regression guard that this tightening did not also stop reading the shapes real headers use.
 
-- [ ] **Step 5: Run the whole suite and the lint**
+- [x] **Step 5: Run the whole suite and the lint**
 
 Run: `python -m unittest discover -s tests -p 'test_*.py'`
 Expected: OK.
@@ -123,7 +123,7 @@ Expected: OK.
 Run: `python tools/garage_lint.py`
 Expected: exit 0 — either `garage_lint: OK -- …` or `garage_lint: no game repository is bound …`. If it prints FAIL, stop: the tightened regex has stopped reading a guard the real `src/config.h` relies on, and the regex is wrong.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add tools/garage/core/config_io.py tests/test_garage_core.py
@@ -148,7 +148,7 @@ git commit -m "fix: a guard half's parentheses must be paired to be read (#23)"
 - Consumes: nothing from Task 1.
 - Produces: `RangeMismatch.describe(config_path: str | Path = "src/config.h") -> str`. `doctor.py` calls it with no argument, and Task 3 does not change that.
 
-- [ ] **Step 1: Write the failing unit tests**
+- [x] **Step 1: Write the failing unit tests**
 
 Add these two methods to `TestFindRangeDrift` in `tests/test_garage_core.py`, after `test_a_guard_over_a_non_tunable_define_is_skipped` (~line 856):
 
@@ -181,13 +181,13 @@ Add these two methods to `TestFindRangeDrift` in `tests/test_garage_core.py`, af
         self.assertIn("src/config.h line", mismatch.describe())
 ```
 
-- [ ] **Step 2: Run the tests to verify the first fails**
+- [x] **Step 2: Run the tests to verify the first fails**
 
 Run: `python -m unittest tests.test_garage_core.TestFindRangeDrift -v`
 
 Expected: `test_describe_names_the_header_path_it_is_given` FAILS with `TypeError: describe() takes 1 positional argument but 2 were given`. `test_describe_falls_back_to_the_repo_relative_path` PASSES already — it pins today's behaviour so the parameterization does not lose it.
 
-- [ ] **Step 3: Parameterize `describe()`**
+- [x] **Step 3: Parameterize `describe()`**
 
 In `tools/garage/core/schema.py`, replace the `describe` method of `RangeMismatch`:
 
@@ -221,12 +221,12 @@ with:
 
 `Path` is already imported at the top of `schema.py`, and `from __future__ import annotations` is already in force, so the `str | Path` annotation is a deferred string and needs no `typing.Union`.
 
-- [ ] **Step 4: Run the unit tests to verify they pass**
+- [x] **Step 4: Run the unit tests to verify they pass**
 
 Run: `python -m unittest tests.test_garage_core.TestFindRangeDrift -v`
 Expected: PASS, all methods.
 
-- [ ] **Step 5: Write the failing lint test**
+- [x] **Step 5: Write the failing lint test**
 
 Add this method to `TestGarageLint` in `tests/test_garage_lint.py`, immediately after `test_a_range_that_disagrees_with_the_headers_guard_fails` (~line 281):
 
@@ -255,13 +255,13 @@ Add this method to `TestGarageLint` in `tests/test_garage_lint.py`, immediately 
 
 `project`, `tempfile`, `json`, `Path`, `make_game_repo`, `write_tunables` and `run_lint` are all already imported or defined in this file.
 
-- [ ] **Step 6: Run the lint test to verify it fails**
+- [x] **Step 6: Run the lint test to verify it fails**
 
 Run: `python -m unittest tests.test_garage_lint.TestGarageLint.test_the_failure_names_the_same_header_path_the_ok_line_would -v`
 
 Expected: FAIL — the resolved temp-directory path is not in the output, only the literal `src/config.h`.
 
-- [ ] **Step 7: Pass the resolved path from garage_lint**
+- [x] **Step 7: Pass the resolved path from garage_lint**
 
 In `tools/garage_lint.py`, inside the `if not range_report.clean:` block, replace:
 
@@ -289,13 +289,13 @@ with:
 
 `binding` is in scope: it is bound at the top of `run()`.
 
-- [ ] **Step 8: Run the lint tests to verify they pass**
+- [x] **Step 8: Run the lint tests to verify they pass**
 
 Run: `python -m unittest tests.test_garage_lint -v`
 
 Expected: OK. In particular `test_unclassified_define_and_range_drift_both_reported` and `test_a_range_that_disagrees_with_the_headers_guard_fails` still pass — they assert on the tunable name and both ranges, none of which moved.
 
-- [ ] **Step 9: Run the whole suite and the lint**
+- [x] **Step 9: Run the whole suite and the lint**
 
 Run: `python -m unittest discover -s tests -p 'test_*.py'`
 Expected: OK.
@@ -303,7 +303,7 @@ Expected: OK.
 Run: `python tools/garage_lint.py`
 Expected: exit 0.
 
-- [ ] **Step 10: Commit**
+- [x] **Step 10: Commit**
 
 ```bash
 git add tools/garage/core/schema.py tools/garage_lint.py tests/test_garage_core.py tests/test_garage_lint.py
@@ -324,7 +324,7 @@ git commit -m "refactor: describe() takes the header path rather than spelling i
 - Consumes: `RangeMismatch.describe()` from Task 2, called with **no argument** — the Doctor keeps the repo-relative default. Do not pass `binding.config_h` here.
 - Produces: nothing other tasks rely on. `CheckResult`'s fields are unchanged.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add these three methods to `TestDoctorClassification` in `tests/test_garage_core.py`, after `test_a_range_that_disagrees_with_the_headers_guard_fails` (~line 1856):
 
@@ -391,13 +391,13 @@ Add these three methods to `TestDoctorClassification` in `tests/test_garage_core
 
 `GUARDED_CONFIG_TEXT` (defined at `tests/test_garage_core.py:634`) ends with `#endif /* CONFIG_H */`, the same as `SAMPLE_CONFIG_TEXT`, so the third test's `.replace` does insert the unclassified `#define` before the include guard's close.
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `python -m unittest tests.test_garage_core.TestDoctorClassification -v`
 
 Expected: `test_pure_name_drift_says_nothing_about_range_guards` FAILS (the current single blob contains "guard"). `test_pure_range_drift_says_nothing_about_unclassified_defines` FAILS (the same blob contains "unclassified"). `test_both_drifts_at_once_name_both` may already pass — the blob names both — which is fine; it is the regression guard for the composition.
 
-- [ ] **Step 3: Compose `prevents` from the same branches as `details`**
+- [x] **Step 3: Compose `prevents` from the same branches as `details`**
 
 In `tools/garage/core/doctor.py`, replace the tail of `check_classification` from `details = []` to the end of the function:
 
@@ -481,7 +481,7 @@ with:
 
 Two things to notice. The range sentence is reworded from "wider than the header's guard" to "not the one the header guards" — the check compares for equality, so a *narrower* declared range fails it too, and the old wording described a failure mode the code does not have. (The equality decision itself stays: see Global Constraints.) And the trailing sentence now agrees in number with how many failures are actually present.
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `python -m unittest tests.test_garage_core.TestDoctorClassification -v`
 
@@ -491,7 +491,7 @@ range can be reconciled — "reconcile the range in tunables.json or in the head
 what `test_a_range_that_disagrees_with_the_headers_guard_fails` (a *pure* range-drift case, where the
 name-drift sentence never fires) requires when it asserts `"tunables.json"` is in `prevents`.
 
-- [ ] **Step 5: Run the whole suite and the lint**
+- [x] **Step 5: Run the whole suite and the lint**
 
 Run: `python -m unittest discover -s tests -p 'test_*.py'`
 Expected: OK.
@@ -499,7 +499,7 @@ Expected: OK.
 Run: `python tools/garage_lint.py`
 Expected: exit 0.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add tools/garage/core/doctor.py tests/test_garage_core.py
@@ -524,7 +524,7 @@ The nonzero wording does not change: `"1 range guard(s) in step"` and `"the 1 tu
 - Consumes: nothing from Tasks 1-3. Task 3's composition is in the FAIL branch; this is the PASS branch.
 - Produces: nothing.
 
-- [ ] **Step 1: Write the failing Doctor test**
+- [x] **Step 1: Write the failing Doctor test**
 
 Add this method to `TestDoctorClassification` in `tests/test_garage_core.py`, after `test_a_guard_that_agrees_passes_and_says_how_many_were_checked`:
 
@@ -549,13 +549,13 @@ Add this method to `TestDoctorClassification` in `tests/test_garage_core.py`, af
             self.assertIn("no range guards to check", check.detail)
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [x] **Step 2: Run it to verify it fails**
 
 Run: `python -m unittest tests.test_garage_core.TestDoctorClassification.test_a_header_that_guards_nothing_says_so_rather_than_counting_zero -v`
 
 Expected: FAIL with `'0 range guard' unexpectedly found in '… #defines, all classified; 0 range guard(s) in step'`.
 
-- [ ] **Step 3: Word the Doctor's zero case**
+- [x] **Step 3: Word the Doctor's zero case**
 
 In `tools/garage/core/doctor.py`, replace the PASS branch of `check_classification`:
 
@@ -593,13 +593,13 @@ with:
         )
 ```
 
-- [ ] **Step 4: Run the Doctor tests to verify they pass**
+- [x] **Step 4: Run the Doctor tests to verify they pass**
 
 Run: `python -m unittest tests.test_garage_core.TestDoctorClassification -v`
 
 Expected: PASS, all methods — including `test_a_guard_that_agrees_passes_and_says_how_many_were_checked`, which asserts `"1 range guard"` is in the detail and so pins that the nonzero wording did not move.
 
-- [ ] **Step 5: Write the failing lint tests**
+- [x] **Step 5: Write the failing lint tests**
 
 Add these two methods to `TestGarageLint` in `tests/test_garage_lint.py`, immediately after `test_guard_less_tunables_pass_unchanged` (~line 350):
 
@@ -642,13 +642,13 @@ Add these two methods to `TestGarageLint` in `tests/test_garage_lint.py`, immedi
             self.assertIn("1 tunable(s) the header guards", output)
 ```
 
-- [ ] **Step 6: Run them to verify the first fails**
+- [x] **Step 6: Run them to verify the first fails**
 
 Run: `python -m unittest tests.test_garage_lint.TestGarageLint -v`
 
 Expected: `test_the_ok_line_on_a_guard_less_header_does_not_count_zero` FAILS on `'0 tunable(s)' unexpectedly found`. `test_the_ok_line_still_counts_the_guards_a_header_has` PASSES already — it pins the wording this task must not change.
 
-- [ ] **Step 7: Word garage_lint's zero case**
+- [x] **Step 7: Word garage_lint's zero case**
 
 In `tools/garage_lint.py`, replace the OK branch of `run`:
 
@@ -688,13 +688,13 @@ with:
 
 Note that `and the ` became `and ` — the `the` now lives inside the nonzero clause, so the nonzero sentence reads identically to before.
 
-- [ ] **Step 8: Run the lint tests to verify they pass**
+- [x] **Step 8: Run the lint tests to verify they pass**
 
 Run: `python -m unittest tests.test_garage_lint -v`
 
 Expected: OK, all methods — including `TestTheBoundGameRepositoryIsInStep`, which exercises the real header rather than a fixture.
 
-- [ ] **Step 9: Run the whole suite and the lint, and read the real OK line**
+- [x] **Step 9: Run the whole suite and the lint, and read the real OK line**
 
 Run: `python -m unittest discover -s tests -p 'test_*.py'`
 Expected: OK.
@@ -702,7 +702,7 @@ Expected: OK.
 Run: `python tools/garage_lint.py`
 Expected: exit 0. If a game repository is bound, read the printed OK sentence end to end and confirm it is grammatical — this task's entire product is that sentence, and no assertion checks that a human can read it.
 
-- [ ] **Step 10: Commit**
+- [x] **Step 10: Commit**
 
 ```bash
 git add tools/garage/core/doctor.py tools/garage_lint.py tests/test_garage_core.py tests/test_garage_lint.py
@@ -713,8 +713,8 @@ git commit -m "fix: a header that guards nothing says so instead of counting zer
 
 ## Done when
 
-- [ ] `python -m unittest discover -s tests -p 'test_*.py'` is green.
-- [ ] `python tools/garage_lint.py` exits 0.
-- [ ] `make test-garage` is green (the Qt panel suite; anywhere from 3 to 13 minutes — size any timeout to the high end. Nothing here touches a panel, so this is a smoke check, not the gate).
-- [ ] Four commits, one per task, each naming `#23`.
-- [ ] Issue #23's first finding is **not** implemented, and `tools/garage/tunables.json` is unchanged — that was the scope decision, and a reviewer should see no diff there.
+- [x] `python -m unittest discover -s tests -p 'test_*.py'` is green.
+- [x] `python tools/garage_lint.py` exits 0.
+- [ ] `make test-garage` is green (the Qt panel suite; anywhere from 3 to 13 minutes — size any timeout to the high end. Nothing here touches a panel, so this is a smoke check, not the gate). — not run; nothing on this branch touches a panel
+- [x] Four commits, one per task, each naming `#23`.
+- [x] Issue #23's first finding is **not** implemented, and `tools/garage/tunables.json` is unchanged — that was the scope decision, and a reviewer should see no diff there.

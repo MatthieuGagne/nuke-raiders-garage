@@ -12,9 +12,9 @@ script fails when the two disagree:
   - config.h guards a tunable with `#if (NAME) < min || (NAME) > max` and
     tunables.json declares a different min/max. That one is not cosmetic:
     the Tuner's spin box offers whatever tunables.json declares, so a
-    wider clamp hands the user a value the next build rejects with the
-    guard's own #error. A tunable the header does not guard is skipped,
-    silently (#18 R4).
+    clamp that is not the guarded range hands the user a value the next
+    build rejects with the guard's own #error. A tunable the header does
+    not guard is skipped, silently (#18 R4).
 
 When no game repository is bound (no sibling checkout, or a recorded
 binding that no longer resolves), this succeeds and says so -- CI without
@@ -95,22 +95,26 @@ def run(garage_root: Path = None, schema_path: Path = None) -> int:
         return 0
 
     if not report.clean:
-        print("garage_lint: FAIL -- tunables.json has drifted from src/config.h")
+        print(
+            "garage_lint: FAIL -- tunables.json has drifted from "
+            f"'{binding.config_h}'"
+        )
         for name in report.unclassified:
             print(
-                f"  - '{name}' is defined in src/config.h but is not classified "
-                "in tunables.json (add it as tunable/structural/derived/marker)."
+                f"  - '{name}' is defined in '{binding.config_h}' but is not "
+                "classified in tunables.json (add it as "
+                "tunable/structural/derived/marker)."
             )
         for name in report.stale:
             print(
                 f"  - '{name}' is classified in tunables.json but no longer "
-                "exists in src/config.h (remove it from tunables.json)."
+                f"exists in '{binding.config_h}' (remove it from tunables.json)."
             )
 
     if not range_report.clean:
         print(
             "garage_lint: FAIL -- a tunable's declared range disagrees with "
-            "the #if guard src/config.h states for it"
+            f"the #if guard '{binding.config_h}' states for it"
         )
         for mismatch in range_report.mismatches:
             print(
