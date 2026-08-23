@@ -2659,11 +2659,11 @@ class TestCancellation(unittest.TestCase):
     def test_a_stop_that_lost_the_race_reports_the_run_that_finished(self):
         """A stop whose kill missed must not be reported as a stop.
 
-        `taskkill /F /T` enumerates a process tree and then kills what it
-        enumerated, so a tree still growing underneath it -- git spawning
-        the hook, the hook spawning its own children -- can outlive the
-        kill. Observed on Windows in nuke-raiders-garage#8: the kill
-        returned 128 having failed on git itself, git finished the commit,
+        A stop can miss: it can arrive after the command has already
+        finished, and before #26 it could also miss a process tree that
+        was still growing while `taskkill /F /T` enumerated it. Observed
+        on Windows in nuke-raiders-garage#8: the kill returned 128 having
+        failed on git itself, git finished the commit,
         and the panel still announced "stopped -- nothing was committed"
         over a commit that was on the branch.
 

@@ -3265,10 +3265,10 @@ class TestCommitPanelStopLeavesTheWorktreeUsable(
     def assert_the_report_matches_the_repository(self, panel, before):
         """The invariant a stop must hold, whichever way the race went.
 
-        Stop kills a process tree, and `taskkill /F /T` can miss one that
-        is still growing (#8), so a stop pressed while git is committing
-        genuinely has two possible outcomes: the commit was prevented, or
-        it was not. Both are acceptable -- the race cannot be closed, only
+        Stop ends the run's process group, which narrows the race but
+        cannot close it (#8, #26), so a stop pressed while git is
+        committing genuinely has two possible outcomes: the commit was
+        prevented, or it was not. Both are acceptable -- the race cannot be closed, only
         narrowed, since a stop pressed a microsecond after git finishes can
         never be honoured. What is never acceptable is the panel saying one
         and the repository saying the other, which is what #8 caught.
@@ -3290,7 +3290,7 @@ class TestCommitPanelStopLeavesTheWorktreeUsable(
         """The #8 sequence, forced: the kill misses, git commits, and the
         panel has to own up to it rather than announce a stop.
 
-        Neutering `_kill_tree` is the only part of that sequence a test can
+        Neutering `_end_run` is the only part of that sequence a test can
         make happen on purpose; everything after it is the real code.
         """
         self.on_branch()

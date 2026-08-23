@@ -3,7 +3,7 @@ arrives (R11, R6). Pure and Qt-free, like every module under
 tools/garage/core/: it owns a subprocess, a pipe and a stopwatch, and knows
 nothing about the widget that displays what it reads.
 
-Three rules shape it.
+Four rules shape it.
 
 **Output arrives, it does not accumulate.** A compile takes tens of seconds
 and the pre-commit verification R6 names takes about ninety; a display with
@@ -23,6 +23,15 @@ output names the missing executable, so the compile panel reports it the
 same way it reports a compile error. The Doctor (R14) is what tells the
 user this in advance; this is the backstop for the moment they press Build
 anyway.
+
+**A stopped run ends as a group, not as a tree.** Every run is spawned
+into a kernel-owned process group (`process_group.py`), and Stop ends the
+group. The kernel owns the membership, so a process spawned while the
+kill is in flight is already in it -- which the `taskkill /F /T` tree walk
+this replaced could not manage, because it enumerated a tree that was
+still growing (#8, #26). It narrows the race; it cannot close it, since a
+Stop pressed after git has written the commit has nothing left to
+prevent.
 """
 from __future__ import annotations
 
