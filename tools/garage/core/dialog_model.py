@@ -31,7 +31,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Union
 
 # ── The Game Boy's limits ────────────────────────────────────────────────
 
@@ -209,3 +209,178 @@ def read_max_npcs(binding) -> int:
             f"how many NPCs the game supports."
         )
     return int(match.group(1))
+
+
+# ── Node operations (R3, R4, R5, R6) ─────────────────────────────────────
+
+# What a node added from the panel says before the user types. Short,
+# inside every limit, and obviously a placeholder.
+NEW_NODE_TEXT = "..."
+
+
+def new_node(idx: int) -> dict:
+    """A narration node that ends the tree."""
+    return {"idx": idx, "text": NEW_NODE_TEXT, "choices": [], "next": [END]}
+
+
+def add_node(nodes: List[dict]) -> dict:
+    """Append a node and return it (R3)."""
+    node = new_node(len(nodes))
+    nodes.append(node)
+    return node
+
+
+def resequence(nodes: List[dict]) -> None:
+    """Make every node's `idx` its position again. A node's index *is* its
+    position -- `dialog_to_c.py` names its generated strings after it and
+    validates every `next` against `len(nodes)` -- so the two can never be
+    allowed to drift.
+    """
+    for position, node in enumerate(nodes):
+        node["idx"] = position
+
+
+def renumber_refs(nodes: List[dict], deleted_idx: int) -> None:
+    """Fix every reference after the node at `deleted_idx` has been
+    removed (R4/AC3).
+
+    A reference *to* the deleted node has nowhere to go, so it becomes
+    END -- the tree ends rather than jumping somewhere arbitrary. A
+    reference *above* it shifts down by one, because every node above the
+    hole did. A reference below it, and both sentinels, are untouched.
+
+    Applied to every slot of every node, not only to the first: a
+    three-choice node has three references and the second one is exactly
+    as able to point at the deleted node as the first.
+    """
+    for node in nodes:
+        renumbered: List[Union[int, str]] = []
+        for target in node["next"]:
+            if target in SENTINELS:
+                renumbered.append(target)
+            elif target == deleted_idx:
+                renumbered.append(END)
+            elif isinstance(target, int) and target > deleted_idx:
+                renumbered.append(target - 1)
+            else:
+                renumbered.append(target)
+        node["next"] = renumbered
+
+
+def delete_node(nodes: List[dict], index: int) -> None:
+    """Remove the node at `index` and leave every reference correct
+    (R3/R4).
+
+    An NPC never ends up with no nodes at all: `dialog_to_c.py` generates
+    a node table per NPC and the game indexes into it, so an empty list is
+    a slot the game cannot enter. Deleting the last node therefore leaves
+    a one-node stub, which is what the TUI does for the same reason.
+    """
+    if index < 0 or index >= len(nodes):
+        raise DialogError(
+            f"There is no node {index} to delete; this NPC has "
+            f"{len(nodes)} node(s)."
+        )
+    del nodes[index]
+    resequence(nodes)
+    renumber_refs(nodes, index)
+    if not nodes:
+        nodes.append(new_node(0))
+
+
+def set_text(node: dict, text: str) -> None:
+    """Store a node's text (R3).
+
+    The length limit is deliberately not enforced here. AC6 asks for the
+    count to move as the user types, and a value the model refused to hold
+    could not be counted -- so an over-long node is storable, shown as
+    over, and refused at save (AC8, `refusal` in Task 4).
+    """
+    node["text"] = text
+
+
+def set_next(node: dict, slot: int, target: Union[int, str]) -> None:
+    """Point one of a node's `next` slots at a node, at END or at SHOP
+    (R5/AC4).
+    """
+    nexts = node["next"]
+    if slot < 0 or slot >= len(nexts):
+        raise DialogError(
+            f"This node has {len(nexts)} next slot(s), so there is no slot "
+            f"{slot} to set."
+        )
+    if isinstance(target, bool) or not (
+        isinstance(target, int) or target in SENTINELS
+    ):
+        raise DialogError(
+            f"'{target}' is not a node index, {END} or {SHOP}, so it cannot "
+            f"be a next target."
+        )
+    nexts[slot] = target
+
+
+def next_targets(nodes: List[dict], node_index: int) -> List[Union[int, str]]:
+    """What a node's next slot may be set to: every *other* node, then the
+    two sentinels. A node pointing at itself is a loop the player cannot
+    leave, so it is not offered.
+    """
+    targets: List[Union[int, str]] = [
+        i for i in range(len(nodes)) if i != node_index
+    ]
+    targets.extend(SENTINELS)
+    return targets
+
+
+def add_choice(node: dict, label: str) -> None:
+    """Add a choice to a node (R6/AC5).
+
+    The first choice **takes over** the narration node's existing `next`
+    rather than adding a slot beside it: a node has one `next` per choice,
+    and a narration node's single `next` is the slot the first choice
+    inherits. `tools/dialog_editor.py::_toggle_choice` appends instead,
+    which leaves one choice with two nexts -- a shape
+    `dialog_to_c.py::validate` rejects. This module is written fresh
+    (R13), so it does the correct thing rather than the compatible one.
+    """
+    label = label.strip()
+    if not label:
+        raise DialogError("A choice needs a label.")
+    choices = node["choices"]
+    if len(choices) >= MAX_CHOICES:
+        raise DialogError(
+            f"A node holds at most {MAX_CHOICES} choices, and this one "
+            f"already has {len(choices)}."
+        )
+    if not choices:
+        # The single narration `next` becomes choice 0's next; the list
+        # already has exactly the one slot this choice needs.
+        choices.append(label)
+        return
+    choices.append(label)
+    node["next"].append(END)
+
+
+def remove_choice(node: dict, choice_index: int) -> None:
+    """Remove a choice and its `next` slot (R6).
+
+    Removing the last choice leaves the node's `next` list at exactly one
+    entry -- the slot that choice used -- because a narration node has one
+    next and an empty list is a shape the generator rejects.
+    """
+    choices = node["choices"]
+    if choice_index < 0 or choice_index >= len(choices):
+        raise DialogError(
+            f"This node has {len(choices)} choice(s), so there is no choice "
+            f"{choice_index} to remove."
+        )
+    del choices[choice_index]
+    nexts = node["next"]
+    if len(choices) == 0:
+        # Keep the removed choice's target as the narration node's next:
+        # deleting a choice should not silently change where the node
+        # goes when it had only one way out to begin with.
+        keep = nexts[choice_index] if choice_index < len(nexts) else END
+        node["next"] = [keep]
+        return
+    if choice_index < len(nexts):
+        del nexts[choice_index]

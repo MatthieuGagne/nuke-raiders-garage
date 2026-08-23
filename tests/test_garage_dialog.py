@@ -282,5 +282,206 @@ class TestReadMaxNpcs(DialogModelTestCase):
         self.assertIn("MAX_NPCS", cm.exception.message)
 
 
+def narration(idx, text="hi", nxt="END"):
+    return {"idx": idx, "text": text, "choices": [], "next": [nxt]}
+
+
+def branching(idx, labels, nexts, text="pick"):
+    return {"idx": idx, "text": text, "choices": list(labels),
+            "next": list(nexts)}
+
+
+class TestAddNode(unittest.TestCase):
+    """R3: add a node."""
+
+    def test_a_new_node_lands_at_the_end_with_the_next_index(self):
+        nodes = [narration(0)]
+        added = dialog_model.add_node(nodes)
+        self.assertEqual(len(nodes), 2)
+        self.assertIs(nodes[1], added)
+        self.assertEqual(added["idx"], 1)
+
+    def test_a_new_node_is_a_narration_node_ending_the_tree(self):
+        nodes = []
+        added = dialog_model.add_node(nodes)
+        self.assertEqual(added["choices"], [])
+        self.assertEqual(added["next"], ["END"])
+
+    def test_a_new_nodes_text_is_within_the_limit(self):
+        added = dialog_model.add_node([])
+        self.assertFalse(dialog_model.is_over_limit(added["text"]))
+
+
+class TestDeleteNodeRenumbers(unittest.TestCase):
+    """R4/AC3: after a delete, no next pointer and no choice points at a
+    wrong node."""
+
+    def test_the_node_is_gone(self):
+        nodes = [narration(0, nxt=1), narration(1, nxt=2), narration(2)]
+        dialog_model.delete_node(nodes, 1)
+        self.assertEqual(len(nodes), 2)
+
+    def test_idx_fields_are_resequenced(self):
+        nodes = [narration(0, nxt=1), narration(1, nxt=2), narration(2)]
+        dialog_model.delete_node(nodes, 1)
+        self.assertEqual([n["idx"] for n in nodes], [0, 1])
+
+    def test_a_reference_to_the_deleted_node_becomes_end(self):
+        nodes = [narration(0, nxt=1), narration(1)]
+        dialog_model.delete_node(nodes, 1)
+        self.assertEqual(nodes[0]["next"], ["END"])
+
+    def test_a_reference_above_the_deleted_node_is_decremented(self):
+        nodes = [narration(0, nxt=2), narration(1), narration(2)]
+        dialog_model.delete_node(nodes, 1)
+        self.assertEqual(nodes[0]["next"], [1])
+
+    def test_a_reference_below_the_deleted_node_is_untouched(self):
+        nodes = [narration(0, nxt=0), narration(1), narration(2)]
+        dialog_model.delete_node(nodes, 2)
+        self.assertEqual(nodes[0]["next"], [0])
+
+    def test_end_and_shop_survive_a_delete(self):
+        nodes = [branching(0, ["a", "b"], ["END", "SHOP"]), narration(1)]
+        dialog_model.delete_node(nodes, 1)
+        self.assertEqual(nodes[0]["next"], ["END", "SHOP"])
+
+    def test_every_choice_slot_is_renumbered_not_only_the_first(self):
+        nodes = [branching(0, ["a", "b", "c"], [1, 2, 3]),
+                 narration(1), narration(2), narration(3)]
+        dialog_model.delete_node(nodes, 2)
+        self.assertEqual(nodes[0]["next"], [1, "END", 2])
+
+    def test_deleting_the_only_node_leaves_a_stub_rather_than_nothing(self):
+        # An NPC with no nodes is a slot dialog_to_c.py cannot generate a
+        # tree for; the TUI keeps a one-node stub for the same reason.
+        nodes = [narration(0)]
+        dialog_model.delete_node(nodes, 0)
+        self.assertEqual(len(nodes), 1)
+        self.assertEqual(nodes[0]["idx"], 0)
+        self.assertEqual(nodes[0]["next"], ["END"])
+
+    def test_deleting_out_of_range_is_a_dialog_error(self):
+        nodes = [narration(0)]
+        with self.assertRaises(dialog_model.DialogError):
+            dialog_model.delete_node(nodes, 7)
+
+
+class TestSetNext(unittest.TestCase):
+    """R5/AC4: point a node at another node, or at the end of the tree."""
+
+    def test_setting_a_node_index(self):
+        node = narration(0)
+        dialog_model.set_next(node, 0, 2)
+        self.assertEqual(node["next"], [2])
+
+    def test_setting_end(self):
+        node = narration(0, nxt=3)
+        dialog_model.set_next(node, 0, "END")
+        self.assertEqual(node["next"], ["END"])
+
+    def test_setting_shop(self):
+        node = narration(0)
+        dialog_model.set_next(node, 0, "SHOP")
+        self.assertEqual(node["next"], ["SHOP"])
+
+    def test_setting_one_choice_slot_leaves_the_others_alone(self):
+        node = branching(0, ["a", "b"], [1, 2])
+        dialog_model.set_next(node, 1, "END")
+        self.assertEqual(node["next"], [1, "END"])
+
+    def test_a_slot_that_does_not_exist_is_a_dialog_error(self):
+        node = narration(0)
+        with self.assertRaises(dialog_model.DialogError):
+            dialog_model.set_next(node, 2, "END")
+
+    def test_a_target_that_is_neither_an_index_nor_a_sentinel_is_refused(self):
+        node = narration(0)
+        with self.assertRaises(dialog_model.DialogError):
+            dialog_model.set_next(node, 0, "ELSEWHERE")
+
+
+class TestNextTargets(unittest.TestCase):
+    """What the panel's next combo offers."""
+
+    def test_every_other_node_then_the_sentinels(self):
+        nodes = [narration(0), narration(1), narration(2)]
+        self.assertEqual(
+            dialog_model.next_targets(nodes, 1), [0, 2, "END", "SHOP"])
+
+    def test_a_node_is_never_offered_itself(self):
+        nodes = [narration(0)]
+        self.assertEqual(dialog_model.next_targets(nodes, 0), ["END", "SHOP"])
+
+
+class TestChoices(unittest.TestCase):
+    """R6/AC5: between zero and three choices, and the parallel `next`
+    list stays parallel."""
+
+    def test_the_first_choice_takes_over_the_narration_next(self):
+        # The TUI appends here and leaves the narration `next` behind,
+        # which produces one choice and two nexts -- a shape
+        # dialog_to_c.py::validate rejects. Written fresh (R13), so this
+        # is the corrected behaviour.
+        node = narration(0, nxt=4)
+        dialog_model.add_choice(node, "The races")
+        self.assertEqual(node["choices"], ["The races"])
+        self.assertEqual(node["next"], [4])
+
+    def test_a_further_choice_appends_an_end_slot(self):
+        node = narration(0, nxt=4)
+        dialog_model.add_choice(node, "a")
+        dialog_model.add_choice(node, "b")
+        self.assertEqual(node["choices"], ["a", "b"])
+        self.assertEqual(node["next"], [4, "END"])
+
+    def test_a_fourth_choice_is_refused_and_the_node_is_unchanged(self):
+        node = branching(0, ["a", "b", "c"], [1, 2, 3])
+        with self.assertRaises(dialog_model.DialogError) as cm:
+            dialog_model.add_choice(node, "d")
+        self.assertIn("3", cm.exception.message)
+        self.assertEqual(node["choices"], ["a", "b", "c"])
+        self.assertEqual(node["next"], [1, 2, 3])
+
+    def test_an_empty_label_is_refused(self):
+        node = narration(0)
+        with self.assertRaises(dialog_model.DialogError):
+            dialog_model.add_choice(node, "   ")
+
+    def test_removing_a_choice_removes_its_next_slot(self):
+        node = branching(0, ["a", "b", "c"], [1, 2, 3])
+        dialog_model.remove_choice(node, 1)
+        self.assertEqual(node["choices"], ["a", "c"])
+        self.assertEqual(node["next"], [1, 3])
+
+    def test_removing_the_last_choice_leaves_one_next_slot(self):
+        node = branching(0, ["a"], [5])
+        dialog_model.remove_choice(node, 0)
+        self.assertEqual(node["choices"], [])
+        self.assertEqual(node["next"], [5])
+
+    def test_removing_a_choice_that_is_not_there_is_a_dialog_error(self):
+        node = branching(0, ["a"], [5])
+        with self.assertRaises(dialog_model.DialogError):
+            dialog_model.remove_choice(node, 3)
+
+
+class TestSetText(unittest.TestCase):
+    """R3: editing a node's text. The limit is not enforced here -- AC6
+    wants the count to move as the user types, which means an over-long
+    value must be storable and shown; AC8's refusal happens at save."""
+
+    def test_the_text_is_stored(self):
+        node = narration(0)
+        dialog_model.set_text(node, "Watch the east corner.")
+        self.assertEqual(node["text"], "Watch the east corner.")
+
+    def test_an_over_long_value_is_stored_so_the_count_can_report_it(self):
+        node = narration(0)
+        dialog_model.set_text(node, "A" * 80)
+        self.assertEqual(len(node["text"]), 80)
+        self.assertTrue(dialog_model.is_over_limit(node["text"]))
+
+
 if __name__ == "__main__":
     unittest.main()
