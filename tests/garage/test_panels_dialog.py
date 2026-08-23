@@ -9,6 +9,7 @@ import json
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -293,6 +294,266 @@ class TestNoBinding(unittest.TestCase):
     def test_no_npcs_and_no_cards(self):
         self.assertEqual(self.panel.npc_names(), [])
         self.assertEqual(self.panel.node_cards(), [])
+
+
+class TestEditingText(DialogPanelTestCase):
+    """AC2: text edited in Garage appears in the JSON after a save."""
+
+    def test_saving_writes_the_edited_text(self):
+        card = self.panel.node_cards()[0]
+        card.text_field.setText("Fresh line.")
+
+        self.assertTrue(self.panel.save())
+
+        self.assertEqual(
+            self.saved_npcs()["npcs"][0]["nodes"][0]["text"], "Fresh line.")
+
+    def test_saving_emits_saved(self):
+        seen = []
+        self.panel.saved.connect(lambda: seen.append(True))
+        self.panel.save()
+        self.assertEqual(seen, [True])
+
+
+class TestAddAndDeleteNode(DialogPanelTestCase):
+    """R3/AC3: add a node, delete a node, and leave no reference wrong."""
+
+    def test_adding_a_node_shows_a_new_card(self):
+        self.panel.add_node()
+        self.assertEqual(len(self.panel.node_cards()), 4)
+        self.assertEqual(self.panel.node_cards()[3].id_label.text(), "[3]")
+
+    def test_an_added_node_is_saved(self):
+        self.panel.add_node()
+        self.panel.save()
+        self.assertEqual(len(self.saved_npcs()["npcs"][0]["nodes"]), 4)
+
+    def test_deleting_a_node_removes_its_card(self):
+        self.panel.delete_node(self.panel.node_cards()[1])
+        self.assertEqual(
+            [c.id_label.text() for c in self.panel.node_cards()],
+            ["[0]", "[1]"],
+        )
+
+    def test_a_deleted_nodes_referrers_are_renumbered_in_the_saved_json(self):
+        # Node [0] points at [1]; deleting [1] must leave [0] at END, and
+        # the old [2] must have become [1].
+        self.panel.delete_node(self.panel.node_cards()[1])
+        self.panel.save()
+
+        nodes = self.saved_npcs()["npcs"][0]["nodes"]
+        self.assertEqual([n["idx"] for n in nodes], [0, 1])
+        self.assertEqual(nodes[0]["next"], ["END"])
+
+    def test_deleting_updates_the_npc_lists_node_count(self):
+        self.panel.delete_node(self.panel.node_cards()[1])
+        self.assertIn("2", self.panel.npc_list.item(0).text())
+
+
+class TestSetNext(DialogPanelTestCase):
+    """R5/AC4: a next pointer set in Garage appears in the saved JSON."""
+
+    def test_setting_a_narration_next_to_a_node(self):
+        self.panel.set_next(self.panel.node_cards()[0], 0, 2)
+        self.panel.save()
+        self.assertEqual(
+            self.saved_npcs()["npcs"][0]["nodes"][0]["next"], [2])
+
+    def test_setting_a_narration_next_to_end(self):
+        self.panel.set_next(self.panel.node_cards()[0], 0, "END")
+        self.panel.save()
+        self.assertEqual(
+            self.saved_npcs()["npcs"][0]["nodes"][0]["next"], ["END"])
+
+    def test_setting_one_choice_slot_leaves_the_other_alone(self):
+        self.panel.set_next(self.panel.node_cards()[1], 0, "END")
+        self.panel.save()
+        self.assertEqual(
+            self.saved_npcs()["npcs"][0]["nodes"][1]["next"], ["END", "SHOP"])
+
+    def test_the_chip_redraws_after_the_change(self):
+        self.panel.set_next(self.panel.node_cards()[0], 0, "END")
+        self.assertEqual(
+            self.panel.node_cards()[0].link_texts(), ["next → END"])
+
+
+class TestChoices(DialogPanelTestCase):
+    """R6/AC5: between zero and three choices, and no fourth."""
+
+    def test_adding_a_choice_shows_a_chip_for_it(self):
+        card = self.panel.node_cards()[0]
+        self.panel.add_choice(card, "Yes")
+        self.assertEqual(card.link_texts(), ["[Yes] → [1]"])
+
+    def test_a_choice_is_saved(self):
+        self.panel.add_choice(self.panel.node_cards()[0], "Yes")
+        self.panel.save()
+        node = self.saved_npcs()["npcs"][0]["nodes"][0]
+        self.assertEqual(node["choices"], ["Yes"])
+        self.assertEqual(node["next"], [1])
+
+    def test_a_fourth_choice_is_refused_and_said_in_the_log(self):
+        card = self.panel.node_cards()[1]
+        self.panel.add_choice(card, "Third")
+        self.panel.add_choice(card, "Fourth")
+        self.assertEqual(len(card.node["choices"]), 3)
+        self.assertIn("3", self.panel.log_text())
+
+    def test_removing_a_choice_removes_its_chip(self):
+        card = self.panel.node_cards()[1]
+        self.panel.remove_choice(card, 0)
+        self.assertEqual(card.link_texts(), ["[Shop] → SHOP"])
+
+
+class TestRenameNpc(DialogPanelTestCase):
+    """R3: rename an NPC."""
+
+    def test_the_list_shows_the_new_name(self):
+        self.panel.rename_selected_npc("grease")
+        self.assertEqual(self.panel.npc_names(), ["GREASE", "TRADER"])
+
+    def test_the_new_name_is_saved(self):
+        self.panel.rename_selected_npc("grease")
+        self.panel.save()
+        self.assertEqual(self.saved_npcs()["npcs"][0]["name"], "GREASE")
+
+
+@unittest.skipIf(NO_GAME_REPO, NO_GAME_REPO_REASON)
+class TestNpcCeiling(DialogPanelTestCase):
+    """AC9: Garage refuses to add an NPC beyond the maximum the game
+    supports. The fixture's config.h says MAX_NPCS 2, and the fixture has
+    two NPCs."""
+
+    def test_adding_a_third_npc_is_refused(self):
+        self.panel.add_npc("SCOUT")
+        self.assertEqual(self.panel.npc_names(), ["STEEVE", "TRADER"])
+
+    def test_the_refusal_names_the_limit(self):
+        self.panel.add_npc("SCOUT")
+        self.assertIn("2", self.panel.log_text())
+
+    def test_a_raised_ceiling_lets_the_npc_in(self):
+        self.binding.config_h.write_text(
+            "#define MAX_NPCS     3\n", encoding="utf-8")
+        self.panel.refresh()
+        self.panel.add_npc("SCOUT")
+        self.assertEqual(self.panel.npc_names(), ["STEEVE", "TRADER", "SCOUT"])
+
+
+class TestSaveRefusal(DialogPanelTestCase):
+    """AC8: Garage refuses to save when a node holds 63 characters or
+    more, and names that node."""
+
+    def test_an_over_long_node_blocks_the_save(self):
+        self.panel.node_cards()[1].text_field.setText("A" * 70)
+        self.assertFalse(self.panel.save())
+
+    def test_the_file_is_untouched_by_a_refused_save(self):
+        before = (self.repo / "assets" / "dialog" / "npcs.json").read_bytes()
+        self.panel.node_cards()[1].text_field.setText("A" * 70)
+        self.panel.save()
+        after = (self.repo / "assets" / "dialog" / "npcs.json").read_bytes()
+        self.assertEqual(before, after)
+
+    def test_the_refusal_names_the_npc_and_the_node(self):
+        self.panel.node_cards()[1].text_field.setText("A" * 70)
+        self.panel.save()
+        self.assertIn("STEEVE", self.panel.refusal_text())
+        self.assertIn("[1]", self.panel.refusal_text())
+
+    def test_exactly_sixty_three_characters_is_refused(self):
+        self.panel.node_cards()[1].text_field.setText("A" * 63)
+        self.assertFalse(self.panel.save())
+
+    def test_sixty_two_characters_saves(self):
+        self.panel.node_cards()[1].text_field.setText("A" * 62)
+        self.assertTrue(self.panel.save())
+
+    def test_the_save_button_is_disabled_while_a_node_is_over(self):
+        self.panel.node_cards()[1].text_field.setText("A" * 70)
+        self.assertFalse(self.panel.save_button.isEnabled())
+
+    def test_it_is_enabled_again_once_the_node_fits(self):
+        card = self.panel.node_cards()[1]
+        card.text_field.setText("A" * 70)
+        card.text_field.setText("fits")
+        self.assertTrue(self.panel.save_button.isEnabled())
+
+    def test_the_refusal_clears_once_the_node_fits(self):
+        card = self.panel.node_cards()[1]
+        card.text_field.setText("A" * 70)
+        card.text_field.setText("fits")
+        self.assertEqual(self.panel.refusal_text(), "")
+
+
+@unittest.skipIf(NO_GAME_REPO, NO_GAME_REPO_REASON)
+class TestGeneratorRuns(DialogPanelTestCase):
+    """AC10/AC11: dialog_to_c.py runs after a save, its output appears in
+    the window, and what it writes is what a terminal writes.
+
+    The fixture holds the game repository's real dialog_to_c.py, and the
+    run is a real subprocess -- a stub would prove the wiring and nothing
+    about AC11.
+    """
+
+    npcs = NPCS
+
+    def _save_and_wait(self):
+        self.assertTrue(self.panel.save())
+        deadline = 30.0
+        step = 0.05
+        waited = 0.0
+        while self.panel.is_running() and waited < deadline:
+            QApplication.processEvents()
+            time.sleep(step)
+            waited += step
+        QApplication.processEvents()
+        self.assertFalse(self.panel.is_running(), "the generator never ended")
+
+    def test_the_generator_writes_the_dialog_source(self):
+        self._save_and_wait()
+        self.assertTrue((self.repo / "src" / "dialog_data.c").is_file())
+
+    def test_the_generator_writes_the_hub_source(self):
+        self._save_and_wait()
+        self.assertTrue((self.repo / "src" / "hub_data.c").is_file())
+
+    def test_its_output_appears_in_the_window(self):
+        self._save_and_wait()
+        self.assertIn("dialog_data.c", self.panel.log_text())
+
+    def test_the_command_is_echoed_before_it_runs(self):
+        self._save_and_wait()
+        self.assertIn("$ python tools/dialog_to_c.py", self.panel.log_text())
+
+    def test_the_sources_match_what_a_terminal_produces(self):
+        """AC11, checked rather than asserted: the same generator, run the
+        way the Makefile runs it, must produce byte-identical output."""
+        self._save_and_wait()
+        from_garage = (self.repo / "src" / "dialog_data.c").read_bytes()
+        hub_from_garage = (self.repo / "src" / "hub_data.c").read_bytes()
+
+        (self.repo / "src" / "dialog_data.c").unlink()
+        (self.repo / "src" / "hub_data.c").unlink()
+        subprocess.run(
+            [sys.executable, "tools/dialog_to_c.py",
+             "assets/dialog/npcs.json", "src/dialog_data.c",
+             "--hubs-json", "assets/dialog/hubs.json",
+             "--hub-out", "src/hub_data.c",
+             "--config-h", "src/config.h"],
+            cwd=str(self.repo), check=True, capture_output=True, text=True,
+        )
+
+        self.assertEqual(from_garage,
+                         (self.repo / "src" / "dialog_data.c").read_bytes())
+        self.assertEqual(hub_from_garage,
+                         (self.repo / "src" / "hub_data.c").read_bytes())
+
+    def test_a_refused_save_runs_no_generator(self):
+        self.panel.node_cards()[1].text_field.setText("A" * 70)
+        self.assertFalse(self.panel.save())
+        self.assertFalse(self.panel.is_running())
+        self.assertFalse((self.repo / "src" / "dialog_data.c").exists())
 
 
 if __name__ == "__main__":

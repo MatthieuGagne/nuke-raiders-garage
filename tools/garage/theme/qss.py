@@ -61,7 +61,9 @@ names / dynamic properties the panels already expose for this purpose:
 - `#dialog-panel`, `#dialog-status`, `#dialog-npc-list`,
   `#dialog-node-card`, `#dialog-node-id`, `#dialog-node-text`,
   `#dialog-node-count`, `#dialog-node-preview`, `#dialog-link-chip`,
-  `#dialog-refusal`, `#dialog-log` -- the dialog panel
+  `#dialog-refusal`, `#dialog-log`, `#dialog-save`, `#dialog-add-node`,
+  `#dialog-add-npc`, `#dialog-rename-npc`, `#dialog-npc-name` -- the
+  dialog panel
   (`tools/garage/panels/dialog.py`). `[over="true"]` on a card and on its
   count is the over-the-limit treatment the prototype's `.node.over`
   declares; the count also spells the numbers out (`70/63`), so colour is

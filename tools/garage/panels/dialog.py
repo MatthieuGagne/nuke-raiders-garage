@@ -200,6 +200,39 @@ class DialogPanel(QWidget):
 
         layout.addLayout(body, 1)
 
+        controls = QHBoxLayout()
+        self.add_node_button = QPushButton("Add node")
+        self.add_node_button.setObjectName("dialog-add-node")
+        self.add_node_button.clicked.connect(lambda: self.add_node())
+        controls.addWidget(self.add_node_button)
+
+        self.npc_name_field = QLineEdit()
+        self.npc_name_field.setObjectName("dialog-npc-name")
+        self.npc_name_field.setPlaceholderText("NPC name")
+        controls.addWidget(self.npc_name_field)
+
+        self.rename_npc_button = QPushButton("Rename NPC")
+        self.rename_npc_button.setObjectName("dialog-rename-npc")
+        self.rename_npc_button.clicked.connect(
+            lambda: self.rename_selected_npc(self.npc_name_field.text()))
+        controls.addWidget(self.rename_npc_button)
+
+        self.add_npc_button = QPushButton("Add NPC")
+        self.add_npc_button.setObjectName("dialog-add-npc")
+        self.add_npc_button.clicked.connect(
+            lambda: self.add_npc(self.npc_name_field.text()))
+        controls.addWidget(self.add_npc_button)
+
+        controls.addStretch(1)
+
+        self.save_button = QPushButton("Save & Generate")
+        self.save_button.setObjectName("dialog-save")
+        self.save_button.setProperty("role", "primary")
+        self.save_button.clicked.connect(lambda: self.save())
+        controls.addWidget(self.save_button)
+
+        layout.addLayout(controls)
+
         self.refusal_label = QLabel()
         self.refusal_label.setObjectName("dialog-refusal")
         self.refusal_label.setWordWrap(True)
@@ -313,6 +346,9 @@ class DialogPanel(QWidget):
             card = NodeCard(node, parent=self.nodes_holder)
             self.nodes_layout.addWidget(card)
             self._cards.append(card)
+            card.text_field.textChanged.connect(
+                lambda _text: self._refresh_refusal())
+        self._refresh_refusal()
 
     # -- the generator's output -------------------------------------------
 
@@ -325,13 +361,188 @@ class DialogPanel(QWidget):
     def _append_command(self, label: str, _target: str) -> None:
         self.append_line(f"$ {label}")
 
-    def _on_run_finished(self, results) -> None:
-        # Task 6 fills this in; the connection exists here so the panel is
-        # never wired half-way.
-        pass
-
     def is_running(self) -> bool:
         return self._runs.is_running()
 
     def stop_and_wait(self) -> None:
         self._runs.stop_and_wait()
+
+    # -- editing (R3, R5, R6, R10) ----------------------------------------
+
+    def _report(self, message: str) -> None:
+        """A refused edit is said in the log, where the generator's output
+        already goes. One place for everything Garage has to tell the user
+        about this tree, rather than a second status line to notice.
+        """
+        self.append_line(message)
+
+    def add_node(self) -> None:
+        nodes = self.selected_nodes()
+        if self.selected_npc() is None:
+            return
+        dialog_model.add_node(nodes)
+        self.rebuild_cards()
+        self._refresh_npc_row()
+        self._refresh_refusal()
+
+    def delete_node(self, card: "NodeCard") -> None:
+        nodes = self.selected_nodes()
+        try:
+            index = nodes.index(card.node)
+        except ValueError:
+            return
+        try:
+            dialog_model.delete_node(nodes, index)
+        except dialog_model.DialogError as exc:
+            self._report(exc.message)
+            return
+        # Every card is rebuilt, not only the deleted one: renumbering
+        # rewrites `next` on nodes that were not touched by the user, and
+        # a chip left showing the old target is a wrong answer to AC3.
+        self.rebuild_cards()
+        self._refresh_npc_row()
+        self._refresh_refusal()
+
+    def set_next(self, card: "NodeCard", slot: int, target) -> None:
+        try:
+            dialog_model.set_next(card.node, slot, target)
+        except dialog_model.DialogError as exc:
+            self._report(exc.message)
+            return
+        card.refresh_links()
+
+    def add_choice(self, card: "NodeCard", label: str) -> None:
+        try:
+            dialog_model.add_choice(card.node, label)
+        except dialog_model.DialogError as exc:
+            self._report(exc.message)
+            return
+        card.refresh_links()
+        self._refresh_refusal()
+
+    def remove_choice(self, card: "NodeCard", choice_index: int) -> None:
+        try:
+            dialog_model.remove_choice(card.node, choice_index)
+        except dialog_model.DialogError as exc:
+            self._report(exc.message)
+            return
+        card.refresh_links()
+        self._refresh_refusal()
+
+    def rename_selected_npc(self, name: str) -> None:
+        if self.data is None:
+            return
+        index = self.selected_npc_index()
+        try:
+            dialog_model.rename_npc(self.data.npcs, index, name)
+        except dialog_model.DialogError as exc:
+            self._report(exc.message)
+            return
+        self._refresh_npc_row()
+
+    def add_npc(self, name: str) -> None:
+        if self.data is None or self.max_npcs is None:
+            return
+        try:
+            dialog_model.add_npc(self.data.npcs, name, self.max_npcs)
+        except dialog_model.DialogError as exc:
+            self._report(exc.message)
+            return
+        self.npc_list.addItem(f"{self.data.npcs[-1]['name']}  1")
+        self._refresh_status()
+        self.npc_list.setCurrentRow(len(self.data.npcs) - 1)
+
+    def _refresh_npc_row(self) -> None:
+        """Re-label the selected NPC's row: its name and its node count
+        are both shown there and both can have just changed."""
+        if self.data is None:
+            return
+        index = self.selected_npc_index()
+        npc = self.selected_npc()
+        if npc is None:
+            return
+        item = self.npc_list.item(index)
+        if item is not None:
+            item.setText(f"{npc['name']}  {len(npc.get('nodes', []))}")
+
+    # -- the refusal, live (AC8) -------------------------------------------
+
+    def refusal_text(self) -> str:
+        return self.refusal_label.text()
+
+    def _refresh_refusal(self) -> None:
+        """Recompute AC8's refusal and gate the Save button on it.
+
+        Called on every keystroke (through the card, below) rather than
+        only at save: the prototype's Dialog screen shows "save blocked"
+        while the node is too long, and a button that looks live until it
+        is pressed is a worse answer to the same requirement.
+        """
+        if self.data is None:
+            self.refusal_label.hide()
+            self.save_button.setEnabled(False)
+            return
+        message = dialog_model.refusal(self.data)
+        if message is None:
+            self.refusal_label.setText("")
+            self.refusal_label.hide()
+            self.save_button.setEnabled(not self.is_running())
+            return
+        self.refusal_label.setText(message)
+        self.refusal_label.show()
+        self.save_button.setEnabled(False)
+
+    # -- saving and generating (R9, R11) ----------------------------------
+
+    def save(self) -> bool:
+        """Write both files and run the generator (AC2, AC10). Returns
+        False when the limits refused the save.
+
+        The refusal is recomputed here rather than trusted from the last
+        keystroke: `save()` is callable from a test, from the button and
+        from a future caller, and R9 must hold for all three.
+        """
+        if self.data is None:
+            return False
+        self._refresh_refusal()
+        if dialog_model.refusal(self.data) is not None:
+            return False
+        if self.is_running():
+            self._report(
+                "The generator is still running; nothing was saved.")
+            return False
+        try:
+            dialog_model.save(self.data)
+        except dialog_model.DialogError as exc:
+            self._report(exc.message)
+            return False
+        self.saved.emit()
+        self._start_generator()
+        return True
+
+    def _start_generator(self) -> None:
+        """R11: run dialog_to_c.py against the active worktree and stream
+        what it prints.
+
+        cwd is the active worktree, because the command's file arguments
+        are worktree-relative -- the same spelling the game repository's
+        Makefile uses, which is what AC11's byte-identical output rests
+        on.
+        """
+        try:
+            command = dialog_model.generator_command(self.binding)
+        except dialog_model.DialogError as exc:
+            self._report(exc.message)
+            return
+        self.save_button.setEnabled(False)
+        if not self._runs.start([command], self.binding.active_worktree.path):
+            self.save_button.setEnabled(True)
+
+    def _on_run_finished(self, results) -> None:
+        for result in results:
+            if not result.ok:
+                self.append_line(
+                    f"{result.command.label} failed (exit "
+                    f"{result.exit_code})."
+                )
+        self._refresh_refusal()
