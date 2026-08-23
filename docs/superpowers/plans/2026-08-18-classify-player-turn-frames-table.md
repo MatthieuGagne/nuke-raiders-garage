@@ -174,7 +174,7 @@ Expected: `OK`, with no `garage_lint: FAIL` text anywhere in the output.
 
 - [ ] **Step 8: Verify AC2 against the Tuner panel itself**
 
-The panel suite takes about six minutes in full, so run only the Tuner classes:
+The panel suite is long and silent in full, so run only the Tuner classes:
 
 ```
 python -m unittest tests.garage.test_panels.TestTunerPanel tests.garage.test_panels.TestTunerPanelRevert -v

@@ -624,7 +624,7 @@ make test
 ```
 
 Expected: `OK`, with the test count three higher than before. `make test-garage` is **not** run —
-this task touches no Qt code, and that suite takes about twelve minutes.
+this task touches no Qt code, and that suite is long.
 
 - [ ] **Step 7: Commit**
 
@@ -706,8 +706,7 @@ match its neighbours. Confirm before writing:
 ls "C:/Users/mathd/.claude/projects/C--Code-nuke-raider-garage/memory/"
 ```
 
-Expected: `MEMORY.md`, `commit-after-each-confirmed-iteration.md`,
-`garage-panel-suite-runs-twelve-minutes.md`, `garage-specs-live-in-github-issues.md`.
+Expected: `MEMORY.md` alongside the memory files that existed at the time, all kebab-cased.
 
 - [ ] **Step 1: Check the memory is not already there**
 
