@@ -781,6 +781,22 @@ class TestConfigIOGuards(unittest.TestCase):
             ("X", 0, 7),
         )
 
+    def test_a_half_whose_parentheses_are_not_its_own_is_not_read(self):
+        # `(X < 0 || X) > 7` is valid, compilable C -- the `||` yields 0
+        # or 1, so the guard never fires -- and it does not mean 0-7.
+        # Read as a range it would silently contradict the header. R4
+        # already asks an unreadable guard to be skipped in silence, so
+        # None (not a wrong range) is the honest answer.
+        self.assertIsNone(config_io.parse_guard_condition("(X < 0 || X) > 7"))
+
+    def test_a_half_with_an_unclosed_paren_is_not_read(self):
+        for condition in (
+            "(X < 0 || (X) > 7",  # lower half opens a paren it never closes
+            "(X) < 0 || X) > 7",  # upper half closes one it never opened
+        ):
+            with self.subTest(condition=condition):
+                self.assertIsNone(config_io.parse_guard_condition(condition))
+
 
 class TestFindRangeDrift(unittest.TestCase):
     """#18 R3's second half: does a tunable's declared [min, max] agree
