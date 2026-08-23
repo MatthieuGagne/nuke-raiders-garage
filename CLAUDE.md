@@ -16,11 +16,11 @@ and govern **both** repositories. Where the two disagree, the game repository wi
 Python 3.13, standard-library `unittest`, no build step. `pytest` is not used here and is not
 installed. PySide6 is the only dependency, and it is what separates the two test targets.
 
-| Command | Covers | Tests | Takes | Needs |
-|---|---|---|---|---|
-| `make test` | `tests/` — `tools/garage/core/`, the drift check, the docs guards | 339 | ~1 min | stdlib only |
-| `make test-garage` | `tests/garage/` — the Qt panels | 225 | **3–13 min** | PySide6 |
-| `make lint` | the `tunables.json` ↔ `src/config.h` drift check on its own | — | seconds | stdlib only |
+| Command | Covers | Tests | Needs |
+|---|---|---|---|
+| `make test` | `tests/` — `tools/garage/core/`, the drift check, the docs guards | 339 | stdlib only |
+| `make test-garage` | `tests/garage/` — the Qt panels | 225 | PySide6 |
+| `make lint` | the `tunables.json` ↔ `src/config.h` drift check on its own | — | stdlib only |
 
 **Pick the target by what you changed.** A change under `tools/garage/core/` is covered by
 `make test`. A change under `tools/garage/panels/`, `tools/garage/theme/` or `app.py` is covered
@@ -31,10 +31,13 @@ run both.
   Discovery never reaches `tests/garage/` because that directory has no `__init__.py`; the omission
   is load-bearing, not an oversight. `.github/workflows/test.yml` runs the suite on Windows and
   Linux with nothing installed, which is what proves it.
-- `make test-garage` runs anywhere from 3 to 13 minutes: it spawns real subprocesses, so
-  process-creation overhead (antivirus scanning above all) dominates, and the same suite on the
-  same tree varies by machine and by day. Size any timeout to the high end. A quiet run is not a
-  hung one.
+- `make test-garage` is **long, and silent until it finishes** — it prints nothing while it runs.
+  How long varies by more than a factor of four, and not by anything you control: it spawns real
+  subprocesses, so process-creation overhead (antivirus scanning above all) dominates, 57 of its
+  tests skip when no game repository is bound, and the same suite on the same tree differs by
+  machine and by day. Give it a generous timeout and do not kill it for being quiet — a quiet run
+  is not a hung one. If you need a number, measure it where you are; do not record the result
+  here, because the next reader will inherit it as a fact.
 - Without `make`, the two suites run directly — this is the form both workflows use:
 
 ```

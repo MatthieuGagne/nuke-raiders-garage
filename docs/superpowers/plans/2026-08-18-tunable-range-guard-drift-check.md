@@ -1187,7 +1187,7 @@ python -m unittest discover -s tests -p "test_*.py"
 
 Expected: `OK`. Watch `test_a_complete_machine_passes_every_check`, which asserts `"8 of 9 checks passing · failing: classification"` — no check was added, so the count is unchanged.
 
-Then the Qt panels (needs PySide6; takes about six minutes — give it a long timeout):
+Then the Qt panels (needs PySide6; long, and silent until it finishes — give it a generous timeout):
 
 ```
 python -m unittest discover -s tests/garage -p "test_*.py"

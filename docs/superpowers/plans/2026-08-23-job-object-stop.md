@@ -15,7 +15,7 @@
 - **No new dependency.** The Job Object calls go through `ctypes` against `kernel32`. `pywin32` is not to be added. `requirements.txt` names PySide6 and nothing else, and must keep naming PySide6 and nothing else.
 - **No Qt import in `tools/garage/core/`** (epic #1 architecture rule). `process_group.py` and `make_runner.py` import stdlib only.
 - **`make test` must pass with PySide6 absent** — `.github/workflows/test.yml` runs it on `windows-latest` and `ubuntu-latest` with no display library installed. Every test this plan adds to `tests/test_garage_core.py` must pass on both.
-- **`make test`** is the default suite (`tests/`, ~330 tests, ~60s). **`make test-garage`** is the panel suite (`tests/garage/`, 225 tests, ~12 min locally / ~2.5 min on CI, needs PySide6). This plan touches both, so both must be run.
+- **`make test`** is the default suite (`tests/`, ~330 tests). **`make test-garage`** is the panel suite (`tests/garage/`, 225 tests, needs PySide6) — it is long, and prints nothing until it finishes. This plan touches both, so both must be run.
 - **Garage changes no file the game repository tracks** (epic #1). Nothing here leaves this repository.
 - **The race cannot be closed, only narrowed.** A Stop pressed a microsecond after git finishes can never be honoured. No test may assert that a stop always prevents the commit; the existing invariant — the panel's report matches the repository, whichever way the race went — is the one that holds.
 
@@ -431,7 +431,7 @@ If `test_the_control_case_killing_the_child_alone_leaves_the_grandchild` fails, 
 - [ ] **Step 5: Run the whole default suite**
 
 Run: `make test`
-Expected: PASS. The wall clock should be about 25 seconds longer than before.
+Expected: PASS. It runs noticeably longer than before — the new tests wait out a grandchild that must be proven absent.
 
 - [ ] **Step 6: Commit**
 
@@ -723,7 +723,7 @@ Expected: PASS.
 - [ ] **Step 8: Run the panel suite**
 
 Run: `make test-garage`
-Expected: PASS, 225 tests. **Budget twelve minutes** — it is not hung. The tests that matter here are the `TestCommitPanelStop*` ones; if either fails, read `assert_the_report_matches_the_repository` first: both outcomes of the race are legal, and only a panel that contradicts the repository is a failure.
+Expected: PASS, 225 tests. It is long and silent — give it a generous timeout and do not kill it for being quiet. The tests that matter here are the `TestCommitPanelStop*` ones; if either fails, read `assert_the_report_matches_the_repository` first: both outcomes of the race are legal, and only a panel that contradicts the repository is a failure.
 
 - [ ] **Step 9: Commit**
 
@@ -849,7 +849,7 @@ Run: `make lint`
 Expected: exit 0. (Run it bare and read the exit code on the next line — a pipe masks it.)
 
 Run: `make test-garage`
-Expected: PASS, 225 tests, about twelve minutes.
+Expected: PASS, 225 tests. Long and silent; give it a generous timeout.
 
 - [ ] **Step 6: Hand-verify in the running application**
 
@@ -880,4 +880,4 @@ git commit -m "docs: describe the stop mechanism that exists rather than the one
 - **What happens if `AssignProcessToJobObject` fails.** Windows 8 and later support nested jobs, so running inside a CI or debugger job is not a problem. If it fails anyway, `adopt` returns False, `run` writes a warning into the log the user is already reading, and Stop degrades to killing the direct child — the same reach the old "taskkill unavailable" branch had, but stated instead of silent.
 - **`taskkill` is no longer invoked**, so Garage no longer depends on it being on PATH, and no longer ignores its exit code and its output the way `_kill_tree` did.
 - **Possible bearing on #28.** That issue hypothesises an interpreter-shutdown `qFatal` from a thread still blocked on a pipe that a killed tree left open. `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` attacks that from the other end: losing the job handle kills the members, so the pipe gets closed. This plan does not claim to fix #28 and adds no test for it — but if the panel suite's intermittent non-zero exit stops appearing after this lands, that is evidence worth recording on #28 rather than a coincidence.
-- **Test runtime.** The new tests add roughly 30 seconds to `make test`, all of it in `time.sleep` waiting out a grandchild that must be proven absent. That is the price of testing an absence; shortening `GRANDCHILD_DEADLINE_S` trades it for flakiness on a loaded CI runner.
+- **Test runtime.** The new tests measurably lengthen `make test`, all of it in `time.sleep` waiting out a grandchild that must be proven absent. That is the price of testing an absence; shortening `GRANDCHILD_DEADLINE_S` trades it for flakiness on a loaded CI runner.
