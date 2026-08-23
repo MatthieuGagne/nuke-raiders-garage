@@ -256,10 +256,18 @@ class RangeMismatch:
     guard_max: int
     line_no: int
 
-    def describe(self) -> str:
+    def describe(self, config_path: str | Path = "src/config.h") -> str:
+        """One line naming both ranges and where the guard is.
+
+        `config_path` is how the caller spells the header. garage_lint
+        passes the resolved `binding.config_h`, because its OK line
+        already does; the Doctor takes the default, because its row
+        spells the repo-relative path everywhere else and is one narrow
+        line. Either way the path is stated once here, not twice.
+        """
         return (
             f"'{self.name}' is {self.schema_min}-{self.schema_max} in "
-            f"tunables.json but src/config.h line {self.line_no} guards it "
+            f"tunables.json but {config_path} line {self.line_no} guards it "
             f"to {self.guard_min}-{self.guard_max}"
         )
 

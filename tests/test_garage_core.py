@@ -872,6 +872,33 @@ class TestFindRangeDrift(unittest.TestCase):
         self.assertTrue(report.clean)  # ...and then skipped
         self.assertEqual(report.checked, [])
 
+    def test_describe_names_the_header_path_it_is_given(self):
+        # The path is a second spelling of a fact garage_lint already
+        # prints resolved in its OK line. Passing it in keeps the two
+        # halves of one report from naming the same file two ways.
+        narrowed = GUARDED_CONFIG_TEXT.replace(
+            "(GEAR1_MAX_SPEED) > 15", "(GEAR1_MAX_SPEED) > 7"
+        )
+        config = config_io.parse(narrowed, schema=self.schema)
+        mismatch = find_range_drift(self.schema, config.guards).mismatches[0]
+
+        described = mismatch.describe("/tmp/wt/src/config.h")
+
+        self.assertIn("/tmp/wt/src/config.h", described)
+        self.assertIn("1-15", described)
+        self.assertIn("1-7", described)
+
+    def test_describe_falls_back_to_the_repo_relative_path(self):
+        # The Doctor row spells src/config.h everywhere else and is one
+        # narrow line; the default is what it keeps using.
+        narrowed = GUARDED_CONFIG_TEXT.replace(
+            "(GEAR1_MAX_SPEED) > 15", "(GEAR1_MAX_SPEED) > 7"
+        )
+        config = config_io.parse(narrowed, schema=self.schema)
+        mismatch = find_range_drift(self.schema, config.guards).mismatches[0]
+
+        self.assertIn("src/config.h line", mismatch.describe())
+
     def test_two_mismatches_are_both_reported(self):
         both = GUARDED_CONFIG_TEXT.replace(
             "(GEAR1_MAX_SPEED) > 15", "(GEAR1_MAX_SPEED) > 7"

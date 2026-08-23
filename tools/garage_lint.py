@@ -106,8 +106,8 @@ def run(garage_root: Path = None, schema_path: Path = None) -> int:
         )
         for mismatch in range_report.mismatches:
             print(
-                f"  - {mismatch.describe()} (fix 'min'/'max' in "
-                "tunables.json, or the guard in the header -- the Tuner "
+                f"  - {mismatch.describe(binding.config_h)} (fix 'min'/'max' "
+                "in tunables.json, or the guard in the header -- the Tuner "
                 "offers what tunables.json declares, and the build rejects "
                 "what the guard forbids)."
             )

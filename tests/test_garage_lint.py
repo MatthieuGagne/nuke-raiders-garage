@@ -281,6 +281,27 @@ class TestGarageLint(unittest.TestCase):
             self.assertIn("1-15", output)  # what the header permits
             self.assertIn("tunables.json", output)
 
+    def test_the_failure_names_the_same_header_path_the_ok_line_would(self):
+        # garage_lint's OK line prints the resolved binding.config_h. Its
+        # FAIL line used to print the literal "src/config.h" -- the same
+        # fact, spelled two ways in one report.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            garage_root = tmp_path / "nuke-raider-garage"
+            garage_root.mkdir()
+            make_game_repo(tmp_path / "nuke-raider", GUARDED_CONFIG)
+            wrong = json.loads(json.dumps(MATCHING_TUNABLES))
+            wrong["entries"]["GEAR1_MAX_SPEED"]["max"] = 20
+            tunables_path = write_tunables(tmp_path, wrong)
+            expected_path = project.bind(garage_root).config_h
+
+            code, output = run_lint(
+                garage_root=garage_root, schema_path=tunables_path
+            )
+
+            self.assertEqual(code, 1)
+            self.assertIn(str(expected_path), output)
+
     def test_unclassified_define_and_range_drift_both_reported(self):
         # Finding 2: name-drift and range-drift firing at the same time.
         # Each is covered in isolation above; this pins that run_lint
