@@ -483,5 +483,170 @@ class TestSetText(unittest.TestCase):
         self.assertTrue(dialog_model.is_over_limit(node["text"]))
 
 
+class TestAddNpc(unittest.TestCase):
+    """R10/AC9: Garage refuses to add an NPC beyond the maximum the game
+    supports. The ceiling is passed in, because it belongs to the game's
+    config.h -- see TestReadMaxNpcs."""
+
+    def _npcs(self, count):
+        return [{"id": i, "name": f"NPC{i}", "vendor_field": "ARMOR",
+                 "nodes": [narration(0)]} for i in range(count)]
+
+    def test_an_npc_below_the_ceiling_is_added(self):
+        npcs = self._npcs(2)
+        added = dialog_model.add_npc(npcs, "scout", max_npcs=4)
+        self.assertEqual(len(npcs), 3)
+        self.assertIs(npcs[2], added)
+
+    def test_a_new_npc_gets_the_next_id_and_an_upper_case_name(self):
+        npcs = self._npcs(2)
+        added = dialog_model.add_npc(npcs, "scout", max_npcs=4)
+        self.assertEqual(added["id"], 2)
+        self.assertEqual(added["name"], "SCOUT")
+
+    def test_a_new_npc_starts_with_one_node(self):
+        added = dialog_model.add_npc([], "scout", max_npcs=4)
+        self.assertEqual(len(added["nodes"]), 1)
+        self.assertEqual(added["nodes"][0]["next"], ["END"])
+
+    def test_adding_at_the_ceiling_is_refused_and_names_the_limit(self):
+        npcs = self._npcs(4)
+        with self.assertRaises(dialog_model.DialogError) as cm:
+            dialog_model.add_npc(npcs, "scout", max_npcs=4)
+        self.assertIn("4", cm.exception.message)
+        self.assertEqual(len(npcs), 4)
+
+    def test_a_name_longer_than_fifteen_is_refused(self):
+        with self.assertRaises(dialog_model.DialogError):
+            dialog_model.add_npc([], "A" * 16, max_npcs=4)
+
+    def test_an_empty_name_is_refused(self):
+        with self.assertRaises(dialog_model.DialogError):
+            dialog_model.add_npc([], "  ", max_npcs=4)
+
+
+class TestRenameNpc(unittest.TestCase):
+    """R3: rename an NPC."""
+
+    def _npcs(self):
+        return [{"id": 0, "name": "STEEVE", "vendor_field": "ARMOR",
+                 "nodes": [narration(0)]}]
+
+    def test_the_name_is_stored_upper_case(self):
+        npcs = self._npcs()
+        stored = dialog_model.rename_npc(npcs, 0, "grease monkey")
+        self.assertEqual(stored, "GREASE MONKEY")
+        self.assertEqual(npcs[0]["name"], "GREASE MONKEY")
+
+    def test_a_name_longer_than_fifteen_is_refused_not_truncated(self):
+        # The TUI truncates a hub name and refuses an NPC name; Garage
+        # refuses here, because a silently shortened name is an edit the
+        # user did not make.
+        npcs = self._npcs()
+        with self.assertRaises(dialog_model.DialogError) as cm:
+            dialog_model.rename_npc(npcs, 0, "A" * 16)
+        self.assertIn("15", cm.exception.message)
+        self.assertEqual(npcs[0]["name"], "STEEVE")
+
+    def test_an_empty_name_is_refused(self):
+        npcs = self._npcs()
+        with self.assertRaises(dialog_model.DialogError):
+            dialog_model.rename_npc(npcs, 0, "")
+
+
+class TestUnassignedNpcs(unittest.TestCase):
+    """Equivalent to tests/test_dialog_editor.py::TestUnassignedNpcs
+    (AC12)."""
+
+    def _npcs(self):
+        return [
+            {"id": 0, "name": "MECHANIC", "nodes": []},
+            {"id": 1, "name": "TRADER", "nodes": []},
+            {"id": 2, "name": "SCOUT", "nodes": []},
+        ]
+
+    def test_all_assigned_returns_empty(self):
+        self.assertEqual(dialog_model.unassigned_npcs(self._npcs(), [0, 1, 2]), [])
+
+    def test_none_assigned_returns_all(self):
+        result = dialog_model.unassigned_npcs(self._npcs(), [])
+        self.assertEqual([n["id"] for n in result], [0, 1, 2])
+
+    def test_partial_assignment(self):
+        result = dialog_model.unassigned_npcs(self._npcs(), [1])
+        self.assertEqual([n["id"] for n in result], [0, 2])
+
+    def test_returns_npc_dicts_not_ids(self):
+        result = dialog_model.unassigned_npcs(self._npcs(), [0, 2])
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["name"], "TRADER")
+
+
+class TestNextHubId(unittest.TestCase):
+    """Equivalent to tests/test_dialog_editor.py::TestNextHubId (AC12)."""
+
+    def test_empty_hubs_returns_zero(self):
+        self.assertEqual(dialog_model.next_hub_id([]), 0)
+
+    def test_single_hub(self):
+        self.assertEqual(dialog_model.next_hub_id([{"id": 0}]), 1)
+
+    def test_gap_in_ids(self):
+        self.assertEqual(dialog_model.next_hub_id([{"id": 0}, {"id": 3}]), 4)
+
+
+class TestHubCrud(unittest.TestCase):
+    """Equivalent to tests/test_dialog_editor.py::TestHubCrud (AC12)."""
+
+    def _hubs(self):
+        return [
+            {"id": 0, "name": "RUST TOWN", "npc_ids": [0, 1]},
+            {"id": 1, "name": "JANKY CITY", "npc_ids": []},
+        ]
+
+    def test_add_npc_appends_to_roster(self):
+        hubs, msg = dialog_model.hub_add_npc(self._hubs(), hub_idx=1, npc_id=2)
+        self.assertIn(2, hubs[1]["npc_ids"])
+        self.assertIn("added", msg.lower())
+
+    def test_add_npc_already_present_returns_error(self):
+        hubs, msg = dialog_model.hub_add_npc(self._hubs(), hub_idx=0, npc_id=1)
+        self.assertIn("already", msg.lower())
+        self.assertEqual(hubs[0]["npc_ids"].count(1), 1)
+
+    def test_remove_npc_by_roster_index(self):
+        hubs, msg = dialog_model.hub_remove_npc(self._hubs(), hub_idx=0,
+                                                roster_idx=0)
+        self.assertNotIn(0, hubs[0]["npc_ids"])
+        self.assertIn("removed", msg.lower())
+
+    def test_remove_npc_out_of_range_returns_error(self):
+        hubs, msg = dialog_model.hub_remove_npc(self._hubs(), hub_idx=1,
+                                                roster_idx=0)
+        self.assertIn("empty", msg.lower())
+
+    def test_rename_hub(self):
+        hubs, msg = dialog_model.hub_rename(self._hubs(), hub_idx=0,
+                                            new_name="steel city")
+        self.assertEqual(hubs[0]["name"], "STEEL CITY")
+        self.assertIn("renamed", msg.lower())
+
+    def test_rename_hub_truncates_to_15(self):
+        hubs, _ = dialog_model.hub_rename(self._hubs(), hub_idx=0,
+                                          new_name="A" * 20)
+        self.assertEqual(len(hubs[0]["name"]), 15)
+
+    def test_delete_hub_removes_from_list(self):
+        hubs, msg = dialog_model.hub_delete(self._hubs(), hub_idx=0)
+        self.assertEqual(len(hubs), 1)
+        self.assertEqual(hubs[0]["name"], "JANKY CITY")
+        self.assertIn("deleted", msg.lower())
+
+    def test_delete_last_hub_leaves_empty_list(self):
+        hubs, _ = dialog_model.hub_delete(
+            [{"id": 0, "name": "SOLO", "npc_ids": []}], hub_idx=0)
+        self.assertEqual(hubs, [])
+
+
 if __name__ == "__main__":
     unittest.main()

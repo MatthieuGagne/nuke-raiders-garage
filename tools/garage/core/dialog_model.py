@@ -384,3 +384,119 @@ def remove_choice(node: dict, choice_index: int) -> None:
         return
     if choice_index < len(nexts):
         del nexts[choice_index]
+
+
+# ── NPCs and hubs ────────────────────────────────────────────────────────
+
+# The vendor field a new NPC starts with. `dialog_to_c.py` maps this
+# string to a LOADOUT_FIELD_* macro and has no entry for an absent one, so
+# a new NPC needs a valid value from the moment it exists.
+DEFAULT_VENDOR_FIELD = "ARMOR"
+
+
+def _clean_name(raw: str, what: str) -> str:
+    name = raw.strip().upper()
+    if not name:
+        raise DialogError(f"A {what} needs a name.")
+    if len(name) > MAX_NAME_LEN:
+        raise DialogError(
+            f"'{name}' is {len(name)} characters; a {what} name holds at "
+            f"most {MAX_NAME_LEN}."
+        )
+    return name
+
+
+def next_npc_id(npcs: List[dict]) -> int:
+    if not npcs:
+        return 0
+    return max(n["id"] for n in npcs) + 1
+
+
+def add_npc(npcs: List[dict], name: str, max_npcs: int) -> dict:
+    """Add an NPC, refusing past the game's ceiling (R10/AC9).
+
+    `max_npcs` is passed in rather than read here: it comes from the bound
+    worktree's config.h (see `read_max_npcs`), and this function stays
+    testable without one.
+    """
+    if len(npcs) >= max_npcs:
+        raise DialogError(
+            f"The game supports {max_npcs} NPCs (MAX_NPCS in src/config.h) "
+            f"and there are already {len(npcs)}. Raise MAX_NPCS in the game "
+            f"repository before adding another."
+        )
+    npc = {
+        "id": next_npc_id(npcs),
+        "name": _clean_name(name, "NPC"),
+        "vendor_field": DEFAULT_VENDOR_FIELD,
+        "nodes": [new_node(0)],
+    }
+    npcs.append(npc)
+    return npc
+
+
+def rename_npc(npcs: List[dict], index: int, new_name: str) -> str:
+    """Rename an NPC (R3), returning the name as stored.
+
+    A too-long name is refused rather than truncated: the hub helpers
+    below truncate because the TUI's tests pin that behaviour and AC12
+    asks for equivalence, but nothing pins this one, and silently storing
+    a different name than the user typed is an edit they did not make.
+    """
+    if index < 0 or index >= len(npcs):
+        raise DialogError(f"There is no NPC {index} to rename.")
+    name = _clean_name(new_name, "NPC")
+    npcs[index]["name"] = name
+    return name
+
+
+def unassigned_npcs(npcs: List[dict], hub_npc_ids: List[int]) -> List[dict]:
+    """The NPC dicts whose id is not in `hub_npc_ids`."""
+    assigned = set(hub_npc_ids)
+    return [n for n in npcs if n["id"] not in assigned]
+
+
+def next_hub_id(hubs: List[dict]) -> int:
+    """One above the highest hub id, or 0 when there are none."""
+    if not hubs:
+        return 0
+    return max(h["id"] for h in hubs) + 1
+
+
+def hub_add_npc(hubs: List[dict], hub_idx: int, npc_id: int):
+    """Add `npc_id` to a hub's roster. Returns (hubs, status)."""
+    hub = hubs[hub_idx]
+    if npc_id in hub["npc_ids"]:
+        return hubs, "NPC already in hub"
+    hub["npc_ids"].append(npc_id)
+    return hubs, f"Added NPC {npc_id} to {hub['name']}"
+
+
+def hub_remove_npc(hubs: List[dict], hub_idx: int, roster_idx: int):
+    """Remove the NPC at `roster_idx`. Returns (hubs, status)."""
+    hub = hubs[hub_idx]
+    if not hub["npc_ids"]:
+        return hubs, "Hub roster is empty"
+    if roster_idx < 0 or roster_idx >= len(hub["npc_ids"]):
+        return hubs, f"Roster index {roster_idx} out of range"
+    npc_id = hub["npc_ids"].pop(roster_idx)
+    return hubs, f"Removed NPC {npc_id} from {hub['name']}"
+
+
+def hub_rename(hubs: List[dict], hub_idx: int, new_name: str):
+    """Rename a hub, upper-cased and truncated to MAX_NAME_LEN. Returns
+    (hubs, status). Truncation rather than refusal is the behaviour
+    `tests/test_dialog_editor.py::TestHubCrud` pins, and AC12 asks for
+    equivalent coverage -- see `rename_npc` for why the NPC name differs.
+    """
+    name = new_name.upper()[:MAX_NAME_LEN]
+    old = hubs[hub_idx]["name"]
+    hubs[hub_idx]["name"] = name
+    return hubs, f"Renamed '{old}' → '{name}'"
+
+
+def hub_delete(hubs: List[dict], hub_idx: int):
+    """Delete a hub. Returns (new list, status)."""
+    name = hubs[hub_idx]["name"]
+    hubs = [h for i, h in enumerate(hubs) if i != hub_idx]
+    return hubs, f"Deleted hub '{name}'"
