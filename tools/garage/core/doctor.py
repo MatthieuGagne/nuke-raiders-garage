@@ -244,14 +244,18 @@ def check_classification(
     drift = find_drift(schema, config.defines.keys())
     range_drift = find_range_drift(schema, config.guards)
     if drift.clean and range_drift.clean:
+        # R4 makes a header that guards nothing the normal case, not an
+        # error -- so it gets a sentence, not the count zero.
+        guard_note = (
+            f"{len(range_drift.checked)} range guard(s) in step"
+            if range_drift.checked
+            else "no range guards to check"
+        )
         return CheckResult(
             key="classification",
             name=name,
             status=PASS,
-            detail=(
-                f"{len(config.defines)} #defines, all classified; "
-                f"{len(range_drift.checked)} range guard(s) in step"
-            ),
+            detail=f"{len(config.defines)} #defines, all classified; {guard_note}",
             tag="in step",
         )
 
@@ -267,19 +271,35 @@ def check_classification(
         for report in (drift, range_drift)
         if not report.clean
     ]
+    # `prevents` is composed from the same two branches `details` is,
+    # rather than stated as one blob naming both failures: a user whose
+    # only problem is one unclassified #define was being told what a
+    # disagreeing range guard costs, which is not their row.
+    losses = []
+    if not drift.clean:
+        losses.append(
+            "The Tuner does not offer an unclassified #define, and says "
+            "nothing about it — the drift has to be fixed in tunables.json "
+            "before that value can be tuned."
+        )
+    if not range_drift.clean:
+        losses.append(
+            "A tunable whose declared range is not the one the header "
+            "guards is worse than silent: the Tuner offers the value and "
+            "the build rejects it — reconcile the range in tunables.json "
+            "or in the header's guard."
+        )
+    losses.append(
+        "This repository's test suite fails until both are fixed."
+        if len(losses) == 2
+        else "This repository's test suite fails until it is fixed."
+    )
     return CheckResult(
         key="classification",
         name=name,
         status=FAIL,
         detail=" · ".join(details),
-        prevents=(
-            "The Tuner does not offer an unclassified #define, and says "
-            "nothing about it — the drift has to be fixed in tunables.json "
-            "before that value can be tuned. A tunable whose range is wider "
-            "than the header's guard is worse than silent: the Tuner offers "
-            "the value and the build rejects it. This repository's test "
-            "suite fails until both are fixed."
-        ),
+        prevents=" ".join(losses),
         tag=", ".join(tags),
     )
 

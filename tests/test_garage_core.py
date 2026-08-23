@@ -781,6 +781,22 @@ class TestConfigIOGuards(unittest.TestCase):
             ("X", 0, 7),
         )
 
+    def test_a_half_whose_parentheses_are_not_its_own_is_not_read(self):
+        # `(X < 0 || X) > 7` is valid, compilable C -- the `||` yields 0
+        # or 1, so the guard never fires -- and it does not mean 0-7.
+        # Read as a range it would silently contradict the header. R4
+        # already asks an unreadable guard to be skipped in silence, so
+        # None (not a wrong range) is the honest answer.
+        self.assertIsNone(config_io.parse_guard_condition("(X < 0 || X) > 7"))
+
+    def test_a_half_with_an_unclosed_paren_is_not_read(self):
+        for condition in (
+            "(X < 0 || (X) > 7",  # lower half opens a paren it never closes
+            "(X) < 0 || X) > 7",  # upper half closes one it never opened
+        ):
+            with self.subTest(condition=condition):
+                self.assertIsNone(config_io.parse_guard_condition(condition))
+
 
 class TestFindRangeDrift(unittest.TestCase):
     """#18 R3's second half: does a tunable's declared [min, max] agree
@@ -855,6 +871,33 @@ class TestFindRangeDrift(unittest.TestCase):
         self.assertIn("MAX_SPRITES", config.guards)  # it was parsed...
         self.assertTrue(report.clean)  # ...and then skipped
         self.assertEqual(report.checked, [])
+
+    def test_describe_names_the_header_path_it_is_given(self):
+        # The path is a second spelling of a fact garage_lint already
+        # prints resolved in its OK line. Passing it in keeps the two
+        # halves of one report from naming the same file two ways.
+        narrowed = GUARDED_CONFIG_TEXT.replace(
+            "(GEAR1_MAX_SPEED) > 15", "(GEAR1_MAX_SPEED) > 7"
+        )
+        config = config_io.parse(narrowed, schema=self.schema)
+        mismatch = find_range_drift(self.schema, config.guards).mismatches[0]
+
+        described = mismatch.describe("/tmp/wt/src/config.h")
+
+        self.assertIn("/tmp/wt/src/config.h", described)
+        self.assertIn("1-15", described)
+        self.assertIn("1-7", described)
+
+    def test_describe_falls_back_to_the_repo_relative_path(self):
+        # The Doctor row spells src/config.h everywhere else and is one
+        # narrow line; the default is what it keeps using.
+        narrowed = GUARDED_CONFIG_TEXT.replace(
+            "(GEAR1_MAX_SPEED) > 15", "(GEAR1_MAX_SPEED) > 7"
+        )
+        config = config_io.parse(narrowed, schema=self.schema)
+        mismatch = find_range_drift(self.schema, config.guards).mismatches[0]
+
+        self.assertIn("src/config.h line", mismatch.describe())
 
     def test_two_mismatches_are_both_reported(self):
         both = GUARDED_CONFIG_TEXT.replace(
@@ -1855,6 +1898,65 @@ class TestDoctorClassification(unittest.TestCase):
             self.assertIn("tunables.json", check.prevents)
             self.assertEqual(check.tag, "1 range mismatch")
 
+    def test_pure_name_drift_says_nothing_about_range_guards(self):
+        # A user whose only problem is one unclassified #define was being
+        # told about a range guard their row does not have. `prevents` is
+        # the sentence that tells them what they lost; a sentence about
+        # someone else's failure is noise in the one place they read.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = tmp_root(tmp)
+            drifted = SAMPLE_CONFIG_TEXT.replace(
+                "#endif /* CONFIG_H */",
+                "#define NEW_UNCLASSIFIED_DEFINE 3u\n\n#endif /* CONFIG_H */",
+            )
+            binding = self._bound(tmp_path, drifted)
+            schema = Schema.load(
+                write_json(tmp_path / "t.json", SAMPLE_TUNABLES_FOR_CONFIG_IO)
+            )
+
+            check = doctor.check_classification(binding, schema)
+
+            self.assertEqual(check.status, doctor.FAIL)
+            self.assertIn("unclassified #define", check.prevents)
+            self.assertNotIn("guard", check.prevents)
+
+    def test_pure_range_drift_says_nothing_about_unclassified_defines(self):
+        # And the mirror: every #define is classified, so "the Tuner does
+        # not offer an unclassified #define" describes nothing here.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = tmp_root(tmp)
+            binding = self._bound(tmp_path, GUARDED_CONFIG_TEXT)
+            wrong = json.loads(json.dumps(SAMPLE_TUNABLES_FOR_CONFIG_IO))
+            wrong["entries"]["GEAR1_MAX_SPEED"]["max"] = 20
+            schema = Schema.load(write_json(tmp_path / "t.json", wrong))
+
+            check = doctor.check_classification(binding, schema)
+
+            self.assertEqual(check.status, doctor.FAIL)
+            self.assertIn("guard", check.prevents)
+            self.assertNotIn("unclassified", check.prevents)
+
+    def test_both_drifts_at_once_name_both(self):
+        # Neither sentence may be dropped when both failures are real --
+        # the composition must add, not choose.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = tmp_root(tmp)
+            both = GUARDED_CONFIG_TEXT.replace(
+                "#endif /* CONFIG_H */",
+                "#define NEW_UNCLASSIFIED_DEFINE 3u\n\n#endif /* CONFIG_H */",
+            )
+            binding = self._bound(tmp_path, both)
+            wrong = json.loads(json.dumps(SAMPLE_TUNABLES_FOR_CONFIG_IO))
+            wrong["entries"]["GEAR1_MAX_SPEED"]["max"] = 20
+            schema = Schema.load(write_json(tmp_path / "t.json", wrong))
+
+            check = doctor.check_classification(binding, schema)
+
+            self.assertEqual(check.status, doctor.FAIL)
+            self.assertIn("unclassified #define", check.prevents)
+            self.assertIn("guard", check.prevents)
+            self.assertIn("both", check.prevents)
+
     def test_a_guard_that_agrees_passes_and_says_how_many_were_checked(self):
         # The pass has to state the coverage: R4 skips an unguarded
         # tunable in silence, so "in step" alone cannot distinguish a
@@ -1872,6 +1974,25 @@ class TestDoctorClassification(unittest.TestCase):
             self.assertIn("all classified", check.detail)
             self.assertIn("1 range guard", check.detail)
             self.assertEqual(check.tag, "in step")
+
+    def test_a_header_that_guards_nothing_says_so_rather_than_counting_zero(self):
+        # SAMPLE_CONFIG_TEXT declares no guard at all, which is every
+        # header but the current one. "0 range guard(s) in step" claims a
+        # count where the honest statement is that there was nothing to
+        # compare -- and R4 makes that the normal case, not an error.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = tmp_root(tmp)
+            binding = self._bound(tmp_path, SAMPLE_CONFIG_TEXT)
+            schema = Schema.load(
+                write_json(tmp_path / "t.json", SAMPLE_TUNABLES_FOR_CONFIG_IO)
+            )
+
+            check = doctor.check_classification(binding, schema)
+
+            self.assertEqual(check.status, doctor.PASS)
+            self.assertIn("all classified", check.detail)
+            self.assertNotIn("0 range guard", check.detail)
+            self.assertIn("no range guards to check", check.detail)
 
     def test_without_a_binding_it_says_it_cannot_check(self):
         check = doctor.check_classification(None)

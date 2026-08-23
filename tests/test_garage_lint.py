@@ -281,6 +281,27 @@ class TestGarageLint(unittest.TestCase):
             self.assertIn("1-15", output)  # what the header permits
             self.assertIn("tunables.json", output)
 
+    def test_the_failure_names_the_same_header_path_the_ok_line_would(self):
+        # garage_lint's OK line prints the resolved binding.config_h. Its
+        # FAIL line used to print the literal "src/config.h" -- the same
+        # fact, spelled two ways in one report.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            garage_root = tmp_path / "nuke-raider-garage"
+            garage_root.mkdir()
+            make_game_repo(tmp_path / "nuke-raider", GUARDED_CONFIG)
+            wrong = json.loads(json.dumps(MATCHING_TUNABLES))
+            wrong["entries"]["GEAR1_MAX_SPEED"]["max"] = 20
+            tunables_path = write_tunables(tmp_path, wrong)
+            expected_path = project.bind(garage_root).config_h
+
+            code, output = run_lint(
+                garage_root=garage_root, schema_path=tunables_path
+            )
+
+            self.assertEqual(code, 1)
+            self.assertIn(str(expected_path), output)
+
     def test_unclassified_define_and_range_drift_both_reported(self):
         # Finding 2: name-drift and range-drift firing at the same time.
         # Each is covered in isolation above; this pins that run_lint
@@ -348,6 +369,43 @@ class TestGarageLint(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertNotIn("unverified", output)
             self.assertNotIn("GEAR1_MAX_SPEED", output)
+
+    def test_the_ok_line_on_a_guard_less_header_does_not_count_zero(self):
+        # The same edge as the Doctor's "0 range guard(s) in step".
+        # SAMPLE_CONFIG has no #if guard, so "the 0 tunable(s) the header
+        # guards with an #if declare the guarded range" is a sentence
+        # about nothing.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            garage_root = tmp_path / "nuke-raider-garage"
+            garage_root.mkdir()
+            make_game_repo(tmp_path / "nuke-raider", SAMPLE_CONFIG)
+            tunables_path = write_tunables(tmp_path, MATCHING_TUNABLES)
+
+            code, output = run_lint(
+                garage_root=garage_root, schema_path=tunables_path
+            )
+
+            self.assertEqual(code, 0)
+            self.assertIn("garage_lint: OK", output)
+            self.assertNotIn("0 tunable(s)", output)
+            self.assertIn("guards no tunable with an #if", output)
+
+    def test_the_ok_line_still_counts_the_guards_a_header_has(self):
+        # The nonzero wording is unchanged: GUARDED_CONFIG guards one.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            garage_root = tmp_path / "nuke-raider-garage"
+            garage_root.mkdir()
+            make_game_repo(tmp_path / "nuke-raider", GUARDED_CONFIG)
+            tunables_path = write_tunables(tmp_path, MATCHING_TUNABLES)
+
+            code, output = run_lint(
+                garage_root=garage_root, schema_path=tunables_path
+            )
+
+            self.assertEqual(code, 0)
+            self.assertIn("1 tunable(s) the header guards", output)
 
     def test_find_drift_reports_both_directions(self):
         from tools.garage.core import config_io

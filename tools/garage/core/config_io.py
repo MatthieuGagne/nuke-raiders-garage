@@ -60,10 +60,17 @@ _DEFINE_NAME_RE = re.compile(r"^#define[ \t]+(?P<name>\w+)\b")
 # `#ifdef`/`#ifndef` do not match: the pattern requires whitespace right
 # after `if`, so the include guard is never mistaken for a range guard.
 _GUARD_IF_RE = re.compile(r"^[ \t]*#[ \t]*if[ \t]+(?P<condition>.+?)[ \t]*$")
+# The `(?(lp)\))` / `(?(rp)\))` conditionals make each operand's
+# parentheses paired rather than independently optional: `(X)` and `X`
+# are both read, `(X` and `X)` are not. Without them a half like
+# `(X < 0 || X) > 7` -- valid, compilable C whose `||` yields 0 or 1, so
+# the guard never fires -- read as the range 0-7, which is not what it
+# means. R4 asks an unreadable guard to be skipped in silence; a
+# *misread* one is the failure mode that costs something.
 _GUARD_HALF_RE = re.compile(
-    r"^\(?[ \t]*(?P<name>\w+)[ \t]*\)?[ \t]*"
+    r"^(?P<lp>\()?[ \t]*(?P<name>\w+)[ \t]*(?(lp)\))[ \t]*"
     r"(?P<op><=?|>=?)[ \t]*"
-    r"\(?[ \t]*(?P<literal>-?(?:0[xX][0-9a-fA-F]+|\d+))[uU]?[ \t]*\)?$"
+    r"(?P<rp>\()?[ \t]*(?P<literal>-?(?:0[xX][0-9a-fA-F]+|\d+))[uU]?[ \t]*(?(rp)\))$"
 )
 _BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/")
 
