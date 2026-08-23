@@ -19,7 +19,7 @@ installed. PySide6 is the only dependency, and it is what separates the two test
 | Command | Covers | Tests | Takes | Needs |
 |---|---|---|---|---|
 | `make test` | `tests/` — `tools/garage/core/`, the drift check, the docs guards | 339 | ~1 min | stdlib only |
-| `make test-garage` | `tests/garage/` — the Qt panels | 225 | **~12 min** | PySide6 |
+| `make test-garage` | `tests/garage/` — the Qt panels | 225 | **3–13 min** | PySide6 |
 | `make lint` | the `tunables.json` ↔ `src/config.h` drift check on its own | — | seconds | stdlib only |
 
 **Pick the target by what you changed.** A change under `tools/garage/core/` is covered by
@@ -31,8 +31,10 @@ run both.
   Discovery never reaches `tests/garage/` because that directory has no `__init__.py`; the omission
   is load-bearing, not an oversight. `.github/workflows/test.yml` runs the suite on Windows and
   Linux with nothing installed, which is what proves it.
-- `make test-garage` is silent for twelve minutes. Size any timeout to that figure, not to the
-  ~2.5 minutes the same suite takes on CI. A quiet run is not a hung one.
+- `make test-garage` runs anywhere from 3 to 13 minutes: it spawns real subprocesses, so
+  process-creation overhead (antivirus scanning above all) dominates, and the same suite on the
+  same tree varies by machine and by day. Size any timeout to the high end. A quiet run is not a
+  hung one.
 - Without `make`, the two suites run directly — this is the form both workflows use:
 
 ```
@@ -50,7 +52,7 @@ Run the application from the repository root: `garage.bat`, or `python -m tools.
   shells out to `git` or `make`, parses files, returns data. This is the layer `make test` covers,
   and the reason that target can stay Qt-free. Behaviour that could live here belongs here.
 - **`panels/`** holds the Qt widgets and stays thin — a panel wires a widget to `core/`, it does not
-  reimplement it. Logic that lands here is reachable only by the twelve-minute suite.
+  reimplement it. Logic that lands here is reachable only by the slow suite.
 - **`theme/`** is the single place a colour or a typeface may appear as a literal. Panels name a
   token (`TOKENS["accent"]`, `FONT_MONO`) or select on an object name or Qt dynamic property; no
   panel spells out a hex value or a font family, and none calls `setStyleSheet` to restyle itself.
