@@ -1975,6 +1975,25 @@ class TestDoctorClassification(unittest.TestCase):
             self.assertIn("1 range guard", check.detail)
             self.assertEqual(check.tag, "in step")
 
+    def test_a_header_that_guards_nothing_says_so_rather_than_counting_zero(self):
+        # SAMPLE_CONFIG_TEXT declares no guard at all, which is every
+        # header but the current one. "0 range guard(s) in step" claims a
+        # count where the honest statement is that there was nothing to
+        # compare -- and R4 makes that the normal case, not an error.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = tmp_root(tmp)
+            binding = self._bound(tmp_path, SAMPLE_CONFIG_TEXT)
+            schema = Schema.load(
+                write_json(tmp_path / "t.json", SAMPLE_TUNABLES_FOR_CONFIG_IO)
+            )
+
+            check = doctor.check_classification(binding, schema)
+
+            self.assertEqual(check.status, doctor.PASS)
+            self.assertIn("all classified", check.detail)
+            self.assertNotIn("0 range guard", check.detail)
+            self.assertIn("no range guards to check", check.detail)
+
     def test_without_a_binding_it_says_it_cannot_check(self):
         check = doctor.check_classification(None)
 

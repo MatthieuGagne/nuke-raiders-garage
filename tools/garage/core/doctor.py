@@ -244,14 +244,18 @@ def check_classification(
     drift = find_drift(schema, config.defines.keys())
     range_drift = find_range_drift(schema, config.guards)
     if drift.clean and range_drift.clean:
+        # R4 makes a header that guards nothing the normal case, not an
+        # error -- so it gets a sentence, not the count zero.
+        guard_note = (
+            f"{len(range_drift.checked)} range guard(s) in step"
+            if range_drift.checked
+            else "no range guards to check"
+        )
         return CheckResult(
             key="classification",
             name=name,
             status=PASS,
-            detail=(
-                f"{len(config.defines)} #defines, all classified; "
-                f"{len(range_drift.checked)} range guard(s) in step"
-            ),
+            detail=f"{len(config.defines)} #defines, all classified; {guard_note}",
             tag="in step",
         )
 

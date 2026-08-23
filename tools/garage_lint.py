@@ -77,12 +77,20 @@ def run(garage_root: Path = None, schema_path: Path = None) -> int:
     range_report = find_range_drift(schema, config.guards)
 
     if report.clean and range_report.clean:
+        # The same edge the Doctor's PASS row carries: R4 makes a header
+        # that guards nothing the normal case, so it gets a clause rather
+        # than the count zero. Touch one of the two and touch both.
+        guard_clause = (
+            f"the {len(range_report.checked)} tunable(s) the header guards "
+            "with an #if declare the guarded range."
+            if range_report.checked
+            else "the header guards no tunable with an #if."
+        )
         print(
             "garage_lint: OK -- every #define in "
             f"'{binding.config_h}' is classified in tunables.json, every "
-            "tunables.json entry still exists in the header, and the "
-            f"{len(range_report.checked)} tunable(s) the header guards "
-            "with an #if declare the guarded range."
+            "tunables.json entry still exists in the header, and "
+            f"{guard_clause}"
         )
         return 0
 
