@@ -29,9 +29,12 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional, Union
+
+from tools.garage.core.make_runner import Command
 
 # ── The Game Boy's limits ────────────────────────────────────────────────
 
@@ -500,3 +503,119 @@ def hub_delete(hubs: List[dict], hub_idx: int):
     name = hubs[hub_idx]["name"]
     hubs = [h for i, h in enumerate(hubs) if i != hub_idx]
     return hubs, f"Deleted hub '{name}'"
+
+
+# ── Refusing a save (R9/AC8) ─────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class Problem:
+    """One node the limits refuse, named the way the panel shows it."""
+
+    npc_id: int
+    npc_name: str
+    node_idx: int
+    message: str
+
+
+def problems(data: DialogData) -> List[Problem]:
+    """Every node the limits refuse, across every NPC.
+
+    All of them, not the first: a designer who fixed one node and pressed
+    Save again only to be told about the next would be walked through the
+    tree one refusal at a time.
+    """
+    found: List[Problem] = []
+    for npc_entry in data.npcs:
+        for node in npc_entry.get("nodes", []):
+            text = node.get("text", "")
+            if is_over_limit(text):
+                found.append(
+                    Problem(
+                        npc_id=npc_entry.get("id", -1),
+                        npc_name=npc_entry.get("name", "?"),
+                        node_idx=node.get("idx", -1),
+                        message=(
+                            f"holds {len(text)} characters; the limit is "
+                            f"{MAX_TEXT_LEN}"
+                        ),
+                    )
+                )
+            choices = node.get("choices", [])
+            if len(choices) > MAX_CHOICES:
+                found.append(
+                    Problem(
+                        npc_id=npc_entry.get("id", -1),
+                        npc_name=npc_entry.get("name", "?"),
+                        node_idx=node.get("idx", -1),
+                        message=(
+                            f"has {len(choices)} choices; the limit is "
+                            f"{MAX_CHOICES}"
+                        ),
+                    )
+                )
+    return found
+
+
+def refusal(data: DialogData) -> Optional[str]:
+    """The sentence the panel shows instead of saving, or None when the
+    save may go ahead (R9/AC8). Every offending node is named.
+    """
+    found = problems(data)
+    if not found:
+        return None
+    named = "; ".join(
+        f"{p.npc_name} node [{p.node_idx}] {p.message}" for p in found
+    )
+    return f"Save blocked — {named}."
+
+
+# ── Running the generator (R11/AC11) ─────────────────────────────────────
+
+
+def generator_command(binding) -> Command:
+    """The `dialog_to_c.py` call to make after a save.
+
+    Argument for argument the game repository's own Makefile recipe:
+
+        python tools/dialog_to_c.py assets/dialog/npcs.json src/dialog_data.c \\
+            --hubs-json assets/dialog/hubs.json \\
+            --hub-out src/hub_data.c \\
+            --config-h src/config.h
+
+    AC11 asks for sources identical to the ones a terminal produces, so
+    the safest thing Garage can do is make the identical call. The file
+    arguments stay worktree-relative and the run's cwd is the active
+    worktree (the panel passes it), which is also what keeps the
+    generator's own "Written: src/dialog_data.c" lines readable in the
+    log.
+
+    `--config-h` is passed, so `dialog_to_c.py` validates the NPC count
+    against MAX_NPCS exactly and patches MAX_HUB_NPCS when the rosters
+    need it -- the same two side effects `make dialog_data` has.
+
+    `sys.executable`, not "python": Garage runs the interpreter it is
+    running under, not whatever a PATH lookup finds.
+
+    The generator writes the hub lookup tables into src/hub_data.c, which
+    bank 0 code reads, and not into the banked src/dialog_data.c. That
+    split is load-bearing (gmb-nuke-raider#139, commit e333c56). Garage
+    calls the generator and never chooses where it writes.
+    """
+    generator = binding.resolve(*GENERATOR_RELATIVE)
+    argv = (
+        sys.executable,
+        "-u",
+        str(generator),
+        NPCS_ARG,
+        DIALOG_OUT_RELATIVE,
+        "--hubs-json", HUBS_ARG,
+        "--hub-out", HUB_OUT_RELATIVE,
+        "--config-h", CONFIG_H_ARG,
+    )
+    label = (
+        f"python tools/{GENERATOR_RELATIVE[-1]} {NPCS_ARG} "
+        f"{DIALOG_OUT_RELATIVE} --hubs-json {HUBS_ARG} "
+        f"--hub-out {HUB_OUT_RELATIVE} --config-h {CONFIG_H_ARG}"
+    )
+    return Command(argv=argv, label=label, target=DIALOG_OUT_RELATIVE)

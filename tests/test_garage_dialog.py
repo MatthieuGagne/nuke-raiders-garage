@@ -648,5 +648,134 @@ class TestHubCrud(unittest.TestCase):
         self.assertEqual(hubs, [])
 
 
+def npc(npc_id, name, nodes):
+    return {"id": npc_id, "name": name, "vendor_field": "ARMOR",
+            "nodes": nodes}
+
+
+def data_of(*npcs):
+    return dialog_model.DialogData(npcs=list(npcs), hubs=[])
+
+
+class TestProblems(unittest.TestCase):
+    """AC8: Garage refuses to save when a node holds 63 characters or
+    more, and names that node."""
+
+    def test_a_tree_within_the_limits_has_no_problems(self):
+        self.assertEqual(
+            dialog_model.problems(data_of(npc(0, "STEEVE", [narration(0)]))),
+            [],
+        )
+
+    def test_an_over_long_node_is_a_problem(self):
+        found = dialog_model.problems(
+            data_of(npc(0, "STEEVE", [narration(0, text="A" * 70)])))
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0].node_idx, 0)
+        self.assertEqual(found[0].npc_name, "STEEVE")
+
+    def test_exactly_sixty_three_characters_is_a_problem(self):
+        found = dialog_model.problems(
+            data_of(npc(0, "STEEVE", [narration(0, text="A" * 63)])))
+        self.assertEqual(len(found), 1)
+
+    def test_sixty_two_characters_is_not(self):
+        self.assertEqual(
+            dialog_model.problems(
+                data_of(npc(0, "STEEVE", [narration(0, text="A" * 62)]))),
+            [],
+        )
+
+    def test_every_over_long_node_is_reported_not_only_the_first(self):
+        found = dialog_model.problems(
+            data_of(npc(0, "STEEVE",
+                        [narration(0, text="A" * 70), narration(1),
+                         narration(2, text="B" * 70)])))
+        self.assertEqual([p.node_idx for p in found], [0, 2])
+
+    def test_problems_are_found_across_npcs(self):
+        found = dialog_model.problems(
+            data_of(npc(0, "STEEVE", [narration(0)]),
+                    npc(1, "TRADER", [narration(0, text="A" * 70)])))
+        self.assertEqual([p.npc_name for p in found], ["TRADER"])
+
+    def test_a_node_with_four_choices_is_a_problem(self):
+        found = dialog_model.problems(
+            data_of(npc(0, "STEEVE",
+                        [branching(0, ["a", "b", "c", "d"],
+                                   [1, 1, 1, 1])])))
+        self.assertEqual(len(found), 1)
+        self.assertIn("choice", found[0].message.lower())
+
+
+class TestRefusal(unittest.TestCase):
+    """The sentence the panel shows, and the gate on Save."""
+
+    def test_a_clean_tree_has_no_refusal(self):
+        self.assertIsNone(
+            dialog_model.refusal(data_of(npc(0, "STEEVE", [narration(0)]))))
+
+    def test_the_refusal_names_the_npc_and_the_node(self):
+        message = dialog_model.refusal(
+            data_of(npc(0, "STEEVE", [narration(0), narration(1, text="A" * 70)])))
+        self.assertIsNotNone(message)
+        self.assertIn("STEEVE", message)
+        self.assertIn("[1]", message)
+
+    def test_the_refusal_counts_every_offending_node(self):
+        message = dialog_model.refusal(
+            data_of(npc(0, "STEEVE",
+                        [narration(0, text="A" * 70),
+                         narration(1, text="B" * 70)])))
+        self.assertIn("[0]", message)
+        self.assertIn("[1]", message)
+
+
+class TestGeneratorCommand(DialogModelTestCase):
+    """R11/AC11: the same call the Makefile makes, so the sources it
+    writes are the sources a terminal would produce."""
+
+    def test_the_command_runs_the_bound_worktrees_generator(self):
+        command = dialog_model.generator_command(self.binding)
+        self.assertIn(
+            str(self.binding.resolve("tools", "dialog_to_c.py")),
+            command.argv,
+        )
+
+    def test_it_runs_the_interpreter_garage_runs_under(self):
+        command = dialog_model.generator_command(self.binding)
+        self.assertEqual(command.argv[0], sys.executable)
+
+    def test_it_passes_both_json_files_and_both_outputs(self):
+        argv = dialog_model.generator_command(self.binding).argv
+        self.assertIn("assets/dialog/npcs.json", argv)
+        self.assertIn("src/dialog_data.c", argv)
+        self.assertIn("--hubs-json", argv)
+        self.assertIn("assets/dialog/hubs.json", argv)
+        self.assertIn("--hub-out", argv)
+        self.assertIn("src/hub_data.c", argv)
+
+    def test_it_passes_config_h_so_max_npcs_is_validated(self):
+        argv = dialog_model.generator_command(self.binding).argv
+        self.assertIn("--config-h", argv)
+        self.assertIn("src/config.h", argv)
+
+    def test_the_label_reads_like_the_makefile_recipe(self):
+        command = dialog_model.generator_command(self.binding)
+        self.assertTrue(command.label.startswith("python tools/dialog_to_c.py"))
+
+    def test_no_path_in_the_command_points_outside_the_active_worktree(self):
+        # R14: every absolute path in the command is under the bound
+        # worktree. The relative ones are resolved by the cwd the panel
+        # runs it in, which is that same worktree.
+        worktree = self.binding.active_worktree.path
+        for argument in dialog_model.generator_command(self.binding).argv[1:]:
+            if Path(argument).is_absolute() and argument != sys.executable:
+                self.assertTrue(
+                    str(Path(argument)).startswith(str(worktree)),
+                    f"{argument} is outside {worktree}",
+                )
+
+
 if __name__ == "__main__":
     unittest.main()
