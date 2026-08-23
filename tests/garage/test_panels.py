@@ -1982,7 +1982,7 @@ class TestRunControllerKeepsAThreadItCouldNotJoin(unittest.TestCase):
         controller.line.connect(started.append)
 
         with mock.patch.object(runner_panel, "STOP_TIMEOUT_MS", 50), mock.patch.object(
-            make_runner, "_kill_tree", lambda process: None
+            make_runner, "_end_run", lambda process, group=None: None
         ):
             controller.start([command], Path.cwd())
             waited = 0
@@ -3303,7 +3303,7 @@ class TestCommitPanelStopLeavesTheWorktreeUsable(
         before = self.git_log()
 
         lock = commit_core.git_dir(self.game_repo) / "index.lock"
-        with mock.patch.object(make_runner, "_kill_tree", lambda process: None):
+        with mock.patch.object(make_runner, "_end_run", lambda process, group=None: None):
             panel.commit()
             self.wait_for_lock(panel, lock)
             panel.stop()

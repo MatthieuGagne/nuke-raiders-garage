@@ -2546,6 +2546,23 @@ GRANDCHILD_SENTINEL = (
     "pathlib.Path(sys.argv[1]).write_text('ran')\n"
 )
 
+# A child whose tree is still growing while the kill runs, which is the
+# condition `taskkill /F /T` could not handle: it enumerates a tree and
+# then kills what it enumerated, so a process that appears in between
+# survives. One grandchild that already exists is not enough to provoke
+# it -- the enumeration usually wins that race -- so this one keeps
+# spawning. Bounded, so a kill that fails outright cannot fork forever.
+# argv[1] is the grandchild's source, argv[2] the sentinel path stem.
+PARENT_THAT_KEEPS_SPAWNING = (
+    "import subprocess, sys, time\n"
+    "print('spawned', flush=True)\n"
+    "for n in range(25):\n"
+    "    subprocess.Popen([sys.executable, '-c', sys.argv[1], sys.argv[2] + str(n)])\n"
+    "    time.sleep(0.02)\n"
+    "while True:\n"
+    "    time.sleep(0.05)\n"
+)
+
 # Past the grandchild's sleep, with margin for a loaded CI runner.
 GRANDCHILD_DEADLINE_S = 6.0
 
@@ -2590,6 +2607,55 @@ class TestCancellation(unittest.TestCase):
         # A stopped run is not a failed build, and must not read as one.
         self.assertFalse(result.ok)
 
+    def test_cancelling_a_run_kills_a_grandchild_the_command_spawned(self):
+        """The #8 shape, end to end through `run`.
+
+        `make` spawns bash, bash spawns lcc, lcc spawns sdcc; git spawns
+        the hook and the hook spawns its own children. A stop that only
+        reaches the direct child leaves the run going and the pipe open,
+        and one that enumerates a tree still being built misses whatever
+        appeared after the enumeration.
+        """
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        stem = Path(tmp.name) / "grandchild-ran"
+        command = make_runner.Command(
+            argv=(
+                sys.executable,
+                "-c",
+                PARENT_THAT_KEEPS_SPAWNING,
+                GRANDCHILD_SENTINEL,
+                str(stem),
+            ),
+            label="spawner",
+        )
+        started = threading.Event()
+        cancellation = make_runner.Cancellation()
+
+        def target():
+            make_runner.run(
+                command, Path.cwd(), lambda line: started.set(), cancellation
+            )
+
+        worker = threading.Thread(target=target)
+        worker.start()
+        try:
+            self.assertTrue(started.wait(10), "the child never started")
+            cancellation.cancel()
+            worker.join(15)
+            self.assertFalse(worker.is_alive(), "the run outlived its cancellation")
+        finally:
+            cancellation.cancel()
+            worker.join(15)
+
+        time.sleep(GRANDCHILD_DEADLINE_S)
+        survivors = sorted(p.name for p in Path(tmp.name).glob("grandchild-ran*"))
+        self.assertEqual(
+            survivors,
+            [],
+            "grandchildren outlived the stop that ended their parent",
+        )
+
     def test_a_stop_that_lost_the_race_reports_the_run_that_finished(self):
         """A stop whose kill missed must not be reported as a stop.
 
@@ -2610,7 +2676,9 @@ class TestCancellation(unittest.TestCase):
             # Cancel while the child is alive, which is the real order.
             cancellation.cancel()
 
-        with unittest.mock.patch.object(make_runner, "_kill_tree", lambda p: None):
+        with unittest.mock.patch.object(
+            make_runner, "_end_run", lambda process, group=None: None
+        ):
             result = make_runner.run(
                 python_command("print('done', flush=True)"),
                 Path.cwd(),
@@ -2637,7 +2705,9 @@ class TestCancellation(unittest.TestCase):
         def on_line(line):
             cancellation.cancel()
 
-        with unittest.mock.patch.object(make_runner, "_kill_tree", lambda p: None):
+        with unittest.mock.patch.object(
+            make_runner, "_end_run", lambda process, group=None: None
+        ):
             result = make_runner.run(
                 python_command(
                     "import sys\nprint('x', flush=True)\nsys.exit(3)\n"
