@@ -524,6 +524,27 @@ class TestAddNpc(unittest.TestCase):
         with self.assertRaises(dialog_model.DialogError):
             dialog_model.add_npc([], "  ", max_npcs=4)
 
+    def test_a_new_npc_is_not_a_vendor(self):
+        # Finding 2: dialog_to_c.py maps npc.get("vendor_field") is None to
+        # 0xFF -- "not a vendor" -- so a new NPC must carry no vendor_field
+        # key (or None), never a real loadout field, from the moment it
+        # exists.
+        added = dialog_model.add_npc([], "scout", max_npcs=4)
+        self.assertIsNone(added.get("vendor_field"))
+
+    def test_a_new_npcs_absent_vendor_field_survives_a_save_and_load(self):
+        added = dialog_model.add_npc([], "scout", max_npcs=4)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = tmp_root(tmp)
+            npcs_path = root / "npcs.json"
+            hubs_path = root / "hubs.json"
+            data = dialog_model.DialogData(
+                npcs=[added], hubs=[], npcs_path=npcs_path, hubs_path=hubs_path,
+            )
+            dialog_model.save(data)
+            written = json.loads(npcs_path.read_text(encoding="utf-8"))
+            self.assertNotIn("vendor_field", written["npcs"][0])
+
 
 class TestRenameNpc(unittest.TestCase):
     """R3: rename an NPC."""
@@ -700,12 +721,60 @@ class TestProblems(unittest.TestCase):
         self.assertEqual([p.npc_name for p in found], ["TRADER"])
 
     def test_a_node_with_four_choices_is_a_problem(self):
+        # Every next below is "END" -- a valid target regardless of node
+        # count -- so this isolates the choice-count check from the two
+        # added by finding 3, below.
         found = dialog_model.problems(
             data_of(npc(0, "STEEVE",
                         [branching(0, ["a", "b", "c", "d"],
-                                   [1, 1, 1, 1])])))
+                                   ["END", "END", "END", "END"])])))
         self.assertEqual(len(found), 1)
         self.assertIn("choice", found[0].message.lower())
+
+    def test_a_next_target_past_the_end_of_the_node_list_is_a_problem(self):
+        # Finding 3: dialog_to_c.py range-checks every `next` against
+        # len(nodes) and raises; Garage must refuse the save before the
+        # generator would.
+        found = dialog_model.problems(
+            data_of(npc(0, "STEEVE", [narration(0, nxt=7)])))
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0].node_idx, 0)
+
+    def test_a_negative_next_target_is_a_problem(self):
+        found = dialog_model.problems(
+            data_of(npc(0, "STEEVE", [narration(0, nxt=-1)])))
+        self.assertEqual(len(found), 1)
+
+    def test_end_and_shop_are_never_a_problem(self):
+        self.assertEqual(
+            dialog_model.problems(
+                data_of(npc(0, "STEEVE",
+                            [branching(0, ["a", "b"], ["END", "SHOP"])]))),
+            [],
+        )
+
+    def test_a_valid_index_into_this_npcs_own_nodes_is_not_a_problem(self):
+        self.assertEqual(
+            dialog_model.problems(
+                data_of(npc(0, "STEEVE",
+                            [narration(0, nxt=1), narration(1)]))),
+            [],
+        )
+
+    def test_a_choices_next_length_mismatch_is_a_problem(self):
+        # set_next/add_choice/remove_choice cannot produce this shape, but
+        # a hand edit or a future caller could -- and dialog_to_c.py
+        # rejects it (choices length != next length for a choice node).
+        bad = branching(0, ["a", "b"], [1])
+        found = dialog_model.problems(
+            data_of(npc(0, "STEEVE", [bad, narration(1)])))
+        self.assertEqual(len(found), 1)
+        self.assertIn("next", found[0].message.lower())
+
+    def test_a_narration_node_with_two_nexts_is_a_problem(self):
+        bad = {"idx": 0, "text": "hi", "choices": [], "next": ["END", "END"]}
+        found = dialog_model.problems(data_of(npc(0, "STEEVE", [bad])))
+        self.assertEqual(len(found), 1)
 
 
 class TestRefusal(unittest.TestCase):
@@ -762,7 +831,39 @@ class TestGeneratorCommand(DialogModelTestCase):
 
     def test_the_label_reads_like_the_makefile_recipe(self):
         command = dialog_model.generator_command(self.binding)
-        self.assertTrue(command.label.startswith("python tools/dialog_to_c.py"))
+        self.assertTrue(
+            command.label.startswith("python -u tools/dialog_to_c.py"))
+
+    def test_the_label_names_the_dash_u_flag_argv_actually_passes(self):
+        # Finding 11: the label must not omit a flag argv really passes.
+        command = dialog_model.generator_command(self.binding)
+        self.assertIn("-u", command.argv)
+        self.assertIn("-u", command.label)
+
+    def test_the_target_is_not_a_make_targets_key(self):
+        # Finding 6: make_runner.Command.target is a MAKE_TARGETS key
+        # elsewhere; this command has none, so it must be "".
+        command = dialog_model.generator_command(self.binding)
+        self.assertEqual(command.target, "")
+
+    def test_the_full_argv_matches_the_makefile_recipe_byte_for_byte(self):
+        # Finding 5: assertIn only checks membership, so a transposed pair
+        # of arguments would still pass. Pin the whole ordered tuple.
+        command = dialog_model.generator_command(self.binding)
+        generator = str(self.binding.resolve("tools", "dialog_to_c.py"))
+        self.assertEqual(
+            command.argv,
+            (
+                sys.executable,
+                "-u",
+                generator,
+                "assets/dialog/npcs.json",
+                "src/dialog_data.c",
+                "--hubs-json", "assets/dialog/hubs.json",
+                "--hub-out", "src/hub_data.c",
+                "--config-h", "src/config.h",
+            ),
+        )
 
     def test_no_path_in_the_command_points_outside_the_active_worktree(self):
         # R14: every absolute path in the command is under the bound

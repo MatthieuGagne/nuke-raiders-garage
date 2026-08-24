@@ -391,10 +391,14 @@ def remove_choice(node: dict, choice_index: int) -> None:
 
 # ── NPCs and hubs ────────────────────────────────────────────────────────
 
-# The vendor field a new NPC starts with. `dialog_to_c.py` maps this
-# string to a LOADOUT_FIELD_* macro and has no entry for an absent one, so
-# a new NPC needs a valid value from the moment it exists.
-DEFAULT_VENDOR_FIELD = "ARMOR"
+# The vendor field a new NPC starts with. `dialog_to_c.py` reads
+# `npc.get("vendor_field")`, and an absent key (`None`) is exactly what it
+# maps to 0xFF -- "not a vendor" -- in the generated `npc_vendor_field`
+# table (tools/dialog_to_c.py, ~line 288). A new NPC in Garage is
+# therefore not a vendor until a designer says otherwise: PLACEHOLDER3
+# through PLACEHOLDER7 in the game's own npcs.json carry no `vendor_field`
+# key at all, so this is also the shape the real data already uses.
+DEFAULT_VENDOR_FIELD = None
 
 
 def _clean_name(raw: str, what: str) -> str:
@@ -431,9 +435,10 @@ def add_npc(npcs: List[dict], name: str, max_npcs: int) -> dict:
     npc = {
         "id": next_npc_id(npcs),
         "name": _clean_name(name, "NPC"),
-        "vendor_field": DEFAULT_VENDOR_FIELD,
         "nodes": [new_node(0)],
     }
+    if DEFAULT_VENDOR_FIELD is not None:
+        npc["vendor_field"] = DEFAULT_VENDOR_FIELD
     npcs.append(npc)
     return npc
 
@@ -524,10 +529,19 @@ def problems(data: DialogData) -> List[Problem]:
     All of them, not the first: a designer who fixed one node and pressed
     Save again only to be told about the next would be walked through the
     tree one refusal at a time.
+
+    Two of the checks below exist so Garage never writes a tree
+    `dialog_to_c.py` would then refuse (Task 7, finding 3): a `next`
+    target that is neither a sentinel nor a valid index into this NPC's
+    own node list (`dialog_to_c.py`, ~lines 101-107), and a choices/next
+    length mismatch, which `set_next` cannot itself produce but a hand
+    edit or a future caller could.
     """
     found: List[Problem] = []
     for npc_entry in data.npcs:
-        for node in npc_entry.get("nodes", []):
+        nodes = npc_entry.get("nodes", [])
+        num_nodes = len(nodes)
+        for node in nodes:
             text = node.get("text", "")
             if is_over_limit(text):
                 found.append(
@@ -554,6 +568,36 @@ def problems(data: DialogData) -> List[Problem]:
                         ),
                     )
                 )
+            nexts = node.get("next", [])
+            expected_nexts = len(choices) if choices else 1
+            if len(nexts) != expected_nexts:
+                found.append(
+                    Problem(
+                        npc_id=npc_entry.get("id", -1),
+                        npc_name=npc_entry.get("name", "?"),
+                        node_idx=node.get("idx", -1),
+                        message=(
+                            f"has {len(choices)} choice(s) but "
+                            f"{len(nexts)} next(s); they must match"
+                        ),
+                    )
+                )
+            for target in nexts:
+                if target in SENTINELS:
+                    continue
+                if (not isinstance(target, int) or isinstance(target, bool)
+                        or target < 0 or target >= num_nodes):
+                    found.append(
+                        Problem(
+                            npc_id=npc_entry.get("id", -1),
+                            npc_name=npc_entry.get("name", "?"),
+                            node_idx=node.get("idx", -1),
+                            message=(
+                                f"next {target!r} is not {END}, {SHOP} or a "
+                                f"valid node index (0..{num_nodes - 1})"
+                            ),
+                        )
+                    )
     return found
 
 
@@ -603,6 +647,7 @@ def generator_command(binding) -> Command:
     calls the generator and never chooses where it writes.
     """
     generator = binding.resolve(*GENERATOR_RELATIVE)
+    generator_arg = "/".join(GENERATOR_RELATIVE)
     argv = (
         sys.executable,
         "-u",
@@ -613,9 +658,16 @@ def generator_command(binding) -> Command:
         "--hub-out", HUB_OUT_RELATIVE,
         "--config-h", CONFIG_H_ARG,
     )
+    # Echoes argv, not a re-derived guess at it: "-u" is really passed, and
+    # the generator's own path is GENERATOR_RELATIVE joined, not a literal
+    # "tools/" beside its last segment.
     label = (
-        f"python tools/{GENERATOR_RELATIVE[-1]} {NPCS_ARG} "
+        f"python -u {generator_arg} {NPCS_ARG} "
         f"{DIALOG_OUT_RELATIVE} --hubs-json {HUBS_ARG} "
         f"--hub-out {HUB_OUT_RELATIVE} --config-h {CONFIG_H_ARG}"
     )
-    return Command(argv=argv, label=label, target=DIALOG_OUT_RELATIVE)
+    # `Command.target` is documented (make_runner.py) as a MAKE_TARGETS
+    # key; this command has none, and feeding it DIALOG_OUT_RELATIVE would
+    # KeyError the day a caller passed it to `explain_failure`. "" is the
+    # honest value -- no target -- and nothing here reads the old one.
+    return Command(argv=argv, label=label, target="")
