@@ -3722,11 +3722,14 @@ class TestDescribePending(CommitFixture):
 
 
 class TestCoreImportsNoQt(unittest.TestCase):
-    """R12: `tools/garage/core/` must contain no Qt import -- not one
-    module. A real grep over the source, not a one-time claim: the rule
-    only holds while something keeps checking it, and the cost of a break
-    is `make test` failing on every machine without PySide6, which is CI
-    and is not the machine that would have introduced it.
+    """R12: no `.py` file anywhere under `tools/garage/core/` -- direct
+    children and every subdirectory alike -- may hold a direct `import` or
+    `from` line naming PySide6 or shiboken. A real grep over the source,
+    recursively, not a one-time claim: the rule only holds while something
+    keeps checking it, and the cost of a break is `make test` failing on
+    every machine without PySide6, which is CI and is not the machine that
+    would have introduced it. (This checks the import lines themselves,
+    not the transitive closure of what a clean module imports.)
     """
 
     def test_no_core_module_imports_qt(self):
@@ -3734,7 +3737,7 @@ class TestCoreImportsNoQt(unittest.TestCase):
             Path(__file__).resolve().parents[1] / "tools" / "garage" / "core"
         )
         offenders = []
-        for path in sorted(core_dir.glob("*.py")):
+        for path in sorted(core_dir.rglob("*.py")):
             text = path.read_text(encoding="utf-8")
             for line in text.splitlines():
                 stripped = line.strip()

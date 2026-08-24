@@ -3531,6 +3531,35 @@ class TestDialogEditorInTheWindow(unittest.TestCase):
             self.window.dialog_dialog.windowTitle(),
         )
 
+    def test_saving_in_the_dialog_editor_refreshes_the_header(self):
+        # Finding 7: DialogPanel.saved had no production consumer, so a
+        # dialog save dirtied the worktree without the header noticing --
+        # the same gap Task 5's tuner write and Task 6's commit both
+        # closed for their own signals.
+        self.window.show_dialog_action.trigger()
+        panel = self.window.dialog_panel
+        card = panel.node_cards()[0]
+        card.text_field.setText("A fresh line from the window.")
+
+        self.assertTrue(panel.save())
+        panel.stop_and_wait()
+
+        self.assertIn("●", self.window.header_label.text())
+
+    def test_saving_in_the_dialog_editor_refreshes_an_open_diff(self):
+        self.window.show_dialog_action.trigger()
+        self.window.open_diff()
+        self.assertIn("clean", self.window.diff_panel.status_text().lower())
+
+        panel = self.window.dialog_panel
+        card = panel.node_cards()[0]
+        card.text_field.setText("Another fresh line.")
+        self.assertTrue(panel.save())
+        panel.stop_and_wait()
+
+        self.assertIn(
+            "assets/dialog/npcs.json", self.window.diff_panel.file_paths())
+
 
 if __name__ == "__main__":
     unittest.main()

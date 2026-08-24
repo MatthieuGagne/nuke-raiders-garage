@@ -391,6 +391,7 @@ class GarageWindow(QMainWindow):
         """
         self.dialog_panel = DialogPanel(self.binding, self.binding_error)
         self.dialog_panel.setObjectName("garage-dialog-panel")
+        self.dialog_panel.saved.connect(self._on_dialog_saved)
         self.dialog_dialog = QDialog(self)
         self.dialog_dialog.setObjectName("garage-dialog-dialog")
         self.dialog_dialog.setWindowTitle(self._dialog_editor_title())
@@ -412,6 +413,14 @@ class GarageWindow(QMainWindow):
     def _on_committed(self, head_line: str) -> None:
         """A commit changes what the worktree holds, so the header totals
         and any open diff are re-read."""
+        self._refresh_header()
+        if self.diff_dialog.isVisible():
+            self.diff_panel.refresh()
+
+    def _on_dialog_saved(self) -> None:
+        """A dialog save dirties the worktree the same way a tuner write
+        does (Task 7, finding 7), so the header totals and any open diff
+        are re-read -- the same shape as `_on_committed` above."""
         self._refresh_header()
         if self.diff_dialog.isVisible():
             self.diff_panel.refresh()
