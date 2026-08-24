@@ -27,6 +27,7 @@ from typing import List, Optional
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QComboBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -54,12 +55,27 @@ class NodeCard(QWidget):
     edit to the tree the panel will save, which is what makes AC2 a
     property of the data rather than of a copy-back step someone has to
     remember.
+
+    Follows the `AssetCard` pattern (`tools/garage/panels/assets.py`):
+    the card only emits signals for the edits it offers a control for --
+    every rule (the three-choice ceiling, the renumbering after a delete,
+    what a `next` slot may point at) lives in `dialog_model` and is called
+    by `DialogPanel`, never re-derived here.
     """
 
-    def __init__(self, node: dict, parent=None):
+    delete_requested = Signal(object)          # NodeCard
+    next_changed = Signal(object, int, object)  # NodeCard, slot, target
+    add_choice_requested = Signal(object, str)  # NodeCard, label
+    remove_choice_requested = Signal(object, int)  # NodeCard, choice_index
+
+    def __init__(self, node: dict, nodes: List[dict], parent=None):
         super().__init__(parent)
         self.setObjectName("dialog-node-card")
         self.node = node
+        # The whole NPC's node list, kept only to compute
+        # `dialog_model.next_targets` -- what the next-combos may offer --
+        # never mutated here.
+        self.nodes = nodes
 
         layout = QVBoxLayout(self)
 
@@ -75,6 +91,12 @@ class NodeCard(QWidget):
         self.count_label = QLabel()
         self.count_label.setObjectName("dialog-node-count")
         head.addWidget(self.count_label)
+
+        self.delete_button = QPushButton("Delete node")
+        self.delete_button.setObjectName("dialog-delete-node")
+        self.delete_button.clicked.connect(
+            lambda: self.delete_requested.emit(self))
+        head.addWidget(self.delete_button)
         layout.addLayout(head)
 
         self.preview_label = QLabel()
@@ -87,12 +109,43 @@ class NodeCard(QWidget):
         layout.addLayout(self.links_row)
         self._link_labels: List[QLabel] = []
 
+        # One combo per `next` slot (R5/AC4) and one Remove button per
+        # existing choice (R6), rebuilt together because both are keyed by
+        # the same slot/choice index.
+        self.next_row = QHBoxLayout()
+        self.next_row.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        layout.addLayout(self.next_row)
+        self._next_combos: List[QComboBox] = []
+
+        self.remove_choice_row = QHBoxLayout()
+        self.remove_choice_row.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        layout.addLayout(self.remove_choice_row)
+        self._remove_buttons: List[QPushButton] = []
+
+        add_choice_row = QHBoxLayout()
+        self.choice_label_field = QLineEdit()
+        self.choice_label_field.setObjectName("dialog-choice-label")
+        self.choice_label_field.setPlaceholderText("Choice label")
+        add_choice_row.addWidget(self.choice_label_field)
+        self.add_choice_button = QPushButton("Add choice")
+        self.add_choice_button.setObjectName("dialog-add-choice")
+        self.add_choice_button.clicked.connect(self._on_add_choice_clicked)
+        add_choice_row.addWidget(self.add_choice_button)
+        layout.addLayout(add_choice_row)
+
         # AC6: the count and the preview follow the field, keystroke by
         # keystroke -- and the node dict follows it too, so nothing has to
         # be harvested out of the widgets at save time.
         self.text_field.textChanged.connect(self._on_text_changed)
         self.refresh_text_state()
         self.refresh_links()
+
+    # -- adding a choice ----------------------------------------------
+
+    def _on_add_choice_clicked(self) -> None:
+        label = self.choice_label_field.text()
+        self.add_choice_requested.emit(self, label)
+        self.choice_label_field.clear()
 
     # -- text, count, preview ---------------------------------------------
 
@@ -136,6 +189,71 @@ class NodeCard(QWidget):
             label.setObjectName("dialog-link-chip")
             self.links_row.addWidget(label)
             self._link_labels.append(label)
+        self.refresh_next_controls()
+
+    def refresh_next_controls(self) -> None:
+        """Rebuild the next-combos and the remove-choice buttons (R5/R6).
+
+        Built fully, then connected: a `QComboBox` fires
+        `currentIndexChanged` the moment an item is added or
+        `setCurrentIndex` is called, so a combo connected before it is
+        populated would call `set_next` on its own, spuriously, while a
+        card is merely being (re)built -- not while the user changed
+        anything. Connecting last means population itself can never fire
+        the handler.
+        """
+        for combo in self._next_combos:
+            self.next_row.removeWidget(combo)
+            combo.setParent(None)
+            combo.deleteLater()
+        self._next_combos = []
+        for button in self._remove_buttons:
+            self.remove_choice_row.removeWidget(button)
+            button.setParent(None)
+            button.deleteLater()
+        self._remove_buttons = []
+
+        nexts = self.node.get("next", [])
+        options = dialog_model.next_targets(self.nodes, self.node["idx"])
+        option_texts = [_target_text(option) for option in options]
+        for slot, target in enumerate(nexts):
+            combo = QComboBox()
+            combo.setObjectName("dialog-next-combo")
+            for option, text in zip(options, option_texts):
+                combo.addItem(text, option)
+            current_text = _target_text(target)
+            index = combo.findText(current_text)
+            if index < 0:
+                # The node's own current target is not among the offered
+                # options -- can only happen for a hand-edited or
+                # otherwise irregular tree -- so it is added rather than
+                # silently swapped for the first option in the list.
+                combo.addItem(current_text, target)
+                index = combo.count() - 1
+            combo.setCurrentIndex(index)
+            combo.currentIndexChanged.connect(
+                lambda _index, s=slot, c=combo: self._on_next_combo_changed(s, c))
+            self.next_row.addWidget(combo)
+            self._next_combos.append(combo)
+
+        choices = self.node.get("choices", [])
+        for choice_index, label in enumerate(choices):
+            button = QPushButton(f"Remove [{label}]")
+            button.setObjectName("dialog-remove-choice")
+            button.clicked.connect(
+                lambda _checked=False, i=choice_index: (
+                    self.remove_choice_requested.emit(self, i)))
+            self.remove_choice_row.addWidget(button)
+            self._remove_buttons.append(button)
+
+    def _on_next_combo_changed(self, slot: int, combo: QComboBox) -> None:
+        self.next_changed.emit(self, slot, combo.currentData())
+
+    def next_combos(self) -> List[QComboBox]:
+        return list(self._next_combos)
+
+    def remove_choice_buttons(self) -> List[QPushButton]:
+        return list(self._remove_buttons)
 
     def _link_strings(self) -> List[str]:
         choices = self.node.get("choices", [])
@@ -148,6 +266,15 @@ class NodeCard(QWidget):
             target = nexts[position] if position < len(nexts) else dialog_model.END
             strings.append(f"[{choice}] → {_target_text(target)}")
         return strings
+
+
+def _npc_row_label(npc: dict) -> str:
+    """The NPC list's row text: the name, then its real node count -- the
+    one spelling used everywhere a row is written or rewritten (Task 7,
+    finding 9), so a freshly added NPC's row never claims a node count
+    that isn't its own.
+    """
+    return f"{npc['name']}  {len(npc.get('nodes', []))}"
 
 
 def _target_text(target) -> str:
@@ -276,6 +403,7 @@ class DialogPanel(QWidget):
                      "edit."
             )
             self.status_label.setText(message)
+            self._refresh_refusal()
             return
 
         try:
@@ -284,14 +412,15 @@ class DialogPanel(QWidget):
         except dialog_model.DialogError as exc:
             self.data = None
             self.status_label.setText(exc.message)
+            self._refresh_refusal()
             return
 
         for npc in self.data.npcs:
-            self.npc_list.addItem(
-                f"{npc['name']}  {len(npc.get('nodes', []))}")
+            self.npc_list.addItem(_npc_row_label(npc))
         self._refresh_status()
         if self.data.npcs:
             self.npc_list.setCurrentRow(0)
+        self._refresh_refusal()
 
     def _refresh_status(self) -> None:
         if self.data is None:
@@ -342,12 +471,17 @@ class DialogPanel(QWidget):
 
     def rebuild_cards(self) -> None:
         self._clear_cards()
-        for node in self.selected_nodes():
-            card = NodeCard(node, parent=self.nodes_holder)
+        nodes = self.selected_nodes()
+        for node in nodes:
+            card = NodeCard(node, nodes, parent=self.nodes_holder)
             self.nodes_layout.addWidget(card)
             self._cards.append(card)
             card.text_field.textChanged.connect(
                 lambda _text: self._refresh_refusal())
+            card.delete_requested.connect(self.delete_node)
+            card.next_changed.connect(self.set_next)
+            card.add_choice_requested.connect(self.add_choice)
+            card.remove_choice_requested.connect(self.remove_choice)
         self._refresh_refusal()
 
     # -- the generator's output -------------------------------------------
@@ -448,7 +582,7 @@ class DialogPanel(QWidget):
         except dialog_model.DialogError as exc:
             self._report(exc.message)
             return
-        self.npc_list.addItem(f"{self.data.npcs[-1]['name']}  1")
+        self.npc_list.addItem(_npc_row_label(self.data.npcs[-1]))
         self._refresh_status()
         self.npc_list.setCurrentRow(len(self.data.npcs) - 1)
 
@@ -463,15 +597,18 @@ class DialogPanel(QWidget):
             return
         item = self.npc_list.item(index)
         if item is not None:
-            item.setText(f"{npc['name']}  {len(npc.get('nodes', []))}")
+            item.setText(_npc_row_label(npc))
 
     # -- the refusal, live (AC8) -------------------------------------------
 
     def refusal_text(self) -> str:
         return self.refusal_label.text()
 
-    def _refresh_refusal(self) -> None:
-        """Recompute AC8's refusal and gate the Save button on it.
+    def _refresh_refusal(self) -> Optional[str]:
+        """Recompute AC8's refusal, gate the Save button on it, and return
+        the message (or None) so a caller that already needs it -- `save`,
+        below -- is not asking `dialog_model.refusal` a second time for
+        the same answer.
 
         Called on every keystroke (through the card, below) rather than
         only at save: the prototype's Dialog screen shows "save blocked"
@@ -481,16 +618,17 @@ class DialogPanel(QWidget):
         if self.data is None:
             self.refusal_label.hide()
             self.save_button.setEnabled(False)
-            return
+            return None
         message = dialog_model.refusal(self.data)
         if message is None:
             self.refusal_label.setText("")
             self.refusal_label.hide()
             self.save_button.setEnabled(not self.is_running())
-            return
+            return None
         self.refusal_label.setText(message)
         self.refusal_label.show()
         self.save_button.setEnabled(False)
+        return message
 
     # -- saving and generating (R9, R11) ----------------------------------
 
@@ -504,8 +642,7 @@ class DialogPanel(QWidget):
         """
         if self.data is None:
             return False
-        self._refresh_refusal()
-        if dialog_model.refusal(self.data) is not None:
+        if self._refresh_refusal() is not None:
             return False
         if self.is_running():
             self._report(

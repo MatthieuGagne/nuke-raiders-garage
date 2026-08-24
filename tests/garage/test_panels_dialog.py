@@ -123,8 +123,18 @@ def bind_over(root: Path, repo: Path) -> project.Binding:
     return project.bind(garage_root)
 
 
-@unittest.skipIf(NO_GAME_REPO, NO_GAME_REPO_REASON)
 class DialogPanelTestCase(unittest.TestCase):
+    """Not gated on a bound game repository (finding 4, Task 7): the
+    fixture works from `NPCS`/`HUBS`/`CONFIG_H` above and needs no real
+    `dialog_to_c.py`, so every subclass runs in CI, where no game
+    repository is bound. `make_fixture_worktree` embeds the real
+    generator only when one happens to be available and it is harmless
+    either way -- nothing below invokes it. Only the two classes that
+    actually run the generator or read the real game repository's data
+    (`TestGeneratorRuns`, `TestAgainstRealGameData`) carry their own
+    `@unittest.skipIf(NO_GAME_REPO, ...)`.
+    """
+
     npcs = None
     config_h = CONFIG_H
 
@@ -250,9 +260,10 @@ class TestLinkChips(DialogPanelTestCase):
             self.panel.node_cards()[2].link_texts(), ["next → END"])
 
 
-@unittest.skipIf(NO_GAME_REPO, NO_GAME_REPO_REASON)
 class TestUnreadableFiles(unittest.TestCase):
-    """A worktree with no dialog assets must state that, not crash."""
+    """A worktree with no dialog assets must state that, not crash. Runs
+    against a temp fixture, not the real generator, so it is not gated
+    (finding 4)."""
 
     def setUp(self):
         theme.apply(_app)
@@ -274,6 +285,11 @@ class TestUnreadableFiles(unittest.TestCase):
     def test_no_cards_are_shown(self):
         self.assertEqual(self.panel.node_cards(), [])
 
+    def test_the_save_button_is_disabled_after_a_load_error(self):
+        # Finding 8: the other early return in refresh() (a DialogError)
+        # must leave Save disabled too, not at Qt's default enabled state.
+        self.assertFalse(self.panel.save_button.isEnabled())
+
 
 class TestNoBinding(unittest.TestCase):
     """No game repository bound: the panel states it and offers nothing.
@@ -294,6 +310,11 @@ class TestNoBinding(unittest.TestCase):
     def test_no_npcs_and_no_cards(self):
         self.assertEqual(self.panel.npc_names(), [])
         self.assertEqual(self.panel.node_cards(), [])
+
+    def test_the_save_button_is_disabled_with_nothing_to_save(self):
+        # Finding 8: refresh() returned before _refresh_refusal() ran in
+        # exactly this case, leaving Save at Qt's default enabled state.
+        self.assertFalse(self.panel.save_button.isEnabled())
 
 
 class TestEditingText(DialogPanelTestCase):
@@ -405,6 +426,107 @@ class TestChoices(DialogPanelTestCase):
         self.assertEqual(card.link_texts(), ["[Shop] → SHOP"])
 
 
+class TestEditingControlsAreReachable(DialogPanelTestCase):
+    """Finding 1: the edit operations `dialog_model` already offers
+    (delete a node, set a next, add/remove a choice) must be reachable
+    through a widget a user can actually click or type into -- not only
+    through a test calling the panel's method directly, which is exactly
+    the gap that let this ship without them.
+    """
+
+    def test_clicking_delete_node_removes_the_card(self):
+        card = self.panel.node_cards()[1]
+        card.delete_button.click()
+        self.assertEqual(
+            [c.id_label.text() for c in self.panel.node_cards()],
+            ["[0]", "[1]"],
+        )
+
+    def test_a_deleted_nodes_referrers_are_renumbered_after_a_button_click(self):
+        self.panel.node_cards()[1].delete_button.click()
+        self.panel.save()
+        nodes = self.saved_npcs()["npcs"][0]["nodes"]
+        self.assertEqual([n["idx"] for n in nodes], [0, 1])
+        self.assertEqual(nodes[0]["next"], ["END"])
+
+    def test_a_next_combo_is_offered_per_next_slot(self):
+        narration_card = self.panel.node_cards()[0]
+        self.assertEqual(len(narration_card.next_combos()), 1)
+        choice_card = self.panel.node_cards()[1]
+        self.assertEqual(len(choice_card.next_combos()), 2)
+
+    def test_a_next_combos_entries_are_the_model_and_the_target_reads(self):
+        card = self.panel.node_cards()[0]
+        combo = card.next_combos()[0]
+        texts = [combo.itemText(i) for i in range(combo.count())]
+        # next_targets(nodes, 0) is [1, 2, "END", "SHOP"] for this
+        # three-node tree; each reads as the link chips already do.
+        self.assertEqual(
+            dialog_model.next_targets(self.panel.selected_nodes(), 0),
+            [1, 2, "END", "SHOP"],
+        )
+        self.assertEqual(texts, ["[1]", "[2]", "END", "SHOP"])
+
+    def test_changing_a_next_combo_sets_the_slot(self):
+        card = self.panel.node_cards()[0]
+        combo = card.next_combos()[0]
+        combo.setCurrentIndex(combo.findText("[2]"))
+        self.assertEqual(card.node["next"], [2])
+
+    def test_a_next_combo_change_is_saved(self):
+        card = self.panel.node_cards()[0]
+        combo = card.next_combos()[0]
+        combo.setCurrentIndex(combo.findText("END"))
+        self.panel.save()
+        self.assertEqual(
+            self.saved_npcs()["npcs"][0]["nodes"][0]["next"], ["END"])
+
+    def test_a_second_next_combo_sets_only_its_own_slot(self):
+        card = self.panel.node_cards()[1]
+        combo = card.next_combos()[1]
+        self.assertEqual(_combo_current_target(combo), "SHOP")
+        combo.setCurrentIndex(combo.findText("END"))
+        self.assertEqual(card.node["next"], [2, "END"])
+
+    def test_rebuild_cards_does_not_modify_any_nodes_next(self):
+        # The classic bug this finding calls out: populating a combo
+        # fires currentIndexChanged, which must not be wired up yet when
+        # that happens, or a plain rebuild would silently rewrite every
+        # node's next to whatever the first item in each combo is.
+        nodes = self.panel.selected_nodes()
+        before = [list(n["next"]) for n in nodes]
+        self.panel.rebuild_cards()
+        after = [list(n["next"]) for n in self.panel.selected_nodes()]
+        self.assertEqual(before, after)
+
+    def test_typing_a_label_and_clicking_add_choice_adds_it(self):
+        card = self.panel.node_cards()[0]
+        card.choice_label_field.setText("Yes")
+        card.add_choice_button.click()
+        self.assertEqual(card.node["choices"], ["Yes"])
+        self.assertEqual(card.link_texts(), ["[Yes] → [1]"])
+
+    def test_add_choice_clears_the_label_field(self):
+        card = self.panel.node_cards()[0]
+        card.choice_label_field.setText("Yes")
+        card.add_choice_button.click()
+        self.assertEqual(card.choice_label_field.text(), "")
+
+    def test_a_remove_choice_button_exists_per_choice(self):
+        card = self.panel.node_cards()[1]
+        self.assertEqual(len(card.remove_choice_buttons()), 2)
+
+    def test_clicking_remove_choice_removes_it(self):
+        card = self.panel.node_cards()[1]
+        card.remove_choice_buttons()[0].click()
+        self.assertEqual(card.node["choices"], ["Shop"])
+        self.assertEqual(card.link_texts(), ["[Shop] → SHOP"])
+
+
+def _combo_current_target(combo):
+    return combo.itemData(combo.currentIndex())
+
+
 class TestRenameNpc(DialogPanelTestCase):
     """R3: rename an NPC."""
 
@@ -418,11 +540,11 @@ class TestRenameNpc(DialogPanelTestCase):
         self.assertEqual(self.saved_npcs()["npcs"][0]["name"], "GREASE")
 
 
-@unittest.skipIf(NO_GAME_REPO, NO_GAME_REPO_REASON)
 class TestNpcCeiling(DialogPanelTestCase):
     """AC9: Garage refuses to add an NPC beyond the maximum the game
     supports. The fixture's config.h says MAX_NPCS 2, and the fixture has
-    two NPCs."""
+    two NPCs. Reads only the fixture's own config.h, never the generator,
+    so it is not gated (finding 4)."""
 
     def test_adding_a_third_npc_is_refused(self):
         self.panel.add_npc("SCOUT")
@@ -524,7 +646,7 @@ class TestGeneratorRuns(DialogPanelTestCase):
 
     def test_the_command_is_echoed_before_it_runs(self):
         self._save_and_wait()
-        self.assertIn("$ python tools/dialog_to_c.py", self.panel.log_text())
+        self.assertIn("$ python -u tools/dialog_to_c.py", self.panel.log_text())
 
     def test_the_sources_match_what_a_terminal_produces(self):
         """AC11, checked rather than asserted: the same generator, run the
