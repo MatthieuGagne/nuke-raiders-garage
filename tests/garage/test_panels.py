@@ -2882,8 +2882,8 @@ class TestWorktreesPanel(WorktreePanelFixture, unittest.TestCase):
         self.assertIn("active worktree", panel.status_text())
         self.assertTrue(active.path.is_dir())
 
-    def test_deleting_a_dirty_worktree_is_refused_with_its_reason(self):
-        # AC4, second half.
+    def test_deleting_a_dirty_worktree_without_force_is_refused_and_survives(self):
+        # AC4, second half: without force, today's safety holds.
         panel = self.panel()
         spike = self.spike(panel)
         (spike.path / "src" / "config.h").write_text(
@@ -2895,7 +2895,19 @@ class TestWorktreesPanel(WorktreePanelFixture, unittest.TestCase):
         self.assertIn("uncommitted work", refusal)
         self.assertTrue(spike.path.is_dir())
 
-    def test_the_delete_button_is_disabled_before_it_is_pressed(self):
+    def test_deleting_a_dirty_worktree_with_force_removes_it(self):
+        panel = self.panel()
+        spike = self.spike(panel)
+        (spike.path / "src" / "config.h").write_text(
+            "#define A 1\n", encoding="utf-8"
+        )
+
+        refusal = panel.delete_worktree(spike, spike.path.name, force=True)
+
+        self.assertIsNone(refusal)
+        self.assertFalse(spike.path.is_dir())
+
+    def test_the_delete_button_is_disabled_only_for_a_structural_refusal(self):
         # The refusal is computed while the row is built, so a button that
         # cannot act says so rather than failing on click.
         panel = self.panel()
@@ -2906,6 +2918,25 @@ class TestWorktreesPanel(WorktreePanelFixture, unittest.TestCase):
         self.assertEqual(len(buttons), 1)  # the active/main worktree only
         self.assertFalse(buttons[0].isEnabled())
         self.assertIn("active worktree", buttons[0].toolTip())
+
+    def test_the_delete_button_is_enabled_for_a_dirty_worktree(self):
+        # A dirty worktree is no longer a structural refusal -- it is
+        # deletable, and its tooltip warns what would be lost instead.
+        panel = self.panel()
+        spike = self.spike(panel)
+        (spike.path / "src" / "config.h").write_text(
+            "#define A 1\n", encoding="utf-8"
+        )
+        panel.refresh()
+
+        delete_buttons = [
+            b for b in panel.findChildren(QPushButton)
+            if b.objectName() == "worktrees-delete"
+        ]
+        spike_button = next(b for b in delete_buttons if b.isEnabled())
+
+        self.assertTrue(spike_button.isEnabled())
+        self.assertIn("uncommitted work", spike_button.toolTip())
 
     def test_the_name_must_be_typed_back(self):
         panel = self.panel()
