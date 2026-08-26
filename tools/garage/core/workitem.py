@@ -130,3 +130,83 @@ def refuse_reason(
             "so there is nothing to file a work item about."
         )
     return None
+
+
+TITLE_PREFIX = "chore:"
+
+_PREFIX_RE = re.compile(r"^\s*chore\s*:\s*", re.IGNORECASE)
+
+
+class WorkItemError(Exception):
+    """A refusal Garage makes on its own, before any `gh` call."""
+
+
+def title_for(raw: str) -> str:
+    """`chore: <what the user typed>` (R3/AC4).
+
+    The prefix is what gives the board `Type = Chore` when the conventions
+    are read back by a human, so it is applied here rather than left to the
+    user to remember. An existing prefix is normalised, not doubled — a
+    user who types the convention correctly must not be punished with
+    `chore: chore: …`.
+    """
+    stripped = (raw or "").strip()
+    if not stripped:
+        raise WorkItemError("A work item needs a title.")
+    body = _PREFIX_RE.sub("", stripped).strip()
+    if not body:
+        raise WorkItemError("A work item needs a title beyond the `chore:` prefix.")
+    return f"{TITLE_PREFIX} {body}"
+
+
+def closes_line(number: int) -> str:
+    """The reference `.github/workflows/pr-linked-issue.yml` greps for.
+
+    Spelled here rather than at the call site because it is the one string
+    in this module whose exact form another repository's CI depends on.
+    """
+    return f"Closes #{number}"
+
+
+def compose_body(
+    changes: Sequence[ChangedDefine],
+    description: str,
+    branch: Optional[str],
+    commits: Sequence[str],
+) -> str:
+    """The issue body: what the user said, what changed, and where.
+
+    The parameter table is the part R4 requires and the part a reviewer
+    actually reads — an issue that says "tuned the handling" and nothing
+    else cannot be checked against the diff six weeks later.
+    """
+    parts: List[str] = []
+
+    text = (description or "").strip()
+    if text:
+        parts.append(text)
+
+    if changes:
+        rows = "\n".join(
+            f"| `{c.name}` | `{c.head_text}` | `{c.new_text}` |" for c in changes
+        )
+        parts.append(
+            "## Changed parameters\n\n"
+            "| `#define` | At HEAD | New |\n"
+            "|---|---|---|\n" + rows
+        )
+    else:
+        parts.append(
+            "## Changed parameters\n\n"
+            "No `#define` differs from HEAD; this work item covers the "
+            "commits below."
+        )
+
+    if commits:
+        listed = "\n".join(f"- `{line}`" for line in commits)
+        parts.append("## Commits\n\n" + listed)
+
+    where = f"Filed by Garage from the `{branch}` worktree." if branch else "Filed by Garage."
+    parts.append(where)
+
+    return "\n\n".join(parts) + "\n"

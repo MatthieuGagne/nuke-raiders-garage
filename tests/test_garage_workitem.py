@@ -219,3 +219,85 @@ class TestRefuseReason(unittest.TestCase):
             binding = bind_over(root, make_game_repo(root / "game"))
 
             self.assertIsNone(workitem.refuse_reason(binding, [], ["abc1234 tune"]))
+
+
+class TestTitle(unittest.TestCase):
+    """R3/AC4: the title starts with `chore:`, which is what gives the
+    board `Type = Chore` when a human reads it back.
+    """
+
+    def test_a_bare_title_gains_the_prefix(self):
+        self.assertEqual(workitem.title_for("tune player speed"), "chore: tune player speed")
+
+    def test_a_title_that_already_has_the_prefix_does_not_gain_a_second(self):
+        self.assertEqual(
+            workitem.title_for("chore: tune player speed"), "chore: tune player speed"
+        )
+
+    def test_the_prefix_is_recognised_whatever_its_case_and_spacing(self):
+        self.assertEqual(workitem.title_for("Chore:tune speed"), "chore: tune speed")
+
+    def test_surrounding_whitespace_is_dropped(self):
+        self.assertEqual(workitem.title_for("  tune speed  "), "chore: tune speed")
+
+    def test_an_empty_title_is_refused_rather_than_prefixed(self):
+        with self.assertRaises(workitem.WorkItemError):
+            workitem.title_for("   ")
+
+
+class TestBody(unittest.TestCase):
+    """R4/AC5: the body lists each changed `#define` with both values."""
+
+    CHANGES = [
+        workitem.ChangedDefine("MAX_NPCS", "8", "9"),
+        workitem.ChangedDefine("PLAYER_SPEED", "4", "6"),
+    ]
+
+    def test_every_changed_define_appears_with_both_values(self):
+        body = workitem.compose_body(self.CHANGES, "", "tune-speed", [])
+
+        self.assertIn("PLAYER_SPEED", body)
+        self.assertIn("`4`", body)
+        self.assertIn("`6`", body)
+        self.assertIn("MAX_NPCS", body)
+        self.assertIn("`8`", body)
+        self.assertIn("`9`", body)
+
+    def test_the_description_leads_the_body(self):
+        body = workitem.compose_body(self.CHANGES, "The car turns too late.", "b", [])
+
+        self.assertTrue(body.startswith("The car turns too late."))
+
+    def test_a_body_with_no_description_still_lists_the_changes(self):
+        body = workitem.compose_body(self.CHANGES, "", "tune-speed", [])
+
+        self.assertIn("PLAYER_SPEED", body)
+        self.assertNotIn("\n\n\n", body)
+
+    def test_no_changed_define_says_so_rather_than_showing_an_empty_table(self):
+        body = workitem.compose_body([], "", "tune-speed", ["abc1234 tune"])
+
+        self.assertIn("No `#define` differs from HEAD", body)
+        self.assertNotIn("| HEAD |", body)
+
+    def test_commits_are_listed_when_there_are_any(self):
+        body = workitem.compose_body([], "", "tune-speed", ["abc1234 tune player speed"])
+
+        self.assertIn("abc1234 tune player speed", body)
+
+    def test_the_branch_is_named_so_the_issue_can_be_traced_back(self):
+        body = workitem.compose_body(self.CHANGES, "", "tune-speed", [])
+
+        self.assertIn("tune-speed", body)
+
+    def test_the_body_says_garage_filed_it(self):
+        body = workitem.compose_body(self.CHANGES, "", "tune-speed", [])
+
+        self.assertIn("Garage", body)
+
+
+class TestClosesLine(unittest.TestCase):
+    """R6/AC8: what goes on the clipboard is what the workflow greps for."""
+
+    def test_the_line_is_the_form_the_workflow_matches(self):
+        self.assertEqual(workitem.closes_line(614), "Closes #614")
