@@ -2,26 +2,33 @@
 (R3, R4). Pure and Qt-free, like every module under tools/garage/core/.
 
 This is the first module in Garage that *writes* to the game repository's
-git state, so it is built around its refusals rather than its actions:
+git state, so it is built around its refusals rather than its actions —
+but not every refusal is the same kind:
 
-- The active worktree is never deleted. Everything Garage resolves —
+- Two refusals are structural and absolute, and nothing overrides them.
+  The active worktree is never deleted: everything Garage resolves —
   `src/config.h`, the diff, every make call, the ROM — resolves against it,
   and deleting the ground the application is standing on is not a thing to
-  do politely.
-- A worktree holding uncommitted work is never deleted. `git worktree
-  remove` would need `--force` for tracked changes, and Garage never passes
-  it. Untracked files are refused too: git will not stop for them, and the
-  removal destroys them (see `refuse_delete_reason` for why that decision
-  is stricter than R4's letter).
+  do politely. The repository's main working tree is never deleted either —
+  every other worktree hangs off it.
+- Everything else — uncommitted tracked changes, untracked files, or a
+  worktree whose state Garage could not even read — is destructive rather
+  than structural: deleting it would lose something, but there is nothing
+  about the worktree itself that forbids it. `destructive_delete_warning`
+  says what would be lost. `delete` shows that warning to the caller by
+  raising unless `force=True`, and the caller is expected to have put the
+  warning in front of the user first — the typed-name confirmation (R4's
+  third guard, see below) is what turns "shown" into "acknowledged".
 - The name must be typed back. A misclick cannot delete a worktree.
 - **No branch is ever deleted.** `git worktree remove` detaches the working
   tree and leaves the branch alone; nothing here calls `git branch -d` or
   `-D`, and nothing here should. The work survives the worktree.
 
-Refusals are computed separately from the actions that honour them
-(`refuse_delete_reason` is a pure function returning a sentence), so the
-window can grey out a button and explain itself without attempting
-anything, and so the tests can prove the decision without touching a repo.
+`refuse_delete_reason` and `destructive_delete_warning` are both pure
+functions returning a sentence (or None), computed separately from the
+action that honours them, so a window can grey out a button, explain a row,
+or warn before deleting, all without attempting anything — and so the
+tests can prove each decision without touching a repo.
 """
 from __future__ import annotations
 
@@ -126,15 +133,12 @@ def create(
 def refuse_delete_reason(
     worktree: Worktree, active: Worktree, worktrees: Optional[List[Worktree]] = None
 ) -> Optional[str]:
-    """Why `worktree` must not be deleted, or None when it may be (R4).
-
-    The uncommitted-work rule is deliberately stricter than "tracked files
-    differ from HEAD". An untracked file is not work git is following, so
-    it never marks the header dirty (AC20) — but deleting the worktree
-    deletes the file, and unlike a tracked change it exists nowhere else.
-    The consequences of the two mistakes are not symmetric: refusing costs
-    the user one `git clean` or one moved file; not refusing costs them
-    whatever was in it.
+    """Why `worktree` must never be deleted, or None when it structurally
+    may be (R4). These two refusals are absolute — nothing overrides them,
+    not even `force`. Everything about data loss (uncommitted work,
+    untracked files, unreadable state) lives in `destructive_delete_warning`
+    instead, because those are shown and can be acknowledged, not refused
+    outright.
     """
     # "It is the active one" comes first, and stays first even when the
     # active worktree is also the main one (the common case: nothing has
@@ -151,12 +155,26 @@ def refuse_delete_reason(
             f"'{worktree.path}' is the repository's main working tree. Garage "
             f"does not delete it — every other worktree hangs off it."
         )
+    return None
+
+
+def destructive_delete_warning(worktree: Worktree) -> Optional[str]:
+    """What deleting `worktree` would destroy, or None when nothing would
+    be lost. Unlike `refuse_delete_reason`, this is shown to the user
+    rather than enforced unconditionally: `delete(..., force=True)`
+    proceeds anyway, once the typed-name confirmation has acknowledged it.
+
+    The uncommitted-work case is deliberately stricter than "tracked files
+    differ from HEAD". An untracked file is not work git is following, so
+    it never marks the header dirty (AC20) — but deleting the worktree
+    deletes the file, and unlike a tracked change it exists nowhere else.
+    """
     try:
         summary = diff_core.get_change_summary(worktree.path)
     except diff_core.DiffError as exc:
         return (
             f"Garage could not read the state of '{worktree.path}' ({exc}), "
-            f"so it will not delete it."
+            f"so it cannot tell what deleting it would destroy."
         )
     if summary.dirty:
         one = summary.changed_file_count == 1
@@ -184,13 +202,19 @@ def delete(
     active: Worktree,
     typed_name: str,
     worktrees: Optional[List[Worktree]] = None,
+    force: bool = False,
 ) -> None:
-    """Remove `worktree`, having refused every reason not to (R4).
+    """Remove `worktree`, having refused every structural reason not to,
+    and either refused or honoured the destructive ones (R4).
 
     `typed_name` must match the worktree's directory name exactly — the
     third guard, and the one that catches a misclick on the right row of a
-    list. The branch is untouched: `git worktree remove` leaves it, and
-    nothing here deletes a branch.
+    list. `force` defaults to False, so a caller that has not shown the
+    destructive warning gets today's safety: a dirty or untracked worktree
+    is refused. A caller passes `force=True` only once it has shown that
+    warning and the typed name has confirmed it. The branch is untouched
+    either way: `git worktree remove` leaves it, and nothing here deletes
+    a branch.
     """
     reason = refuse_delete_reason(worktree, active, worktrees)
     if reason is not None:
@@ -202,7 +226,16 @@ def delete(
             f"To delete this worktree, type its name exactly: '{expected}'."
         )
 
-    result = _run_git(["worktree", "remove", str(worktree.path)], game_repo)
+    if not force:
+        warning = destructive_delete_warning(worktree)
+        if warning is not None:
+            raise WorktreeError(warning)
+
+    args = ["worktree", "remove"]
+    if force:
+        args.append("--force")
+    args.append(str(worktree.path))
+    result = _run_git(args, game_repo)
     if result.returncode != 0:
         raise WorktreeError(
             f"git could not remove the worktree: "

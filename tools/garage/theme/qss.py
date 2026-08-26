@@ -58,6 +58,22 @@ names / dynamic properties the panels already expose for this purpose:
   "changed"]` carries the OK/problem/CHANGED vocabulary the prototype's
   `.acard` declares; the chip also spells the word out, so colour is never
   the only signal.
+- `#dialog-status`, `#dialog-npc-list`, `#dialog-node-card`,
+  `#dialog-node-id`, `#dialog-node-text`, `#dialog-node-count`,
+  `#dialog-node-preview`, `#dialog-link-chip`, `#dialog-refusal`,
+  `#dialog-log` -- the dialog panel (`tools/garage/panels/dialog.py`); its
+  other object names (`#dialog-panel`, `#dialog-save`, `#dialog-add-node`,
+  `#dialog-add-npc`, `#dialog-rename-npc`, `#dialog-npc-name`,
+  `#dialog-delete-node`, `#dialog-next-combo`, `#dialog-choice-label`,
+  `#dialog-add-choice`, `#dialog-remove-choice`) are plain widgets styled
+  only by their type selector -- the same as `#assets-open` and
+  `#assets-convert` in `assets.py`, neither of which gets a docstring
+  entry either. Named here only so a reader knows where to look, not
+  because a rule exists for them. `[over="true"]` on a card and on its
+  count is the over-the-limit treatment the prototype's `.node.over`
+  declares; the count also spells the numbers out (`70/63`), so colour is
+  never the only signal. `#dialog-node-preview` is the Game Boy dialog
+  box, painted in the four `gb-*` shades.
 """
 from __future__ import annotations
 
@@ -695,4 +711,57 @@ QLabel[diffKind="context"], QLabel[diffKind="meta"] {{
 #assets-verdict[verdict="changed"] {{ color: {t["warn"]}; }}
 #assets-log {{ font-family: {FONT_MONO}; font-size: 11px; }}
 #assets-status {{ color: {t["text-2"]}; }}
+
+/* ============================================================
+   Dialog panel (tools/garage/panels/dialog.py). The prototype's
+   Dialog screen: an NPC list, a column of node cards, each with
+   a live character count and a Game Boy wrap preview.
+   ============================================================ */
+#dialog-status {{ color: {t["text-2"]}; }}
+#dialog-npc-list {{
+    background: {t["surface"]};
+    border: 1px solid {t["line"]};
+    border-radius: 4px;
+    max-width: 190px;
+}}
+#dialog-node-card {{
+    background: {t["surface"]};
+    border: 1px solid {t["line"]};
+    border-radius: 5px;
+}}
+#dialog-node-card[over="true"] {{
+    border-color: {t["fail"]};
+    background: {t["fail-soft"]};
+}}
+#dialog-node-id {{
+    font-family: {FONT_MONO};
+    font-size: 10px;
+    color: {t["text-3"]};
+}}
+#dialog-node-count {{
+    font-family: {FONT_MONO};
+    font-size: 10px;
+    color: {t["text-3"]};
+}}
+#dialog-node-count[over="true"] {{ color: {t["fail"]}; font-weight: 700; }}
+#dialog-node-preview {{
+    font-family: {FONT_MONO};
+    font-size: 11px;
+    background: {t["gb-0"]};
+    color: {t["gb-3"]};
+    border: 2px solid {t["gb-2"]};
+    border-radius: 2px;
+    padding: 6px 7px;
+}}
+#dialog-link-chip {{
+    font-family: {FONT_MONO};
+    font-size: 10px;
+    color: {t["text-2"]};
+    background: {t["surface-2"]};
+    border: 1px solid {t["line"]};
+    border-radius: 3px;
+    padding: 2px 7px;
+}}
+#dialog-refusal {{ color: {t["fail"]}; font-weight: 600; }}
+#dialog-log {{ font-family: {FONT_MONO}; font-size: 11px; }}
 """

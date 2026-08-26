@@ -69,6 +69,7 @@ from tools.garage.panels.assets import AssetsPanel
 from tools.garage.panels.budgets import BudgetsPanel
 from tools.garage.panels.commit import CommitPanel
 from tools.garage.panels.compile_bar import CompileBar
+from tools.garage.panels.dialog import DialogPanel
 from tools.garage.panels.diff_view import DiffPanel
 from tools.garage.panels.doctor import DoctorPanel
 from tools.garage.panels.tuner import TunerPanel
@@ -325,6 +326,7 @@ class GarageWindow(QMainWindow):
 
         self._build_commit()
         self._build_assets()
+        self._build_dialog_editor()
 
         self._build_doctor()
         # A failed target whose tool the Doctor already reported missing
@@ -381,9 +383,44 @@ class GarageWindow(QMainWindow):
         self.assets_dialog.raise_()
         self.assets_dialog.activateWindow()
 
+    def _build_dialog_editor(self) -> None:
+        """P3's dialog panel, in a dialog like the assets panel. Rebuilt
+        with the body, because what it edits is `assets/dialog/` of the
+        *active* worktree — a panel left pointing at the previous one
+        would save a tree back over a checkout Garage no longer means.
+        """
+        self.dialog_panel = DialogPanel(self.binding, self.binding_error)
+        self.dialog_panel.setObjectName("garage-dialog-panel")
+        self.dialog_panel.saved.connect(self._on_dialog_saved)
+        self.dialog_dialog = QDialog(self)
+        self.dialog_dialog.setObjectName("garage-dialog-dialog")
+        self.dialog_dialog.setWindowTitle(self._dialog_editor_title())
+        layout = QVBoxLayout(self.dialog_dialog)
+        layout.addWidget(self.dialog_panel)
+        self.dialog_dialog.resize(980, 760)
+
+    def _dialog_editor_title(self) -> str:
+        if self.binding is None:
+            return "Dialog"
+        return f"Dialog — {self.binding.active_worktree.path.name}"
+
+    def open_dialog_editor(self) -> None:
+        self.dialog_panel.refresh()
+        self.dialog_dialog.show()
+        self.dialog_dialog.raise_()
+        self.dialog_dialog.activateWindow()
+
     def _on_committed(self, head_line: str) -> None:
         """A commit changes what the worktree holds, so the header totals
         and any open diff are re-read."""
+        self._refresh_header()
+        if self.diff_dialog.isVisible():
+            self.diff_panel.refresh()
+
+    def _on_dialog_saved(self) -> None:
+        """A dialog save dirties the worktree the same way a tuner write
+        does (Task 7, finding 7), so the header totals and any open diff
+        are re-read -- the same shape as `_on_committed` above."""
         self._refresh_header()
         if self.diff_dialog.isVisible():
             self.diff_panel.refresh()
@@ -432,6 +469,11 @@ class GarageWindow(QMainWindow):
                 "A converter is running in the current worktree. Stop it "
                 "before switching."
             )
+        if self.dialog_panel.is_running():
+            return self.worktrees_panel._set_status(
+                "A converter is running in the current worktree. Stop it "
+                "before switching."
+            )
 
         worktrees_core.activate(self.garage_root, worktree)
         self._rebind()
@@ -439,6 +481,7 @@ class GarageWindow(QMainWindow):
         # The asset panel owns a poll timer and may own a converter thread;
         # both must end before the widget that hosts them is deleted.
         self.assets_panel.stop_and_wait()
+        self.dialog_panel.stop_and_wait()
 
         # The dialogs hold panels bound to the old worktree; they go with it.
         for dialog in (
@@ -446,6 +489,7 @@ class GarageWindow(QMainWindow):
             self.doctor_dialog,
             self.commit_dialog,
             self.assets_dialog,
+            self.dialog_dialog,
         ):
             dialog.close()
             dialog.deleteLater()
@@ -540,6 +584,11 @@ class GarageWindow(QMainWindow):
         self.show_worktrees_action.triggered.connect(self.open_worktrees)
         view_menu.addAction(self.show_worktrees_action)
 
+        self.show_dialog_action = QAction("&Dialog…", self)
+        self.show_dialog_action.setObjectName("garage-action-show-dialog")
+        self.show_dialog_action.triggered.connect(self.open_dialog_editor)
+        view_menu.addAction(self.show_dialog_action)
+
     def open_doctor(self) -> None:
         """Show the Doctor. The checks are not re-run here: they read the
         process environment, which cannot change under a running Garage,
@@ -620,6 +669,7 @@ class GarageWindow(QMainWindow):
         self.compile_bar.stop_and_wait()
         self.commit_panel.stop_and_wait()
         self.assets_panel.stop_and_wait()
+        self.dialog_panel.stop_and_wait()
         super().closeEvent(event)
 
 

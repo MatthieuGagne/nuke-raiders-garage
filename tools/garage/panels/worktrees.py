@@ -128,10 +128,13 @@ class WorktreesPanel(QWidget):
         self.changed.emit()
         return None
 
-    def delete_worktree(self, worktree: Worktree, typed_name: str) -> Optional[str]:
-        """Delete `worktree`, if every refusal in
-        `worktrees_core.refuse_delete_reason` passes and `typed_name`
-        matches. Returns the refusal, or None on success (AC4).
+    def delete_worktree(
+        self, worktree: Worktree, typed_name: str, force: bool = False
+    ) -> Optional[str]:
+        """Delete `worktree`, if every structural refusal in
+        `worktrees_core.refuse_delete_reason` passes, `typed_name` matches,
+        and (when `force` is False) nothing would be destroyed. Returns the
+        refusal, or None on success (AC4).
         """
         if self.binding is None:
             return self._set_status(self._binding_error_message())
@@ -142,6 +145,7 @@ class WorktreesPanel(QWidget):
                 self.binding.active_worktree,
                 typed_name,
                 self._worktrees,
+                force=force,
             )
         except worktrees_core.WorktreeError as exc:
             return self._set_status(str(exc))
@@ -207,13 +211,20 @@ class WorktreesPanel(QWidget):
         delete.setProperty("role", "danger")
         # The refusal is computed now, not on click: a button that cannot
         # do anything says so before it is pressed, and its tooltip carries
-        # the reason so the list itself explains the state.
+        # the reason so the list itself explains the state. Only the
+        # structural refusal disables the button -- a dirty worktree is
+        # still deletable, so its tooltip carries the destructive warning
+        # instead, telling the user what would be lost before they click.
         refusal = worktrees_core.refuse_delete_reason(
             worktree, self.binding.active_worktree, self._worktrees
         )
         delete.setEnabled(refusal is None)
         if refusal is not None:
             delete.setToolTip(refusal)
+        else:
+            warning = worktrees_core.destructive_delete_warning(worktree)
+            if warning is not None:
+                delete.setToolTip(warning)
         delete.clicked.connect(lambda _=False, w=worktree: self._on_delete_clicked(w))
         layout.addWidget(delete)
 
@@ -227,19 +238,29 @@ class WorktreesPanel(QWidget):
     def _on_delete_clicked(self, worktree: Worktree) -> None:
         """R4's third guard: the name has to be typed. The dialog only
         collects it -- the decision lives in `delete_worktree`.
+
+        When deleting would destroy something, the warning goes into the
+        prompt above the "type to confirm" line, so the user reads exactly
+        what dies before typing anything. Typing the name back is what
+        turns that warning into an acknowledgement, so once it is accepted
+        the panel is entitled to pass `force=True`.
         """
         expected = worktree.path.name
+        warning = worktrees_core.destructive_delete_warning(worktree)
+        prompt = f"This deletes the working tree at\n{worktree.path}\n\n"
+        if warning is not None:
+            prompt += f"{warning}\n\n"
+        prompt += f"The branch is not deleted. Type '{expected}' to confirm:"
         typed, accepted = QInputDialog.getText(
             self,
             "Delete worktree",
-            f"This deletes the working tree at\n{worktree.path}\n\n"
-            f"The branch is not deleted. Type '{expected}' to confirm:",
+            prompt,
             QLineEdit.EchoMode.Normal,
             "",
         )
         if not accepted:
             return
-        self.delete_worktree(worktree, typed)
+        self.delete_worktree(worktree, typed, force=True)
 
     def _set_status(self, message: str) -> Optional[str]:
         self.status_label.setText(message)

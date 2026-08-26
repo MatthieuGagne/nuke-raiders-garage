@@ -3380,9 +3380,12 @@ class TestCreateWorktree(WorktreeFixture):
 
 
 class TestDeleteWorktree(WorktreeFixture):
-    """AC4: Garage refuses to delete the active worktree, and refuses to
-    delete a worktree that holds uncommitted changes, stating the reason in
-    both cases.
+    """AC4: Garage refuses to delete the active worktree or the main
+    working tree, stating the reason in both cases -- structurally, with no
+    override. A worktree that holds uncommitted or untracked changes is
+    only ever a *destructive* delete: `destructive_delete_warning` says what
+    would be lost, `delete(...)` refuses it without `force=True`, and
+    honours it with `force=True`.
     """
 
     def test_the_active_worktree_is_refused_with_its_reason(self):
@@ -3393,29 +3396,95 @@ class TestDeleteWorktree(WorktreeFixture):
         with self.assertRaises(worktrees.WorktreeError):
             worktrees.delete(self.game_repo, self.main, self.main, self.main.path.name)
 
-    def test_a_worktree_with_uncommitted_changes_is_refused_with_its_reason(self):
+    def test_a_worktree_with_uncommitted_changes_is_warned_about(self):
         spike = self.add_worktree()
         (spike.path / "README.md").write_text("edited\n", encoding="utf-8")
 
-        reason = worktrees.refuse_delete_reason(spike, self.main)
+        warning = worktrees.destructive_delete_warning(spike)
 
-        self.assertIn("uncommitted work", reason)
-        self.assertIn("1 file differs from HEAD", reason)
-        with self.assertRaises(worktrees.WorktreeError):
+        self.assertIn("uncommitted work", warning)
+        self.assertIn("1 file differs from HEAD", warning)
+        self.assertIsNone(worktrees.refuse_delete_reason(spike, self.main))
+
+    def test_a_dirty_worktree_is_refused_without_force_and_survives(self):
+        spike = self.add_worktree()
+        (spike.path / "README.md").write_text("edited\n", encoding="utf-8")
+
+        with self.assertRaises(worktrees.WorktreeError) as raised:
             worktrees.delete(self.game_repo, spike, self.main, spike.path.name)
+
+        self.assertIn("uncommitted work", str(raised.exception))
         self.assertTrue(spike.path.is_dir())
 
-    def test_a_worktree_with_only_untracked_files_is_refused_too(self):
+    def test_a_dirty_worktree_is_removed_with_force(self):
+        spike = self.add_worktree()
+        (spike.path / "README.md").write_text("edited\n", encoding="utf-8")
+
+        worktrees.delete(
+            self.game_repo, spike, self.main, spike.path.name, force=True
+        )
+
+        self.assertNotIn(spike.path.as_posix(), self.git_worktree_list())
+        self.assertFalse(spike.path.is_dir())
+
+    def test_force_does_not_override_the_active_worktree_refusal(self):
+        with self.assertRaises(worktrees.WorktreeError) as raised:
+            worktrees.delete(
+                self.game_repo, self.main, self.main, self.main.path.name, force=True
+            )
+
+        self.assertIn("active worktree", str(raised.exception))
+
+    def test_force_does_not_override_the_main_worktree_refusal(self):
+        spike = self.add_worktree()
+        listed = project.list_worktrees(self.game_repo)
+
+        with self.assertRaises(worktrees.WorktreeError) as raised:
+            worktrees.delete(
+                self.game_repo,
+                self.main,
+                spike,
+                self.main.path.name,
+                listed,
+                force=True,
+            )
+
+        self.assertIn("main working tree", str(raised.exception))
+
+    def test_force_still_requires_the_typed_name(self):
+        spike = self.add_worktree()
+        (spike.path / "README.md").write_text("edited\n", encoding="utf-8")
+
+        with self.assertRaises(worktrees.WorktreeError) as raised:
+            worktrees.delete(
+                self.game_repo, spike, self.main, "not-the-name", force=True
+            )
+
+        self.assertIn("type its name exactly", str(raised.exception))
+        self.assertTrue(spike.path.is_dir())
+
+    def test_a_worktree_with_only_untracked_files_is_warned_about(self):
         # Stricter than R4's letter, on purpose: git will not stop for an
         # untracked file, and the removal destroys it. It exists nowhere
         # else.
         spike = self.add_worktree()
         (spike.path / "notes.txt").write_text("scratch\n", encoding="utf-8")
 
-        reason = worktrees.refuse_delete_reason(spike, self.main)
+        warning = worktrees.destructive_delete_warning(spike)
 
-        self.assertIn("untracked", reason)
-        self.assertIn("no copy", reason)
+        self.assertIn("untracked", warning)
+        self.assertIn("no copy", warning)
+
+    def test_an_untracked_only_worktree_is_removed_with_force(self):
+        spike = self.add_worktree()
+        (spike.path / "notes.txt").write_text("scratch\n", encoding="utf-8")
+
+        worktrees.delete(
+            self.game_repo, spike, self.main, spike.path.name, force=True
+        )
+
+        self.assertNotIn(spike.path.as_posix(), self.git_worktree_list())
+        self.assertFalse(spike.path.is_dir())
 
     def test_the_main_working_tree_is_refused_even_when_it_is_not_active(self):
         # With `spike` active, the main tree is no longer refused for being
@@ -3719,6 +3788,38 @@ class TestDescribePending(CommitFixture):
 
     def test_a_clean_worktree_says_there_is_nothing(self):
         self.assertIn("No tracked change", commit.describe_pending(self.summary()))
+
+
+class TestCoreImportsNoQt(unittest.TestCase):
+    """R12: no `.py` file anywhere under `tools/garage/core/` -- direct
+    children and every subdirectory alike -- may hold a direct `import` or
+    `from` line naming PySide6 or shiboken. A real grep over the source,
+    recursively, not a one-time claim: the rule only holds while something
+    keeps checking it, and the cost of a break is `make test` failing on
+    every machine without PySide6, which is CI and is not the machine that
+    would have introduced it. (This checks the import lines themselves,
+    not the transitive closure of what a clean module imports.)
+    """
+
+    def test_no_core_module_imports_qt(self):
+        core_dir = (
+            Path(__file__).resolve().parents[1] / "tools" / "garage" / "core"
+        )
+        offenders = []
+        for path in sorted(core_dir.rglob("*.py")):
+            text = path.read_text(encoding="utf-8")
+            for line in text.splitlines():
+                stripped = line.strip()
+                if not (stripped.startswith("import ")
+                        or stripped.startswith("from ")):
+                    continue
+                if "PySide6" in stripped or "shiboken" in stripped:
+                    offenders.append(f"{path.name}: {stripped}")
+        self.assertEqual(
+            offenders, [],
+            "tools/garage/core/ must import no Qt (R12); move the widget "
+            "code into tools/garage/panels/",
+        )
 
 
 if __name__ == "__main__":

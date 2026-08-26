@@ -160,6 +160,59 @@ def write_json(path: Path, data: dict) -> Path:
     return path
 
 
+# -- Dialog editor fixture (Task 7) ------------------------------------------
+#
+# A minimal valid npcs.json/hubs.json pair, sized to a config.h whose
+# MAX_NPCS equals the fixture's NPC count exactly -- the generator (and
+# dialog_model.read_max_npcs) validates that count, so a mismatch here
+# would make the window's dialog editor unable even to load.
+
+DIALOG_CONFIG_TEXT = """\
+#ifndef CONFIG_H
+#define CONFIG_H
+
+#define MAX_NPCS     1
+#define MAX_HUB_NPCS 1
+
+#endif /* CONFIG_H */
+"""
+
+DIALOG_NPCS = {
+    "npcs": [
+        {
+            "id": 0,
+            "name": "TESTNPC",
+            "vendor_field": "ARMOR",
+            "nodes": [
+                {"idx": 0, "text": "Hello.", "choices": [], "next": ["END"]},
+            ],
+        },
+    ]
+}
+
+DIALOG_HUBS = {"hubs": [{"id": 0, "name": "TESTHUB", "npc_ids": [0]}]}
+
+
+def make_game_repo_with_dialog_assets(path: Path) -> Path:
+    """A game repo carrying `src/config.h` (MAX_NPCS matching the fixture's
+    single NPC) plus a minimal valid `assets/dialog/npcs.json` and
+    `hubs.json` pair, for windows that open the dialog editor.
+    """
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "src").mkdir(parents=True, exist_ok=True)
+    (path / "src" / "config.h").write_bytes(DIALOG_CONFIG_TEXT.encode("utf-8"))
+    (path / "assets" / "dialog").mkdir(parents=True, exist_ok=True)
+    write_json(path / "assets" / "dialog" / "npcs.json", DIALOG_NPCS)
+    write_json(path / "assets" / "dialog" / "hubs.json", DIALOG_HUBS)
+    _run_git(["init", "-b", "master"], path)
+    _run_git(["config", "user.email", "test@example.com"], path)
+    _run_git(["config", "user.name", "Test"], path)
+    _run_git(["add", "."], path)
+    _run_git(["commit", "-m", "init"], path)
+    _run_git(["remote", "add", "origin", GAME_REPO_REMOTE_URL], path)
+    return path
+
+
 def make_panel_binding(tmp_path: Path):
     """Build a real Binding over a throwaway game repo carrying
     PANEL_CONFIG_TEXT, plus the matching Schema. Never touches the
@@ -2829,8 +2882,8 @@ class TestWorktreesPanel(WorktreePanelFixture, unittest.TestCase):
         self.assertIn("active worktree", panel.status_text())
         self.assertTrue(active.path.is_dir())
 
-    def test_deleting_a_dirty_worktree_is_refused_with_its_reason(self):
-        # AC4, second half.
+    def test_deleting_a_dirty_worktree_without_force_is_refused_and_survives(self):
+        # AC4, second half: without force, today's safety holds.
         panel = self.panel()
         spike = self.spike(panel)
         (spike.path / "src" / "config.h").write_text(
@@ -2842,7 +2895,19 @@ class TestWorktreesPanel(WorktreePanelFixture, unittest.TestCase):
         self.assertIn("uncommitted work", refusal)
         self.assertTrue(spike.path.is_dir())
 
-    def test_the_delete_button_is_disabled_before_it_is_pressed(self):
+    def test_deleting_a_dirty_worktree_with_force_removes_it(self):
+        panel = self.panel()
+        spike = self.spike(panel)
+        (spike.path / "src" / "config.h").write_text(
+            "#define A 1\n", encoding="utf-8"
+        )
+
+        refusal = panel.delete_worktree(spike, spike.path.name, force=True)
+
+        self.assertIsNone(refusal)
+        self.assertFalse(spike.path.is_dir())
+
+    def test_the_delete_button_is_disabled_only_for_a_structural_refusal(self):
         # The refusal is computed while the row is built, so a button that
         # cannot act says so rather than failing on click.
         panel = self.panel()
@@ -2853,6 +2918,25 @@ class TestWorktreesPanel(WorktreePanelFixture, unittest.TestCase):
         self.assertEqual(len(buttons), 1)  # the active/main worktree only
         self.assertFalse(buttons[0].isEnabled())
         self.assertIn("active worktree", buttons[0].toolTip())
+
+    def test_the_delete_button_is_enabled_for_a_dirty_worktree(self):
+        # A dirty worktree is no longer a structural refusal -- it is
+        # deletable, and its tooltip warns what would be lost instead.
+        panel = self.panel()
+        spike = self.spike(panel)
+        (spike.path / "src" / "config.h").write_text(
+            "#define A 1\n", encoding="utf-8"
+        )
+        panel.refresh()
+
+        delete_buttons = [
+            b for b in panel.findChildren(QPushButton)
+            if b.objectName() == "worktrees-delete"
+        ]
+        spike_button = next(b for b in delete_buttons if b.isEnabled())
+
+        self.assertTrue(spike_button.isEnabled())
+        self.assertIn("uncommitted work", spike_button.toolTip())
 
     def test_the_name_must_be_typed_back(self):
         panel = self.panel()
@@ -3441,6 +3525,71 @@ class TestGarageWindowCommitIntegration(CommitPanelFixture, unittest.TestCase):
         # that reason.
         window.commit_panel.set_message("a message")
         self.assertNotIn("master", window.commit_panel.refusal() or "")
+
+
+class TestDialogEditorInTheWindow(unittest.TestCase):
+    """AC1/AC10 reachable by a user: the Dialog panel has a View action,
+    opens in a dialog of its own, and points at the active worktree.
+    """
+
+    def setUp(self):
+        theme.apply(_app)
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name).resolve()
+        self.garage_root = self.root / "nuke-raider-garage"
+        self.garage_root.mkdir()
+        self.repo = make_game_repo_with_dialog_assets(self.root / "nuke-raider")
+        self.window = GarageWindow(garage_root=self.garage_root)
+
+    def tearDown(self):
+        self.window.close()
+        self.window.deleteLater()
+        self._tmp.cleanup()
+
+    def test_the_view_menu_offers_the_dialog_editor(self):
+        self.assertIsNotNone(self.window.show_dialog_action)
+
+    def test_it_is_closed_at_launch(self):
+        self.assertFalse(self.window.dialog_dialog.isVisible())
+
+    def test_triggering_the_action_opens_it(self):
+        self.window.show_dialog_action.trigger()
+        self.assertTrue(self.window.dialog_dialog.isVisible())
+
+    def test_the_title_names_the_active_worktree(self):
+        self.assertIn(
+            self.window.binding.active_worktree.path.name,
+            self.window.dialog_dialog.windowTitle(),
+        )
+
+    def test_saving_in_the_dialog_editor_refreshes_the_header(self):
+        # Finding 7: DialogPanel.saved had no production consumer, so a
+        # dialog save dirtied the worktree without the header noticing --
+        # the same gap Task 5's tuner write and Task 6's commit both
+        # closed for their own signals.
+        self.window.show_dialog_action.trigger()
+        panel = self.window.dialog_panel
+        card = panel.node_cards()[0]
+        card.text_field.setText("A fresh line from the window.")
+
+        self.assertTrue(panel.save())
+        panel.stop_and_wait()
+
+        self.assertIn("●", self.window.header_label.text())
+
+    def test_saving_in_the_dialog_editor_refreshes_an_open_diff(self):
+        self.window.show_dialog_action.trigger()
+        self.window.open_diff()
+        self.assertIn("clean", self.window.diff_panel.status_text().lower())
+
+        panel = self.window.dialog_panel
+        card = panel.node_cards()[0]
+        card.text_field.setText("Another fresh line.")
+        self.assertTrue(panel.save())
+        panel.stop_and_wait()
+
+        self.assertIn(
+            "assets/dialog/npcs.json", self.window.diff_panel.file_paths())
 
 
 if __name__ == "__main__":
