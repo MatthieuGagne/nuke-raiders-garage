@@ -56,12 +56,15 @@ from tools.garage.core.project import Binding, BindingError, Worktree, _same_pat
 
 # How long to wait for the filing thread to end (milliseconds).
 #
-# At window close the call in flight is bounded by
-# `workitem.COMMAND_TIMEOUT_S`, so thirty seconds is more than the whole
-# remaining sequence can need. After a normal completion the worker has
-# already returned and only the thread's event loop has to unwind, which
-# is immediate — the shorter wait is there so a mistake cannot stall the
-# window, not because the join is expected to take any time at all.
+# This is not long enough to cover the worst case, and it is not meant to
+# be: the sequence makes up to five `gh` calls, each bounded by
+# `workitem.COMMAND_TIMEOUT_S` (20 s), so a filing stalled on a dropped
+# VPN can need a hundred seconds and this join really can expire with the
+# worker still inside call two. `_release_thread`'s abandon path is the
+# guarantee for that case, not a fallback — thirty seconds is simply how
+# long the window is willing to hang before handing the thread over to it.
+# After a normal completion the worker has already returned and only the
+# thread's event loop has to unwind, which is immediate.
 STOP_TIMEOUT_MS = 30000
 DONE_TIMEOUT_MS = 5000
 
@@ -76,7 +79,24 @@ class _FileWorker(QObject):
         self._call = call
 
     def run(self) -> None:
-        self.done.emit(self._call())
+        """Always emits, whatever the call does.
+
+        `workitem.file_work_item` is written not to raise, but this slot is
+        invoked from C++ on a worker thread: an exception escaping it does
+        not become a traceback the user can read, it becomes a `done` that
+        never fires — the button stays disabled and the label stays
+        "Filing…" until Garage is restarted, and on PySide6 the escape may
+        abort the process outright. So anything that gets out is turned
+        into the failure object the panel already knows how to display.
+        """
+        try:
+            outcome = self._call()
+        except Exception as exc:  # noqa: BLE001 — nothing may cross this boundary
+            outcome = workitem.WorkItemFailure(
+                step="file the work item",
+                message=f"Garage hit an unexpected error: {exc!r}",
+            )
+        self.done.emit(outcome)
 
 
 class WorktreesPanel(QWidget):
@@ -320,6 +340,15 @@ class WorktreesPanel(QWidget):
         self.finish_button.clicked.connect(self._on_finish_clicked)
         self.finish_button.setVisible(False)
         buttons.addWidget(self.finish_button)
+
+        # The way out of the guard below: a user who would rather fix the
+        # board on GitHub than retry here has to be able to say so, or the
+        # panel files nothing more for the rest of the session.
+        self.dismiss_button = QPushButton("Leave it and file another")
+        self.dismiss_button.setObjectName("worktrees-dismiss-partial")
+        self.dismiss_button.clicked.connect(self._on_dismiss_clicked)
+        self.dismiss_button.setVisible(False)
+        buttons.addWidget(self.dismiss_button)
         layout.addLayout(buttons)
 
         self.work_item_result = QLabel("")
@@ -344,9 +373,23 @@ class WorktreesPanel(QWidget):
         return self.work_item_section.isVisible()
 
     def file_work_item(self) -> Optional[str]:
-        """Start the filing. Returns a refusal, or None once it is running."""
-        if self.is_filing():
-            return self._set_work_item_result("A work item is already being filed.")
+        """Start the filing. Returns a refusal, or None once it is running.
+
+        A partial result blocks this outright (R8). The natural gesture
+        after a failure is to press the same button again — but the last
+        filing left a real issue on the board with `Type` or `Status`
+        unset, and filing a second one would overwrite `self._last_item`,
+        leaving the first unreachable from Garage with nothing further
+        said. That is exactly the state R8 forbids, reached through the UI
+        rather than the core. Finish it, or dismiss it deliberately.
+        """
+        partial = self._last_item
+        if partial is not None:
+            return self._set_work_item_result(
+                f"Issue #{partial.number} is still on the board without its "
+                f"Type or Status. Finish its board entry, or choose to leave "
+                f"it, before filing another work item."
+            )
         if shutil.which("gh") is None:
             return self._set_work_item_result(
                 "`gh` is not on PATH, so Garage cannot file a work item. "
@@ -379,7 +422,33 @@ class WorktreesPanel(QWidget):
 
         return self._start(call)
 
+    def dismiss_partial_work_item(self) -> Optional[str]:
+        """Stop tracking a partial filing, on purpose.
+
+        The issue is not touched — Garage does not close or edit issues
+        (R9). This only says the user has taken responsibility for the
+        board entry, which is what releases the guard in `file_work_item`.
+        """
+        partial = self._last_item
+        if partial is None:
+            return self._set_work_item_result("There is no partial work item to leave.")
+        self._last_item = None
+        self.finish_button.setVisible(False)
+        self.dismiss_button.setVisible(False)
+        return self._set_work_item_result(
+            f"Issue #{partial.number} ({partial.url}) is left as it is — finish "
+            f"its board entry on GitHub. Garage will file another work item now.",
+            failed=False,
+        )
+
     def _start(self, call) -> Optional[str]:
+        # Both entry points inherit this. Through the GUI a second start is
+        # unreachable (the buttons are disabled), but `_start` overwrites
+        # `self._thread` unconditionally, and dropping the only reference
+        # to a live QThread that is still a Qt child is #8: a qFatal, an
+        # abort(), and a Windows fail-fast with no traceback.
+        if self.is_filing():
+            return self._set_work_item_result("A work item is already being filed.")
         self.file_button.setEnabled(False)
         self.finish_button.setEnabled(False)
         self._set_work_item_result("Filing…", failed=False)
@@ -406,6 +475,7 @@ class WorktreesPanel(QWidget):
         if isinstance(outcome, workitem.WorkItem):
             self._last_item = outcome if not outcome.complete else None
             self.finish_button.setVisible(False)
+            self.dismiss_button.setVisible(False)
             line = workitem.closes_line(outcome.number)
             copied = self._copy(line)
             self._set_work_item_result(
@@ -423,7 +493,22 @@ class WorktreesPanel(QWidget):
             self._last_item = outcome.item
             self.finish_button.setVisible(outcome.item is not None)
             self.finish_button.setEnabled(True)
-            self._set_work_item_result(outcome.text, failed=True)
+            self.dismiss_button.setVisible(outcome.item is not None)
+            message = outcome.text
+            if outcome.item is not None:
+                # R6 is unconditional: the issue exists, so its `Closes #N`
+                # belongs on the clipboard whether or not the board entry
+                # was finished. A user who decides to repair the board on
+                # GitHub must not have to hand-type the one line the pull
+                # request workflow greps for.
+                line = workitem.closes_line(outcome.item.number)
+                copied = self._copy(line)
+                message += "\n" + (
+                    f"`{line}` is on the clipboard for the pull request body."
+                    if copied
+                    else f"Copy `{line}` into the pull request body."
+                )
+            self._set_work_item_result(message, failed=True)
 
     def _copy(self, text: str) -> bool:
         """Put `text` on the clipboard, and say whether it landed.
@@ -476,9 +561,13 @@ class WorktreesPanel(QWidget):
         `RunController._teardown` in `runner.py` solves it the same way.
 
         So a thread that outstays its wait is kept, alive and referenced,
-        until it says it has finished. `workitem.COMMAND_TIMEOUT_S` is
-        what makes that branch unreachable in practice; this is what makes
-        it survivable if it ever is reached.
+        until it says it has finished. That branch is reachable in real
+        use, not merely in a test: five `gh` calls at
+        `workitem.COMMAND_TIMEOUT_S` each is up to a hundred seconds
+        against a thirty-second join, so closing the window on a filing
+        stalled by a dropped network expires the wait. This is the
+        guarantee for that case; `COMMAND_TIMEOUT_S` only guarantees the
+        abandoned thread ends soon afterwards rather than never.
 
         The worker's signal is dropped first, so a late completion from an
         abandoned thread has nowhere to land rather than reaching widgets
@@ -537,6 +626,9 @@ class WorktreesPanel(QWidget):
 
     def _on_finish_clicked(self) -> None:
         self.finish_board_entry()
+
+    def _on_dismiss_clicked(self) -> None:
+        self.dismiss_partial_work_item()
 
     # -- UI plumbing -------------------------------------------------------
 

@@ -12,6 +12,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -487,12 +488,57 @@ class TestRunCapture(unittest.TestCase):
         self.assertIn("0.5 seconds", result.stderr)
         self.assertIn(result.stderr.strip(), result.message)
 
-    def test_the_default_timeout_is_well_inside_the_panels_join(self):
-        # The panel waits 30 s for its filing thread at window close; a
-        # per-call timeout at or above that would make the wait expire
-        # legitimately, which is the case the abandon path exists for.
-        self.assertLess(workitem.COMMAND_TIMEOUT_S, 30)
+    def test_the_default_timeout_ends_an_abandoned_call_rather_than_never(self):
+        # What this used to assert -- COMMAND_TIMEOUT_S < the panel's 30 s
+        # join -- was not a safety property, and it was not even true of
+        # the sequence: one filing makes up to five `gh` calls, so the
+        # worst case a stalled network can produce is five times this
+        # constant, a hundred seconds, and the join really can expire with
+        # the worker still inside it. The panel's abandon path is what
+        # makes that survivable, and it only works if the abandoned thread
+        # ends *at all*, and soon. That is what this constant guarantees,
+        # and it is the only thing it guarantees: finite, positive, and
+        # short enough that a held-alive thread is released in the same
+        # session rather than outliving the window indefinitely.
         self.assertGreater(workitem.COMMAND_TIMEOUT_S, 0)
+        self.assertLess(workitem.COMMAND_TIMEOUT_S, 120)
+
+
+class TestGitReadsNeverRaise(unittest.TestCase):
+    """`_git` backs `branch_commits`, which the panel calls from its own
+    constructor, on the UI thread. A `git` that cannot run or will not
+    finish has to come back as the non-zero result its callers already
+    read as "cannot be read" -- an exception there is a window that never
+    draws, and a hang there is the same with no traceback.
+    """
+
+    def test_a_git_that_cannot_be_started_is_a_result_not_an_exception(self):
+        with mock.patch.object(
+            workitem.subprocess, "run", side_effect=OSError("no git here")
+        ):
+            result = workitem._git(["rev-parse", "HEAD"], Path("."))
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.returncode, workitem.EXIT_NOT_STARTED)
+
+    def test_a_git_that_outlasts_its_timeout_is_a_result_not_an_exception(self):
+        # The production value is injected, not waited out: ten real
+        # seconds in a suite that runs on every change is not a test, it
+        # is a tax. A millisecond cannot outlast even process creation, so
+        # the timeout expires on the first read whatever the machine.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = tmp_root(tmp)
+            repo = make_game_repo(root / "game")
+
+            with mock.patch.object(workitem, "GIT_TIMEOUT_S", 0.001):
+                result = workitem._git(["log", "--format=%h %s"], repo)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.returncode, workitem.EXIT_NOT_STARTED)
+
+    def test_the_git_timeout_is_finite_and_positive(self):
+        self.assertGreater(workitem.GIT_TIMEOUT_S, 0)
+        self.assertLess(workitem.GIT_TIMEOUT_S, 120)
 
 
 ISSUE_URL = "https://github.com/MatthieuGagne/gmb-nuke-raider/issues/614"

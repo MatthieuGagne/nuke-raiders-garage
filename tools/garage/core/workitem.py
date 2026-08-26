@@ -89,10 +89,26 @@ def changed_defines(binding: Binding) -> List[ChangedDefine]:
     return changes
 
 
+# How long one `git` read may take. `branch_commits` runs from the panel's
+# constructor, on the UI thread — a `git` that hangs (a repository on a
+# disconnected share, a stale `index.lock`) would freeze the window before
+# it is drawn, with nothing to cancel. Ten seconds is far more than a
+# `rev-parse` or a twenty-line `log` needs locally.
+GIT_TIMEOUT_S = 10.0
+
+
 def _git(args: List[str], cwd: Path) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        ["git", "-C", str(cwd)] + args, capture_output=True, text=True
-    )
+    """A `git` read, bounded. Never raises: a failure to run and a failure
+    to finish are both reported as the non-zero result the callers already
+    treat as "cannot be read".
+    """
+    argv = ["git", "-C", str(cwd)] + args
+    try:
+        return subprocess.run(
+            argv, capture_output=True, text=True, timeout=GIT_TIMEOUT_S
+        )
+    except (OSError, subprocess.SubprocessError):
+        return subprocess.CompletedProcess(argv, EXIT_NOT_STARTED, "", "")
 
 
 def branch_commits(worktree: Path, count: int = 20) -> List[str]:
@@ -273,8 +289,17 @@ EXIT_TIMED_OUT = 124
 # panel's 30-second join at window close expires with a live QThread
 # still parented to a widget Qt is about to destroy — which is a Windows
 # fail-fast, not an error (nuke-raiders-garage#8). Twenty seconds leaves
-# generous headroom for a slow link while staying comfortably inside that
-# join, so the wait can never legitimately be exceeded.
+# generous headroom for a slow link.
+#
+# It does *not* keep the panel's join from expiring. The sequence makes up
+# to five `gh` calls — `field-list`, `issue create`, `item-add`, and
+# `item-edit` twice — so the worst case a stalled network can produce is
+# 5 × COMMAND_TIMEOUT_S, a hundred seconds, against a thirty-second join.
+# Closing the window while a filing is stalled on a dropped VPN really can
+# leave the worker on call two of five when the wait runs out. What makes
+# that survivable is the panel's abandon guard, which holds the thread
+# alive and referenced until it finishes; this constant is what guarantees
+# it finishes at all, and reasonably soon after.
 COMMAND_TIMEOUT_S = 20.0
 
 
@@ -490,6 +515,10 @@ def file_work_item(
     """
     changes = list(changes or [])
     commits = list(commits or [])
+    # Bound up front so the create block below never reads a name that
+    # only the create path assigns. The resume path leaves it empty and
+    # never uses it — see the note under the branch.
+    full_title = ""
 
     if existing is None:
         refusal = refuse_reason(binding, changes, commits)

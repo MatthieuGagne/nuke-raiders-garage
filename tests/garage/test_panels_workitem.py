@@ -98,6 +98,69 @@ def stalling_runner(delay_s=2.0):
     return run
 
 
+def partial_runner():
+    """A runner that files the issue, puts it on the board, and then has
+    GitHub refuse the first `item-edit`.
+
+    That is exactly the partial state R8 is written about: a real issue
+    exists, on the board, with `Type` and `Status` unset. Every test that
+    needs one drives the panel through this rather than reaching into
+    `_last_item`, because the guard being tested is the panel's own.
+    """
+    scripted = scripted_runner()
+
+    def run(argv, cwd=None):
+        argv = list(argv)
+        if "item-edit" in argv:
+            scripted.calls.append(argv)
+            return workitem.CommandResult(
+                tuple(argv), 1, "", "gh: could not resolve field (HTTP 422)"
+            )
+        return scripted(argv, cwd)
+
+    run.calls = scripted.calls
+    return run
+
+
+def stalling_resume_runner(delay_s=2.0):
+    """`partial_runner`, plus a resume that stalls.
+
+    The resume path's first call is `gh project item-list`, so sleeping
+    there holds a `finish_board_entry` in flight for as long as a test
+    needs to try a second one. `entered` is set the instant the worker is
+    inside it, so the test never races the thread's start.
+    """
+    base = partial_runner()
+    entered = threading.Event()
+
+    def run(argv, cwd=None):
+        if "item-list" in list(argv):
+            entered.set()
+            time.sleep(delay_s)
+        return base(argv, cwd)
+
+    run.calls = base.calls
+    run.entered = entered
+    return run
+
+
+def exploding_runner(message="the runner blew up"):
+    """A runner that raises rather than answering.
+
+    Nothing in `workitem` is written to raise, which is precisely why this
+    is worth a test: the guarantee that the panel recovers cannot come
+    from the code that is supposed never to need it.
+    """
+    calls = []
+
+    def run(argv, cwd=None):
+        calls.append(list(argv))
+        raise RuntimeError(message)
+
+    run.calls = calls
+    return run
+
+
 def _run_git(args, cwd):
     return subprocess.run(
         ["git"] + args, cwd=str(cwd), check=True, capture_output=True, text=True
@@ -267,6 +330,138 @@ class TestFailureIsShown(WorkItemPanelTestCase):
         self.assertIsNone(self.panel.last_work_item())
 
 
+class TestAnUnexpectedErrorIsStillReported(WorkItemPanelTestCase):
+    """R8: a failure is reported, whatever kind of failure it is.
+
+    `_FileWorker.run` is invoked from C++ on a worker thread, so an
+    exception escaping it does not surface as a traceback anybody reads --
+    it surfaces as a `done` signal that never fires, which leaves the
+    button disabled and the label saying "Filing…" until Garage is
+    restarted. Silence is the one outcome R8 forbids.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.rebuild_panel(exploding_runner("gh vanished mid-call"))
+
+    def test_the_panel_stops_filing_rather_than_hanging(self):
+        self.file_and_wait()
+
+        self.assertFalse(self.panel.is_filing())
+
+    def test_the_button_comes_back(self):
+        self.file_and_wait()
+
+        self.assertTrue(self.panel.file_button.isEnabled())
+
+    def test_the_error_is_shown_instead_of_filing(self):
+        self.file_and_wait()
+
+        text = self.panel.work_item_result_text()
+        self.assertNotIn("Filing…", text)
+        self.assertIn("gh vanished mid-call", text)
+
+    def test_no_issue_number_is_claimed(self):
+        self.file_and_wait()
+
+        self.assertIsNone(self.panel.last_work_item())
+
+
+class TestPartialFilingBlocksTheNextOne(WorkItemPanelTestCase):
+    """R8: an issue is never left on the board with `Type` or `Status`
+    unset without the user being told.
+
+    Pressing the same button again is the natural gesture after a failure,
+    and it is the one that would break this: a second filing overwrites
+    the panel's handle on the first, so the issue already on the board
+    becomes unreachable from Garage with nothing further said.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.rebuild_panel(partial_runner())
+        self.file_and_wait()
+        self.assertIsNotNone(self.panel.last_work_item(), "no partial to guard")
+
+    def creates(self):
+        return [c for c in self.runner.calls if "create" in c]
+
+    def test_filing_again_is_refused(self):
+        refusal = self.start_filing()
+
+        self.assertIsNotNone(refusal)
+        self.assertFalse(self.panel.is_filing())
+
+    def test_the_refusal_names_the_issue_still_on_the_board(self):
+        refusal = self.start_filing()
+
+        self.assertIn("614", refusal)
+        self.assertIn("614", self.panel.work_item_result_text())
+
+    def test_no_second_issue_is_created(self):
+        self.start_filing()
+
+        self.assertEqual(len(self.creates()), 1)
+
+    def test_the_finish_button_and_the_way_out_are_both_offered(self):
+        # Shown for the reason `TestVisibility` gives: `isVisible()` is
+        # False for every child of a widget that was never shown, so on a
+        # hidden panel this would fail whatever the buttons were told.
+        self.panel.show()
+        self.addCleanup(self.panel.hide)
+
+        self.assertTrue(self.panel.finish_button.isVisible())
+        self.assertTrue(self.panel.dismiss_button.isVisible())
+
+    def test_dismissing_touches_no_issue(self):
+        before = len(self.runner.calls)
+
+        self.panel.dismiss_partial_work_item()
+
+        # R9: Garage does not close or edit issues. Leaving one alone has
+        # to mean leaving it alone -- no `gh` call at all.
+        self.assertEqual(len(self.runner.calls), before)
+        self.assertIsNone(self.panel.last_work_item())
+
+    def test_dismissing_releases_the_guard(self):
+        self.panel.dismiss_partial_work_item()
+
+        self.assertIsNone(self.start_filing())
+        self.wait()
+        self.assertEqual(len(self.creates()), 2)
+
+
+class TestFinishingIsGuardedWhileFiling(WorkItemPanelTestCase):
+    """#8, through the entry point that had no guard of its own.
+
+    `_start` overwrites the panel's only reference to the running QThread,
+    and dropping that reference while the thread is a live Qt child is a
+    qFatal and a Windows fail-fast. `file_work_item` has always refused a
+    second start; `finish_board_entry` reaches the same `_start` and is
+    the door that was left open.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.rebuild_panel(stalling_resume_runner())
+        self.file_and_wait()
+        self.assertIsNotNone(self.panel.last_work_item(), "no partial to resume")
+
+    def test_a_second_finish_while_one_is_in_flight_is_refused(self):
+        self.assertIsNone(self.panel.finish_board_entry())
+        waited = 0
+        while waited < 10000 and not self.runner.entered.is_set():
+            QTest.qWait(20)
+            waited += 20
+        self.assertTrue(self.runner.entered.is_set(), "the resume never started")
+
+        refusal = self.panel.finish_board_entry()
+
+        self.assertIsNotNone(refusal)
+        self.assertIn("already being filed", refusal)
+        self.wait()
+
+
 class TestTheFilingThreadIsReleased(WorkItemPanelTestCase):
     """Signature B of #8, on this panel: `stop_and_wait` is safe in every
     order it can be reached, and nothing is left abandoned when the join
@@ -299,8 +494,13 @@ class TestTheFilingThreadIsReleased(WorkItemPanelTestCase):
         is a qFatal, qFatal calls abort(), and on Windows abort() is a
         fail-fast -- the process goes with 0xC0000409, no message and no
         traceback. The join is shortened here so the worker reliably
-        outlives it; `workitem.COMMAND_TIMEOUT_S` is what keeps this
-        branch unreachable in real use.
+        outlives it, but the branch is reachable without any such help:
+        one filing makes up to five `gh` calls at
+        `workitem.COMMAND_TIMEOUT_S` each, a hundred seconds against a
+        thirty-second join, so closing the window on a filing stalled by a
+        dropped network expires the wait in real use. That constant only
+        guarantees the abandoned thread ends soon afterwards rather than
+        never.
         """
         panel = self.rebuild_panel(stalling_runner())
         self.dirty()
