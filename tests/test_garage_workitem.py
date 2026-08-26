@@ -472,6 +472,28 @@ class TestRunCapture(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertNotEqual(result.exit_code, 0)
 
+    def test_a_command_that_hangs_is_stopped_and_reported_as_a_result(self):
+        # A stalled `gh` -- a dropped VPN, a DNS hang, a prompt with no
+        # TTY -- used to mean a worker thread that never finished, which
+        # is what left a live QThread for Qt to destroy at window close
+        # (#8). The timeout is passed explicitly so the suite does not
+        # wait out the production value.
+        result = workitem.run_capture(
+            [sys.executable, "-c", "import time; time.sleep(30)"], timeout=0.5
+        )
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.exit_code, workitem.EXIT_TIMED_OUT)
+        self.assertIn("0.5 seconds", result.stderr)
+        self.assertIn(result.stderr.strip(), result.message)
+
+    def test_the_default_timeout_is_well_inside_the_panels_join(self):
+        # The panel waits 30 s for its filing thread at window close; a
+        # per-call timeout at or above that would make the wait expire
+        # legitimately, which is the case the abandon path exists for.
+        self.assertLess(workitem.COMMAND_TIMEOUT_S, 30)
+        self.assertGreater(workitem.COMMAND_TIMEOUT_S, 0)
+
 
 ISSUE_URL = "https://github.com/MatthieuGagne/gmb-nuke-raider/issues/614"
 ITEM_ADD_JSON = json.dumps({"id": "PVTI_item614", "title": "chore: tune speed"})

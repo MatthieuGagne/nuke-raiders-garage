@@ -258,14 +258,42 @@ class CommandResult:
 Runner = Callable[..., CommandResult]
 
 EXIT_NOT_STARTED = 127
+# Same shape as EXIT_NOT_STARTED: a synthetic code for something that
+# never produced one of its own. 124 is what `timeout(1)` reports, so it
+# reads as "timed out" to anyone who has met the convention.
+EXIT_TIMED_OUT = 124
+
+# How long one `gh` call may take before it is killed (seconds).
+#
+# This is the guard that keeps a filing bounded. A GitHub API round trip
+# is normally well under a second; the failure this protects against is
+# not a slow one, it is a stalled one — a dropped VPN, a DNS hang, or a
+# `gh` that decided to prompt with no TTY to prompt on. Without a timeout
+# such a call never returns, the worker thread never finishes, and the
+# panel's 30-second join at window close expires with a live QThread
+# still parented to a widget Qt is about to destroy — which is a Windows
+# fail-fast, not an error (nuke-raiders-garage#8). Twenty seconds leaves
+# generous headroom for a slow link while staying comfortably inside that
+# join, so the wait can never legitimately be exceeded.
+COMMAND_TIMEOUT_S = 20.0
 
 
-def run_capture(argv: Sequence[str], cwd: Optional[Path] = None) -> CommandResult:
+def run_capture(
+    argv: Sequence[str],
+    cwd: Optional[Path] = None,
+    *,
+    timeout: Optional[float] = COMMAND_TIMEOUT_S,
+) -> CommandResult:
     """Run `argv` and capture everything, without a shell.
 
     Never raises. A `gh` call happens behind a button, on a worker thread,
     and an exception crossing that boundary is a crash rather than a
-    message in the window (R8).
+    message in the window (R8). A command that outstays `timeout` is
+    killed and reported the same way a command that never started is: as
+    a `CommandResult` the caller shows the user.
+
+    `timeout` is a parameter rather than a bare constant so a test can
+    force the branch in a fraction of a second.
     """
     try:
         completed = subprocess.run(
@@ -273,6 +301,17 @@ def run_capture(argv: Sequence[str], cwd: Optional[Path] = None) -> CommandResul
             cwd=str(cwd) if cwd else None,
             capture_output=True,
             text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return CommandResult(
+            argv=tuple(argv),
+            exit_code=EXIT_TIMED_OUT,
+            stdout="",
+            stderr=(
+                f"`{' '.join(argv)}` did not answer within {timeout:g} seconds "
+                f"and was stopped. Check your network and that `gh` is signed in."
+            ),
         )
     except OSError as exc:
         return CommandResult(

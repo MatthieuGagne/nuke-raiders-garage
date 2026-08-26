@@ -54,6 +54,18 @@ from tools.garage.core import worktrees as worktrees_core
 from tools.garage.core.project import Binding, BindingError, Worktree, _same_path
 
 
+# How long to wait for the filing thread to end (milliseconds).
+#
+# At window close the call in flight is bounded by
+# `workitem.COMMAND_TIMEOUT_S`, so thirty seconds is more than the whole
+# remaining sequence can need. After a normal completion the worker has
+# already returned and only the thread's event loop has to unwind, which
+# is immediate — the shorter wait is there so a mistake cannot stall the
+# window, not because the join is expected to take any time at all.
+STOP_TIMEOUT_MS = 30000
+DONE_TIMEOUT_MS = 5000
+
+
 class _FileWorker(QObject):
     """Runs the `gh` sequence off the UI thread. One shot, then finished."""
 
@@ -91,6 +103,9 @@ class WorktreesPanel(QWidget):
         self._runner = runner or workitem.run_capture
         self._thread: Optional[QThread] = None
         self._worker: Optional[_FileWorker] = None
+        # Filing threads that outlived their join, held so Qt cannot
+        # destroy one while it is still running — see `_release_thread`.
+        self._abandoned: List[tuple] = []
         self._last_item = None
         self._copied: Optional[str] = None
         self._changes: List[workitem.ChangedDefine] = []
@@ -382,6 +397,11 @@ class WorktreesPanel(QWidget):
         return self._thread is not None and self._thread.isRunning()
 
     def _on_filed(self, outcome) -> None:
+        # The run is over, so its thread and worker are released here as
+        # well as at window close. Without this the panel would keep a
+        # finished QThread as a Qt child for every filing made in one
+        # session, and `is_filing()` would answer from a stale handle.
+        self._release_thread(DONE_TIMEOUT_MS)
         self.file_button.setEnabled(True)
         if isinstance(outcome, workitem.WorkItem):
             self._last_item = outcome if not outcome.complete else None
@@ -441,11 +461,76 @@ class WorktreesPanel(QWidget):
         network calls, not a build — waiting is the honest option, and
         cancelling midway is what R8 forbids.
         """
-        if self._thread is None:
+        self._release_thread(STOP_TIMEOUT_MS)
+
+    def _release_thread(self, timeout_ms: int) -> None:
+        """End the filing thread and forget it — unless it will not end.
+
+        `wait()` answers False when the thread is still running after the
+        timeout, and that answer is the whole point. Dropping the panel's
+        only reference then would leave a running QThread parented to a
+        widget Qt is about to destroy, and Qt does not report that as an
+        error: it is a qFatal, and qFatal calls abort(), which on Windows
+        is a fail-fast — the process disappears with 0xC0000409, no
+        message and no traceback. That is nuke-raiders-garage#8, and
+        `RunController._teardown` in `runner.py` solves it the same way.
+
+        So a thread that outstays its wait is kept, alive and referenced,
+        until it says it has finished. `workitem.COMMAND_TIMEOUT_S` is
+        what makes that branch unreachable in practice; this is what makes
+        it survivable if it ever is reached.
+
+        The worker's signal is dropped first, so a late completion from an
+        abandoned thread has nowhere to land rather than reaching widgets
+        on their way out. Qt allows disconnecting during an emission,
+        which is exactly the normal-completion case.
+        """
+        thread, worker = self._thread, self._worker
+        self._thread, self._worker = None, None
+        if worker is not None:
+            try:
+                worker.done.disconnect()
+            except (RuntimeError, TypeError):
+                pass
+        if thread is None:
+            if worker is not None:
+                worker.deleteLater()
             return
-        self._thread.quit()
-        self._thread.wait(30000)
-        self._thread = None
+
+        thread.quit()
+        if thread.wait(timeout_ms):
+            if worker is not None:
+                worker.deleteLater()
+            thread.deleteLater()
+            return
+
+        self._abandoned.append((thread, worker))
+        thread.finished.connect(self._release_finished_threads)
+
+    def _release_finished_threads(self) -> None:
+        """Delete the threads that outlived their wait, now they are done.
+
+        Connected to `finished` on a QObject living on the UI thread, so
+        Qt queues it there rather than running it on the thread that is
+        ending — and it re-checks `isRunning` rather than trusting which
+        signal woke it.
+        """
+        still_running = []
+        for thread, worker in self._abandoned:
+            if thread.isRunning():
+                still_running.append((thread, worker))
+                continue
+            if worker is not None:
+                worker.deleteLater()
+            thread.deleteLater()
+        self._abandoned = still_running
+
+    def abandoned_thread_count(self) -> int:
+        """How many filing threads outlived their wait and are still
+        running. Zero in every ordinary case; a test asserts the panel is
+        not destroying them.
+        """
+        return len(self._abandoned)
 
     def _on_file_clicked(self) -> None:
         self.file_work_item()
