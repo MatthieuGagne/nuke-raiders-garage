@@ -52,7 +52,7 @@ class ChangedDefine:
 def changed_defines(binding: Binding) -> List[ChangedDefine]:
     """Every `#define` that differs between the worktree and HEAD, by name.
 
-    Two `git`-backed reads, once each: `config_io.read_value_at_head` warns
+    Two `git`-backed reads, once each: `config_io.read_config_at_head` warns
     in its own docstring against being called per row, because it re-runs
     `git show` every time.
 

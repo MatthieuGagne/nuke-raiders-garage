@@ -2278,6 +2278,21 @@ class TestCheckGh(unittest.TestCase):
         self.assertNotIn("not found on PATH", result.detail)
         self.assertIn("gh auth login", result.detail)
 
+    def test_a_failed_auth_probe_does_not_claim_to_know_it_is_the_login(self):
+        # `probe_exit` reports a timeout and an OSError with the same
+        # non-zero code a refusal gets, so an offline machine is
+        # indistinguishable from a signed-out one here. Sending that user
+        # to `gh auth login` alone points them at a command that will fail
+        # for the same reason.
+        result = doctor.check_gh(
+            which=lambda name: "C:/tools/gh.exe",
+            probe=lambda command: "2.96.0",
+            exit_probe=lambda command: doctor.EXIT_PROBE_FAILED,
+        )
+
+        self.assertEqual(result.status, doctor.FAIL)
+        self.assertIn("offline", result.detail)
+
     def test_the_auth_probe_asks_gh_and_nothing_else(self):
         asked = []
 

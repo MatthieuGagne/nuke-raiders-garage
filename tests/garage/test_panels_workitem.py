@@ -279,6 +279,26 @@ class TestVisibility(WorkItemPanelTestCase):
 
         self.assertTrue(self.panel.work_item_visible())
 
+    def test_a_commit_of_its_own_reveals_it_with_no_changed_value(self):
+        """AC1's other half, which the fixture cannot reach on its own: it
+        builds a single-commit repository sitting on `master`, so every
+        other test here reveals the section through an uncommitted
+        `#define`. A worktree whose work is already committed has nothing
+        uncommitted left to find, and it is exactly the state a user is in
+        after their first commit -- the moment they most want the button.
+        """
+        _run_git(["checkout", "-b", "tune-speed"], self.repo)
+        (self.repo / "NOTES.md").write_text("bench notes\n", encoding="utf-8")
+        _run_git(["add", "NOTES.md"], self.repo)
+        _run_git(["commit", "-m", "note the bench run"], self.repo)
+
+        self.panel.refresh_work_item()
+
+        # Stated rather than assumed: the reveal below is the commit's
+        # doing, not a stray uncommitted edit left by another test.
+        self.assertEqual(workitem.changed_defines(self.binding), [])
+        self.assertTrue(self.panel.work_item_visible())
+
 
 class TestNoAutomaticFiling(WorkItemPanelTestCase):
     """AC2, AC3: creating a worktree and committing file nothing."""

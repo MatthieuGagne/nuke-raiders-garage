@@ -25,8 +25,10 @@ tells the user a string is missing from PATH; `prevents` tells them which
 part of their own loop just stopped working, which is the thing they
 actually need to decide whether to fix it now (AC14).
 
-The seams (`which`, `environ`, `probe_version`) exist so the whole module
-is testable on a machine that has none of these tools -- or all of them.
+The seams (`which`, `environ`, `probe_version`, and `probe_exit` behind
+`run_checks`'s `check_exit` -- the one that makes the `gh` authentication
+check testable without a signed-in `gh`) exist so the whole module is
+testable on a machine that has none of these tools -- or all of them.
 """
 from __future__ import annotations
 
@@ -524,6 +526,14 @@ def check_gh(
     are reported here rather than at the button, so a user learns about
     them before they have composed a work item they cannot file.
 
+    The second row does not claim more than it knows. `gh auth status`
+    reaches GitHub, and `probe_exit` collapses a timeout and an `OSError`
+    into the same non-zero code as a genuine refusal — so an offline
+    machine reads exactly like a signed-out one. Telling that user to run
+    `gh auth login` alone would send them to a command that fails for the
+    same reason, so the detail names both possibilities and leaves the
+    diagnosis to the person who can see their own network.
+
     Unlike every other row, this one can go stale under a running Garage --
     PATH cannot change beneath the process, but `gh auth login` in a
     terminal can. The doctor panel's refresh is what re-reads it.
@@ -547,12 +557,17 @@ def check_gh(
             key="gh",
             name="gh — files a work item for tuning work",
             status=FAIL,
-            detail=f"{path} is installed but not authenticated — run `gh auth login`",
+            detail=(
+                f"{path} is installed, but `gh auth status` did not answer "
+                f"successfully — either this machine is offline or `gh` is "
+                f"not signed in. Check the network first, then run "
+                f"`gh auth login`."
+            ),
             prevents=(
                 "Filing a work item from Garage. Every GitHub call it makes "
-                "would be refused."
+                "would be refused or never answered."
             ),
-            tag="not signed in",
+            tag="unavailable",
         )
     return CheckResult(
         key="gh",
