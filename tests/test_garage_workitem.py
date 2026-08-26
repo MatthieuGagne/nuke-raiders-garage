@@ -301,3 +301,154 @@ class TestClosesLine(unittest.TestCase):
 
     def test_the_line_is_the_form_the_workflow_matches(self):
         self.assertEqual(workitem.closes_line(614), "Closes #614")
+
+
+# The shape `gh project field-list 3 --owner MatthieuGagne --format json`
+# returns, trimmed to the two single-select fields this spec sets. Recorded
+# from gh 2.96.0 on 2026-08-25. The ids below are deliberately not the real
+# ones: nothing may pass by matching a literal a future edit will change.
+FIELD_LIST_JSON = json.dumps(
+    {
+        "fields": [
+            {"id": "PVTF_title", "name": "Title", "type": "ProjectV2Field"},
+            {
+                "id": "PVTSSF_status",
+                "name": "Status",
+                "type": "ProjectV2SingleSelectField",
+                "options": [
+                    {"id": "opt_todo", "name": "Todo"},
+                    {"id": "opt_wip", "name": "In Progress"},
+                    {"id": "opt_done", "name": "Done"},
+                ],
+            },
+            {
+                "id": "PVTSSF_type",
+                "name": "Type",
+                "type": "ProjectV2SingleSelectField",
+                "options": [
+                    {"id": "opt_epic", "name": "Epic"},
+                    {"id": "opt_prd", "name": "PRD"},
+                    {"id": "opt_chore", "name": "Chore"},
+                ],
+            },
+        ],
+        "totalCount": 3,
+    }
+)
+
+
+class TestRepoSlug(unittest.TestCase):
+    """The issue is filed in the game repository, resolved from its remote."""
+
+    def test_an_https_remote_yields_owner_and_name(self):
+        self.assertEqual(
+            workitem.repo_slug("https://github.com/MatthieuGagne/gmb-nuke-raider.git"),
+            "MatthieuGagne/gmb-nuke-raider",
+        )
+
+    def test_a_remote_without_the_git_suffix_still_yields_the_slug(self):
+        self.assertEqual(
+            workitem.repo_slug("https://github.com/MatthieuGagne/gmb-nuke-raider"),
+            "MatthieuGagne/gmb-nuke-raider",
+        )
+
+    def test_an_ssh_remote_yields_the_same_slug(self):
+        self.assertEqual(
+            workitem.repo_slug("git@github.com:MatthieuGagne/gmb-nuke-raider.git"),
+            "MatthieuGagne/gmb-nuke-raider",
+        )
+
+    def test_something_that_is_not_a_github_remote_yields_nothing(self):
+        self.assertIsNone(workitem.repo_slug("https://example.com/whatever"))
+
+    def test_no_remote_yields_nothing(self):
+        self.assertIsNone(workitem.repo_slug(None))
+
+
+class TestResolveOption(unittest.TestCase):
+    """R5: field ids and option ids are resolved by name, never recorded."""
+
+    def setUp(self):
+        self.fields = json.loads(FIELD_LIST_JSON)["fields"]
+
+    def test_type_chore_resolves_to_its_field_and_option(self):
+        field_id, option_id = workitem.resolve_option(self.fields, "Type", "Chore")
+
+        self.assertEqual(field_id, "PVTSSF_type")
+        self.assertEqual(option_id, "opt_chore")
+
+    def test_status_todo_resolves_to_its_field_and_option(self):
+        field_id, option_id = workitem.resolve_option(self.fields, "Status", "Todo")
+
+        self.assertEqual(field_id, "PVTSSF_status")
+        self.assertEqual(option_id, "opt_todo")
+
+    def test_an_unknown_field_names_the_field_in_the_refusal(self):
+        with self.assertRaises(workitem.WorkItemError) as caught:
+            workitem.resolve_option(self.fields, "Priority", "High")
+
+        self.assertIn("Priority", str(caught.exception))
+
+    def test_an_unknown_option_names_both_the_field_and_the_option(self):
+        with self.assertRaises(workitem.WorkItemError) as caught:
+            workitem.resolve_option(self.fields, "Type", "Sonnet")
+
+        self.assertIn("Type", str(caught.exception))
+        self.assertIn("Sonnet", str(caught.exception))
+
+    def test_a_field_with_no_options_is_refused_rather_than_crashing(self):
+        with self.assertRaises(workitem.WorkItemError):
+            workitem.resolve_option(self.fields, "Title", "Anything")
+
+
+class TestIssueNumber(unittest.TestCase):
+    """`gh issue create` answers with a URL; AC7 shows a number."""
+
+    def test_the_number_is_read_off_the_url_gh_prints(self):
+        self.assertEqual(
+            workitem.issue_number(
+                "https://github.com/MatthieuGagne/gmb-nuke-raider/issues/614"
+            ),
+            614,
+        )
+
+    def test_trailing_whitespace_and_noise_do_not_defeat_it(self):
+        self.assertEqual(
+            workitem.issue_number(
+                "Creating issue\nhttps://github.com/MatthieuGagne/gmb-nuke-raider/issues/7\n"
+            ),
+            7,
+        )
+
+    def test_output_with_no_url_is_refused(self):
+        with self.assertRaises(workitem.WorkItemError):
+            workitem.issue_number("something went sideways")
+
+
+class TestRunCapture(unittest.TestCase):
+    """The seam itself: a real subprocess, since a mock would prove nothing
+    about the shape the rest of the module depends on.
+    """
+
+    def test_stdout_exit_code_and_argv_come_back(self):
+        result = workitem.run_capture([sys.executable, "-c", "print('hi')"])
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.exit_code, 0)
+        self.assertEqual(result.stdout.strip(), "hi")
+
+    def test_a_failing_command_is_not_ok_and_keeps_its_stderr(self):
+        result = workitem.run_capture(
+            [sys.executable, "-c", "import sys; sys.stderr.write('nope'); sys.exit(3)"]
+        )
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.exit_code, 3)
+        self.assertIn("nope", result.stderr)
+
+    def test_a_command_that_cannot_start_is_a_result_not_an_exception(self):
+        # A button press must not raise out of a worker thread.
+        result = workitem.run_capture(["no-such-tool-anywhere-at-all"])
+
+        self.assertFalse(result.ok)
+        self.assertNotEqual(result.exit_code, 0)

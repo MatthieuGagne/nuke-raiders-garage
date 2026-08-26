@@ -210,3 +210,129 @@ def compose_body(
     parts.append(where)
 
     return "\n\n".join(parts) + "\n"
+
+
+# The shared board, from the `file-an-issue` skill. These three are stable
+# literals; the field and option ids below them are not, and are resolved
+# by name every time (R5).
+PROJECT_NUMBER = "3"
+PROJECT_OWNER = "MatthieuGagne"
+PROJECT_ID = "PVT_kwHOAv4a5M4BepB5"
+
+TYPE_FIELD = "Type"
+TYPE_OPTION = "Chore"
+STATUS_FIELD = "Status"
+STATUS_OPTION = "Todo"
+
+_SLUG_RE = re.compile(r"github\.com[:/]+([^/]+)/([^/]+?)(?:\.git)?/?$")
+_ISSUE_URL_RE = re.compile(r"https://github\.com/[^/\s]+/[^/\s]+/issues/(\d+)")
+
+
+@dataclass(frozen=True)
+class CommandResult:
+    argv: Sequence[str]
+    exit_code: int
+    stdout: str
+    stderr: str
+
+    @property
+    def ok(self) -> bool:
+        return self.exit_code == 0
+
+    @property
+    def message(self) -> str:
+        """What the tool said, preferring stderr — which is where `gh` puts
+        the reason a call was refused (R8 shows this verbatim).
+        """
+        return (self.stderr.strip() or self.stdout.strip()) or (
+            f"`{' '.join(self.argv)}` failed with exit code {self.exit_code} "
+            f"and said nothing."
+        )
+
+
+Runner = Callable[..., CommandResult]
+
+EXIT_NOT_STARTED = 127
+
+
+def run_capture(argv: Sequence[str], cwd: Optional[Path] = None) -> CommandResult:
+    """Run `argv` and capture everything, without a shell.
+
+    Never raises. A `gh` call happens behind a button, on a worker thread,
+    and an exception crossing that boundary is a crash rather than a
+    message in the window (R8).
+    """
+    try:
+        completed = subprocess.run(
+            list(argv),
+            cwd=str(cwd) if cwd else None,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as exc:
+        return CommandResult(
+            argv=tuple(argv), exit_code=EXIT_NOT_STARTED, stdout="", stderr=str(exc)
+        )
+    return CommandResult(
+        argv=tuple(argv),
+        exit_code=completed.returncode,
+        stdout=completed.stdout or "",
+        stderr=completed.stderr or "",
+    )
+
+
+def repo_slug(remote_url: Optional[str]) -> Optional[str]:
+    """`owner/name` for a GitHub remote, or None when it is not one.
+
+    Derived rather than spelled out: the game repository's name appears
+    nowhere in Garage (R11), and a user working against a fork must not
+    have their work item filed against somebody else's repository.
+    """
+    if not remote_url:
+        return None
+    match = _SLUG_RE.search(remote_url.strip())
+    if not match:
+        return None
+    return f"{match.group(1)}/{match.group(2)}"
+
+
+def issue_number(create_output: str) -> int:
+    """The number in the issue URL `gh issue create` prints (AC7)."""
+    match = _ISSUE_URL_RE.search(create_output or "")
+    if not match:
+        raise WorkItemError(
+            "`gh issue create` did not print an issue URL, so Garage cannot "
+            "say which issue it filed. Check the repository on GitHub before "
+            "filing again — one may already exist."
+        )
+    return int(match.group(1))
+
+
+def resolve_option(fields, field_name: str, option_name: str):
+    """`(field_id, option_id)` for one single-select value, by name (R5).
+
+    Option ids are regenerated whenever the option set is edited, so
+    recording one would work until the day somebody renames a `Type` and
+    then silently write the wrong value. Both halves are looked up every
+    time, and a name that is gone is a refusal — never a guess.
+    """
+    for field in fields or ():
+        if field.get("name") != field_name:
+            continue
+        options = field.get("options") or []
+        if not options:
+            raise WorkItemError(
+                f"The board's `{field_name}` field carries no options, so "
+                f"`{option_name}` cannot be resolved."
+            )
+        for option in options:
+            if option.get("name") == option_name:
+                return field["id"], option["id"]
+        available = ", ".join(o.get("name", "?") for o in options)
+        raise WorkItemError(
+            f"The board's `{field_name}` field has no `{option_name}` "
+            f"option. It offers: {available}."
+        )
+    raise WorkItemError(
+        f"The board has no `{field_name}` field, so Garage cannot set it."
+    )
