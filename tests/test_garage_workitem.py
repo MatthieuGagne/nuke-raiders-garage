@@ -452,3 +452,259 @@ class TestRunCapture(unittest.TestCase):
 
         self.assertFalse(result.ok)
         self.assertNotEqual(result.exit_code, 0)
+
+
+ISSUE_URL = "https://github.com/MatthieuGagne/gmb-nuke-raider/issues/614"
+ITEM_ADD_JSON = json.dumps({"id": "PVTI_item614", "title": "chore: tune speed"})
+
+
+class FakeRunner:
+    """A `Runner` that answers from a script rather than from GitHub.
+
+    Keyed on the first two argv words (`gh issue`, `gh project`) plus the
+    subcommand, because that is the granularity the sequence branches on.
+    Records every call so a test can assert what was and was not run — R9
+    is a requirement about calls that must not happen.
+    """
+
+    def __init__(self, **overrides):
+        self.calls = []
+        self.responses = {
+            "field-list": CommandOK(FIELD_LIST_JSON),
+            "create": CommandOK(ISSUE_URL + "\n"),
+            "item-add": CommandOK(ITEM_ADD_JSON),
+            "item-edit": CommandOK(""),
+        }
+        self.responses.update(overrides)
+
+    def __call__(self, argv, cwd=None):
+        argv = list(argv)
+        self.calls.append(argv)
+        for key, response in self.responses.items():
+            if key in argv:
+                return workitem.CommandResult(
+                    argv=tuple(argv),
+                    exit_code=response.exit_code,
+                    stdout=response.stdout,
+                    stderr=response.stderr,
+                )
+        raise AssertionError(f"the fake runner has no answer for {argv}")
+
+    def ran(self, needle) -> bool:
+        return any(needle in call for call in self.calls)
+
+    def edited_fields(self):
+        """The (field-id, option-id) pairs the sequence actually set."""
+        pairs = []
+        for call in self.calls:
+            if "item-edit" not in call:
+                continue
+            pairs.append(
+                (
+                    call[call.index("--field-id") + 1],
+                    call[call.index("--single-select-option-id") + 1],
+                )
+            )
+        return pairs
+
+
+class CommandOK:
+    def __init__(self, stdout="", stderr="", exit_code=0):
+        self.stdout, self.stderr, self.exit_code = stdout, stderr, exit_code
+
+
+def CommandFail(stderr, exit_code=1):
+    return CommandOK(stdout="", stderr=stderr, exit_code=exit_code)
+
+
+class WorkItemSequenceTestCase(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = tmp_root(self._tmp.name)
+        self.repo = make_game_repo(self.root / "game")
+        self.binding = bind_over(self.root, self.repo)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def file_it(self, runner, **kwargs):
+        return workitem.file_work_item(
+            self.binding,
+            "tune speed",
+            "The car turns too late.",
+            changes=[workitem.ChangedDefine("PLAYER_SPEED", "4", "6")],
+            commits=[],
+            run=runner,
+            **kwargs,
+        )
+
+
+class TestHappyPath(WorkItemSequenceTestCase):
+    """AC6, AC7: the issue lands on the board, typed and statused."""
+
+    def test_the_issue_number_comes_back(self):
+        result = self.file_it(FakeRunner())
+
+        self.assertIsInstance(result, workitem.WorkItem)
+        self.assertEqual(result.number, 614)
+        self.assertTrue(result.complete)
+
+    def test_both_fields_are_set_from_the_resolved_ids(self):
+        runner = FakeRunner()
+
+        self.file_it(runner)
+
+        self.assertEqual(
+            sorted(runner.edited_fields()),
+            sorted([("PVTSSF_type", "opt_chore"), ("PVTSSF_status", "opt_todo")]),
+        )
+
+    def test_the_fields_are_resolved_before_anything_is_created(self):
+        # R8: a name that cannot be resolved must fail while nothing exists.
+        runner = FakeRunner()
+
+        self.file_it(runner)
+
+        first = runner.calls[0]
+        self.assertIn("field-list", first)
+
+    def test_the_title_is_prefixed_on_the_way_to_gh(self):
+        runner = FakeRunner()
+
+        self.file_it(runner)
+
+        create = next(c for c in runner.calls if "create" in c)
+        self.assertEqual(create[create.index("--title") + 1], "chore: tune speed")
+
+    def test_the_body_travels_as_a_file_that_does_not_outlive_the_call(self):
+        runner = FakeRunner()
+
+        self.file_it(runner)
+
+        create = next(c for c in runner.calls if "create" in c)
+        body_path = Path(create[create.index("--body-file") + 1])
+        self.assertFalse(body_path.exists(), "the body file was left behind")
+
+    def test_the_issue_is_filed_against_the_game_repository(self):
+        runner = FakeRunner()
+
+        self.file_it(runner)
+
+        create = next(c for c in runner.calls if "create" in c)
+        self.assertEqual(
+            create[create.index("--repo") + 1], "MatthieuGagne/gmb-nuke-raider"
+        )
+
+    def test_nothing_pushes_closes_or_opens_a_pull_request(self):
+        # R9/AC11, asserted rather than assumed.
+        runner = FakeRunner()
+
+        self.file_it(runner)
+
+        for banned in ("push", "close", "pr", "delete", "edit"):
+            self.assertFalse(
+                runner.ran(banned), f"the sequence ran a `{banned}` subcommand"
+            )
+
+
+class TestFailures(WorkItemSequenceTestCase):
+    """AC10: GitHub's own message, and never a half-typed board entry left
+    without anyone being told.
+    """
+
+    def test_an_unresolvable_option_fails_before_the_issue_is_created(self):
+        runner = FakeRunner(**{"field-list": CommandOK(json.dumps({"fields": []}))})
+
+        result = self.file_it(runner)
+
+        self.assertIsInstance(result, workitem.WorkItemFailure)
+        self.assertEqual(result.step, workitem.STEP_FIELDS)
+        self.assertIsNone(result.item)
+        self.assertFalse(runner.ran("create"))
+
+    def test_a_field_list_that_gh_refuses_reports_ghs_message(self):
+        runner = FakeRunner(
+            **{"field-list": CommandFail("gh: Your token has not been granted 'project'")}
+        )
+
+        result = self.file_it(runner)
+
+        self.assertIsInstance(result, workitem.WorkItemFailure)
+        self.assertIn("'project'", result.message)
+
+    def test_a_refused_create_leaves_no_issue_and_says_why(self):
+        runner = FakeRunner(**{"create": CommandFail("gh: Not Found (HTTP 404)")})
+
+        result = self.file_it(runner)
+
+        self.assertEqual(result.step, workitem.STEP_CREATE)
+        self.assertIsNone(result.item)
+        self.assertIn("404", result.message)
+
+    def test_a_failed_board_add_names_the_issue_that_now_exists(self):
+        runner = FakeRunner(**{"item-add": CommandFail("gh: could not add item")})
+
+        result = self.file_it(runner)
+
+        self.assertEqual(result.step, workitem.STEP_BOARD)
+        self.assertIsNotNone(result.item)
+        self.assertEqual(result.item.number, 614)
+        self.assertFalse(result.item.on_board)
+        self.assertFalse(result.item.complete)
+
+    def test_a_failed_status_edit_reports_type_as_set_and_status_as_not(self):
+        calls = {"n": 0}
+        base = FakeRunner()
+
+        def flaky(argv, cwd=None):
+            argv = list(argv)
+            if "item-edit" in argv:
+                calls["n"] += 1
+                if calls["n"] == 2:
+                    return workitem.CommandResult(
+                        argv=tuple(argv), exit_code=1, stdout="", stderr="gh: 502"
+                    )
+            return base(argv, cwd)
+
+        result = self.file_it(flaky)
+
+        self.assertEqual(result.step, workitem.STEP_STATUS)
+        self.assertTrue(result.item.on_board)
+        self.assertTrue(result.item.type_set)
+        self.assertFalse(result.item.status_set)
+        self.assertIn("502", result.message)
+
+    def test_resuming_from_a_partial_result_files_no_second_issue(self):
+        # The panel's "Finish the board entry" path (R9: nothing new is filed).
+        runner = FakeRunner()
+        partial = workitem.WorkItem(
+            number=614, url=ISSUE_URL, on_board=False, type_set=False, status_set=False
+        )
+
+        result = self.file_it(runner, existing=partial)
+
+        self.assertIsInstance(result, workitem.WorkItem)
+        self.assertTrue(result.complete)
+        self.assertFalse(runner.ran("create"))
+
+
+class TestRefusalsBeforeAnyCall(WorkItemSequenceTestCase):
+    def test_an_empty_title_never_reaches_gh(self):
+        runner = FakeRunner()
+
+        result = workitem.file_work_item(
+            self.binding, "   ", "", changes=[], commits=["abc1234 x"], run=runner
+        )
+
+        self.assertIsInstance(result, workitem.WorkItemFailure)
+        self.assertEqual(runner.calls, [])
+
+    def test_a_worktree_with_nothing_in_it_never_reaches_gh(self):
+        runner = FakeRunner()
+
+        result = workitem.file_work_item(
+            self.binding, "tune speed", "", changes=[], commits=[], run=runner
+        )
+
+        self.assertIsInstance(result, workitem.WorkItemFailure)
+        self.assertEqual(runner.calls, [])

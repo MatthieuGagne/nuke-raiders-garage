@@ -21,14 +21,16 @@ that put it on the board.
 """
 from __future__ import annotations
 
+import json
 import re
 import subprocess
-from dataclasses import dataclass
+import tempfile
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, List, Optional, Sequence
 
 from tools.garage.core import config_io
-from tools.garage.core.project import Binding
+from tools.garage.core.project import Binding, get_git_remote_url
 
 MASTER_BRANCHES = ("master", "main")
 
@@ -335,4 +337,288 @@ def resolve_option(fields, field_name: str, option_name: str):
         )
     raise WorkItemError(
         f"The board has no `{field_name}` field, so Garage cannot set it."
+    )
+
+
+STEP_FIELDS = "resolve the board's fields"
+STEP_CREATE = "create the issue"
+STEP_BOARD = "add the issue to the board"
+STEP_TYPE = "set Type"
+STEP_STATUS = "set Status"
+
+
+@dataclass(frozen=True)
+class WorkItem:
+    """An issue Garage filed, and how far onto the board it got.
+
+    The three booleans exist because the board is reached in three separate
+    writes and R8 forbids leaving any of them silently undone. A caller
+    that sees `complete is False` has something to tell the user.
+    """
+
+    number: int
+    url: str
+    on_board: bool = False
+    type_set: bool = False
+    status_set: bool = False
+
+    @property
+    def complete(self) -> bool:
+        return self.on_board and self.type_set and self.status_set
+
+
+@dataclass(frozen=True)
+class WorkItemFailure:
+    """A step that did not happen, in GitHub's own words (R8/AC10).
+
+    `item` is None when nothing was created, and otherwise carries exactly
+    what does exist — which is what the panel offers to finish.
+    """
+
+    step: str
+    message: str
+    item: Optional[WorkItem] = None
+
+    @property
+    def text(self) -> str:
+        lead = f"Garage could not {self.step}: {self.message}"
+        if self.item is None:
+            return lead + "\nNo issue was created."
+        missing = []
+        if not self.item.on_board:
+            missing.append("it is not on the board")
+        else:
+            if not self.item.type_set:
+                missing.append("Type is unset")
+            if not self.item.status_set:
+                missing.append("Status is unset")
+        return (
+            f"{lead}\nIssue #{self.item.number} exists ({self.item.url}), but "
+            f"{', and '.join(missing)}."
+        )
+
+
+def _gh_project(*args: str) -> List[str]:
+    return ["gh", "project", *args]
+
+
+def _field_list_argv() -> List[str]:
+    return _gh_project(
+        "field-list", PROJECT_NUMBER, "--owner", PROJECT_OWNER, "--format", "json"
+    )
+
+
+def _item_edit_argv(item_id: str, field_id: str, option_id: str) -> List[str]:
+    return _gh_project(
+        "item-edit",
+        "--id",
+        item_id,
+        "--project-id",
+        PROJECT_ID,
+        "--field-id",
+        field_id,
+        "--single-select-option-id",
+        option_id,
+    )
+
+
+def file_work_item(
+    binding: Optional[Binding],
+    title: str,
+    description: str,
+    *,
+    changes: Optional[Sequence[ChangedDefine]] = None,
+    commits: Optional[Sequence[str]] = None,
+    existing: Optional[WorkItem] = None,
+    run: Runner = run_capture,
+):
+    """File one issue for the active worktree and put it on the board.
+
+    Returns a `WorkItem` when every step succeeded, and a
+    `WorkItemFailure` otherwise. Nothing raises: this runs behind a button,
+    on a worker thread.
+
+    The order is deliberate (R8). `field-list` is a read, and it comes
+    first, so a `Type` or `Status` option that has been renamed fails while
+    nothing exists yet. After the issue is created there is no transaction
+    to fall back on — GitHub sets one field per call — so a later failure
+    is reported as a partial `WorkItem` and the caller may pass it back as
+    `existing` to finish the remaining steps. Resuming files no second
+    issue.
+    """
+    changes = list(changes or [])
+    commits = list(commits or [])
+
+    if existing is None:
+        refusal = refuse_reason(binding, changes, commits)
+        if refusal:
+            return WorkItemFailure(step=STEP_CREATE, message=refusal)
+        try:
+            full_title = title_for(title)
+        except WorkItemError as exc:
+            return WorkItemFailure(step=STEP_CREATE, message=str(exc))
+    else:
+        full_title = title_for(title) if title.strip() else ""
+
+    if binding is None:
+        # Reachable only on the resume path, which skips refuse_reason: a
+        # caller may hand back an `existing` WorkItem with no binding. This
+        # is a refusal, not a crash — an AssertionError must never cross
+        # the worker thread this runs on.
+        return WorkItemFailure(
+            step=STEP_CREATE,
+            message="No repository is bound; there is nothing to file a work item for.",
+        )
+
+    # Step 1 — resolve both field/option pairs by name, before any write.
+    listed = run(_field_list_argv())
+    if not listed.ok:
+        return WorkItemFailure(step=STEP_FIELDS, message=listed.message)
+    try:
+        fields = json.loads(listed.stdout or "{}").get("fields", [])
+        type_field, type_option = resolve_option(fields, TYPE_FIELD, TYPE_OPTION)
+        status_field, status_option = resolve_option(
+            fields, STATUS_FIELD, STATUS_OPTION
+        )
+    except (ValueError, WorkItemError) as exc:
+        return WorkItemFailure(step=STEP_FIELDS, message=str(exc))
+
+    # Step 2 — the issue itself.
+    item = existing
+    if item is None:
+        slug = repo_slug(get_git_remote_url(binding.game_repo))
+        if slug is None:
+            return WorkItemFailure(
+                step=STEP_CREATE,
+                message=(
+                    "The bound repository has no GitHub `origin` remote, so "
+                    "Garage cannot tell which repository to file in."
+                ),
+            )
+        body = compose_body(
+            changes, description, binding.active_worktree.branch, commits
+        )
+        created = _create_issue(run, slug, full_title, body, binding)
+        if isinstance(created, WorkItemFailure):
+            return created
+        item = created
+
+    # Step 3 — the board.
+    if not item.on_board:
+        added = run(
+            _gh_project(
+                "item-add",
+                PROJECT_NUMBER,
+                "--owner",
+                PROJECT_OWNER,
+                "--url",
+                item.url,
+                "--format",
+                "json",
+            )
+        )
+        if not added.ok:
+            return WorkItemFailure(step=STEP_BOARD, message=added.message, item=item)
+        try:
+            item_id = json.loads(added.stdout or "{}")["id"]
+        except (ValueError, KeyError):
+            return WorkItemFailure(
+                step=STEP_BOARD,
+                message=(
+                    "`gh project item-add` printed no item id, so Garage "
+                    "cannot set Type or Status."
+                ),
+                item=item,
+            )
+        item = replace(item, on_board=True)
+    else:
+        found = _find_item_id(run, item.url)
+        if isinstance(found, WorkItemFailure):
+            return replace(found, item=item)
+        item_id = found
+
+    # Step 4 — the two fields, Type first: it is the one that decides how
+    # the board groups the issue, so a failure between them leaves the more
+    # useful half done.
+    for step, field_id, option_id, attribute in (
+        (STEP_TYPE, type_field, type_option, "type_set"),
+        (STEP_STATUS, status_field, status_option, "status_set"),
+    ):
+        if getattr(item, attribute):
+            continue
+        edited = run(_item_edit_argv(item_id, field_id, option_id))
+        if not edited.ok:
+            return WorkItemFailure(step=step, message=edited.message, item=item)
+        item = replace(item, **{attribute: True})
+
+    return item
+
+
+def _create_issue(run: Runner, slug: str, title: str, body: str, binding: Binding):
+    """`gh issue create`, with the body in a file rather than an argument.
+
+    The file is removed whatever happens: a body left in the temp directory
+    is a copy of work-in-progress notes nobody asked to keep.
+    """
+    handle = tempfile.NamedTemporaryFile(
+        "w", suffix=".md", encoding="utf-8", delete=False, newline="\n"
+    )
+    try:
+        handle.write(body)
+        handle.close()
+        created = run(
+            [
+                "gh",
+                "issue",
+                "create",
+                "--repo",
+                slug,
+                "--title",
+                title,
+                "--body-file",
+                handle.name,
+            ],
+            binding.active_worktree.path,
+        )
+    finally:
+        Path(handle.name).unlink(missing_ok=True)
+
+    if not created.ok:
+        return WorkItemFailure(step=STEP_CREATE, message=created.message)
+    try:
+        number = issue_number(created.stdout)
+    except WorkItemError as exc:
+        return WorkItemFailure(step=STEP_CREATE, message=str(exc))
+    return WorkItem(number=number, url=_ISSUE_URL_RE.search(created.stdout).group(0))
+
+
+def _find_item_id(run: Runner, url: str):
+    """The board item id for an issue already on the board — needed only on
+    the resume path, where the `item-add` that would have printed it has
+    already succeeded in an earlier attempt.
+    """
+    listed = run(
+        _gh_project(
+            "item-list",
+            PROJECT_NUMBER,
+            "--owner",
+            PROJECT_OWNER,
+            "--limit",
+            "500",
+            "--format",
+            "json",
+        )
+    )
+    if not listed.ok:
+        return WorkItemFailure(step=STEP_BOARD, message=listed.message)
+    try:
+        items = json.loads(listed.stdout or "{}").get("items", [])
+    except ValueError:
+        items = []
+    for entry in items:
+        if entry.get("content", {}).get("url") == url:
+            return entry["id"]
+    return WorkItemFailure(
+        step=STEP_BOARD,
+        message=f"{url} is not on the board, so its fields cannot be set.",
     )
