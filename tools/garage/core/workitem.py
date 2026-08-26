@@ -60,12 +60,15 @@ def changed_defines(binding: Binding) -> List[ChangedDefine]:
     "from" to state — and neither is one that has no value now. Returns an
     empty list when either side cannot be read; the caller reports that
     through `refuse_reason`, not through an exception it would have to
-    catch around a button press.
+    catch around a button press. "Cannot be read" covers a `config.h` that
+    fails to parse (`config_io.ConfigIOError`) and one that is not there at
+    all — `config_io.read` raises a bare `FileNotFoundError`, an `OSError`,
+    for a worktree that has never carried the file.
     """
     try:
         current = config_io.read(binding)
         head = config_io.read_config_at_head(binding)
-    except config_io.ConfigIOError:
+    except (config_io.ConfigIOError, OSError):
         return []
 
     changes = []

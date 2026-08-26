@@ -138,6 +138,25 @@ class TestChangedDefines(unittest.TestCase):
 
             self.assertEqual(names, ["MAX_NPCS", "PLAYER_SPEED"])
 
+    def test_a_worktree_with_no_config_h_at_all_yields_no_changes_rather_than_raising(self):
+        # `config_io.read` raises a bare FileNotFoundError for a repository
+        # that has never carried the file — the tuner's own fixtures build
+        # one on purpose to prove nothing here crashes on it either.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = tmp_root(tmp)
+            repo = root / "game"
+            repo.mkdir(parents=True, exist_ok=True)
+            _run_git(["init", "-b", "master"], repo)
+            _run_git(["config", "user.email", "test@example.com"], repo)
+            _run_git(["config", "user.name", "Test"], repo)
+            (repo / "README.md").write_text("no config.h here\n", encoding="utf-8")
+            _run_git(["add", "."], repo)
+            _run_git(["commit", "-m", "init"], repo)
+            _run_git(["remote", "add", "origin", GAME_REPO_REMOTE_URL], repo)
+            binding = bind_over(root, repo)
+
+            self.assertEqual(workitem.changed_defines(binding), [])
+
     def test_a_define_added_since_head_is_not_a_change(self):
         # It has no value at HEAD, so there is no "from" to state. R4 asks
         # for a comparison, and a comparison needs two sides.

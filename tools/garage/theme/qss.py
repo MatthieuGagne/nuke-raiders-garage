@@ -28,6 +28,8 @@ names / dynamic properties the panels already expose for this purpose:
   `#worktrees-branch-field` -- the worktrees panel
   (`tools/garage/panels/worktrees.py`); `[active="true"]` is the active
   row's accent stripe.
+- `#worktrees-workitem` -- the work-item section frame, and
+  `#worktrees-workitem-title` / `#worktrees-workitem-result` inside it.
 - `#budgets-panel`, `#budgets-title`, `#budgets-status`, `#budgets-name`,
   `#budgets-value`, `#budgets-meter`, `#budgets-verdict`, `#budgets-hint`,
   `#budgets-scene`, `#budgets-scenes-title` -- the budgets aside
@@ -331,6 +333,20 @@ QLineEdit#worktrees-branch-field {{
 }}
 QLineEdit#worktrees-branch-field:focus {{
     border-color: {t['accent']};
+}}
+QFrame#worktrees-workitem {{
+    background-color: {t['surface']};
+    border: 1px solid {t['line-soft']};
+    border-radius: 4px;
+}}
+QLabel#worktrees-workitem-title {{
+    color: {t['text']};
+}}
+QLabel#worktrees-workitem-result {{
+    color: {t['text-2']};
+}}
+QLabel#worktrees-workitem-result[verdict="fail"] {{
+    color: {t['fail']};
 }}
 
 /* ============================================================

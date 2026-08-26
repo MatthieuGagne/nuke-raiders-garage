@@ -16,26 +16,55 @@ decision is testable without driving a dialog.
 
 R18/AC18: no colour and no typeface here — the active row carries an
 `active` dynamic property for the stylesheet.
+
+The work-item section (#5) is the panel's one GitHub write. It is manual:
+Garage files nothing when a worktree is created and nothing when a commit
+is made (R2), because most tuning work is thrown away and an issue per
+abandoned experiment is worse than the problem this solves. The section is
+hidden outright until the worktree holds a changed value or a commit of
+its own (AC1) — an action that cannot do anything useful is not offered.
+
+The filing runs on a worker thread. Four network round trips on the UI
+thread would freeze the window, and a live QThread at teardown is a
+Windows fail-fast (#8) — hence `stop_and_wait()`, which `app.py` calls
+when the dialog closes.
 """
 from __future__ import annotations
 
+import shutil
 from typing import List, Optional
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import QObject, QThread, Qt, Signal
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QInputDialog,
     QLabel,
     QLineEdit,
+    QPlainTextEdit,
     QPushButton,
     QScrollArea,
     QVBoxLayout,
     QWidget,
 )
 
+from tools.garage.core import workitem
 from tools.garage.core import worktrees as worktrees_core
 from tools.garage.core.project import Binding, BindingError, Worktree, _same_path
+
+
+class _FileWorker(QObject):
+    """Runs the `gh` sequence off the UI thread. One shot, then finished."""
+
+    done = Signal(object)  # WorkItem | WorkItemFailure
+
+    def __init__(self, call):
+        super().__init__()
+        self._call = call
+
+    def run(self) -> None:
+        self.done.emit(self._call())
 
 
 class WorktreesPanel(QWidget):
@@ -52,11 +81,20 @@ class WorktreesPanel(QWidget):
         binding: Optional[Binding],
         binding_error: Optional[BindingError] = None,
         parent=None,
+        *,
+        runner: Optional[workitem.Runner] = None,
     ):
         super().__init__(parent)
         self.binding = binding
         self.binding_error = binding_error
         self._worktrees: List[Worktree] = []
+        self._runner = runner or workitem.run_capture
+        self._thread: Optional[QThread] = None
+        self._worker: Optional[_FileWorker] = None
+        self._last_item = None
+        self._copied: Optional[str] = None
+        self._changes: List[workitem.ChangedDefine] = []
+        self._commits: List[str] = []
 
         outer = QVBoxLayout(self)
 
@@ -87,6 +125,9 @@ class WorktreesPanel(QWidget):
         self._content_layout.addStretch(1)
         self._scroll.setWidget(self._content)
         outer.addWidget(self._scroll, 1)
+
+        self.work_item_section = self._build_work_item_section()
+        outer.addWidget(self.work_item_section)
 
         self.refresh()
 
@@ -165,16 +206,20 @@ class WorktreesPanel(QWidget):
             self._set_status(self._binding_error_message())
             self.create_button.setEnabled(False)
             self.branch_field.setEnabled(False)
+            self.refresh_work_item()
             return
 
         try:
             self._worktrees = worktrees_core.reload(self.binding)
         except Exception as exc:  # BindingError from list_worktrees
             self._set_status(f"Could not list the worktrees: {exc}")
+            self.refresh_work_item()
             return
 
         for worktree in self._worktrees:
             self._insert(self._build_row(worktree))
+
+        self.refresh_work_item()
 
     def _clear(self) -> None:
         while self._content_layout.count() > 1:
@@ -229,6 +274,184 @@ class WorktreesPanel(QWidget):
         layout.addWidget(delete)
 
         return row
+
+    # -- work item (#5) ----------------------------------------------------
+
+    def _build_work_item_section(self) -> QFrame:
+        section = QFrame()
+        section.setObjectName("worktrees-workitem")
+        layout = QVBoxLayout(section)
+
+        heading = QLabel("Work item")
+        heading.setObjectName("worktrees-workitem-title")
+        layout.addWidget(heading)
+
+        self.title_field = QLineEdit()
+        self.title_field.setPlaceholderText("What this tuning work is for")
+        layout.addWidget(self.title_field)
+
+        self.description_field = QPlainTextEdit()
+        self.description_field.setPlaceholderText("Optional description")
+        layout.addWidget(self.description_field)
+
+        buttons = QHBoxLayout()
+        self.file_button = QPushButton("File work item")
+        self.file_button.setObjectName("worktrees-file-issue")
+        self.file_button.setProperty("role", "primary")
+        self.file_button.clicked.connect(self._on_file_clicked)
+        buttons.addWidget(self.file_button)
+
+        self.finish_button = QPushButton("Finish the board entry")
+        self.finish_button.clicked.connect(self._on_finish_clicked)
+        self.finish_button.setVisible(False)
+        buttons.addWidget(self.finish_button)
+        layout.addLayout(buttons)
+
+        self.work_item_result = QLabel("")
+        self.work_item_result.setObjectName("worktrees-workitem-result")
+        self.work_item_result.setWordWrap(True)
+        self.work_item_result.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        layout.addWidget(self.work_item_result)
+
+        return section
+
+    def refresh_work_item(self) -> None:
+        """Show the section only when there is something to file about (AC1)."""
+        self._changes = []
+        self._commits = []
+        if self.binding is not None:
+            self._changes = workitem.changed_defines(self.binding)
+            self._commits = workitem.branch_commits(self.binding.active_worktree.path)
+        allowed = workitem.refuse_reason(self.binding, self._changes, self._commits)
+        self.work_item_section.setVisible(allowed is None)
+
+    def work_item_visible(self) -> bool:
+        return self.work_item_section.isVisible()
+
+    def file_work_item(self) -> Optional[str]:
+        """Start the filing. Returns a refusal, or None once it is running."""
+        if self.is_filing():
+            return self._set_work_item_result("A work item is already being filed.")
+        if shutil.which("gh") is None:
+            return self._set_work_item_result(
+                "`gh` is not on PATH, so Garage cannot file a work item. "
+                "The Doctor panel says the same, with the repair."
+            )
+        binding, title = self.binding, self.title_field.text()
+        description = self.description_field.toPlainText()
+        changes, commits = list(self._changes), list(self._commits)
+        runner = self._runner
+
+        def call():
+            return workitem.file_work_item(
+                binding, title, description,
+                changes=changes, commits=commits, run=runner,
+            )
+
+        return self._start(call)
+
+    def finish_board_entry(self) -> Optional[str]:
+        """Resume a partial filing. Files no second issue (R9)."""
+        partial = self._last_item
+        if partial is None:
+            return self._set_work_item_result("There is no partial work item to finish.")
+        binding, runner = self.binding, self._runner
+
+        def call():
+            return workitem.file_work_item(
+                binding, "", "", existing=partial, run=runner
+            )
+
+        return self._start(call)
+
+    def _start(self, call) -> Optional[str]:
+        self.file_button.setEnabled(False)
+        self.finish_button.setEnabled(False)
+        self._set_work_item_result("Filing…", failed=False)
+
+        self._thread = QThread(self)
+        self._worker = _FileWorker(call)
+        self._worker.moveToThread(self._thread)
+        self._thread.started.connect(self._worker.run)
+        self._worker.done.connect(self._on_filed)
+        self._worker.done.connect(self._thread.quit)
+        self._thread.start()
+        return None
+
+    def is_filing(self) -> bool:
+        return self._thread is not None and self._thread.isRunning()
+
+    def _on_filed(self, outcome) -> None:
+        self.file_button.setEnabled(True)
+        if isinstance(outcome, workitem.WorkItem):
+            self._last_item = outcome if not outcome.complete else None
+            self.finish_button.setVisible(False)
+            line = workitem.closes_line(outcome.number)
+            copied = self._copy(line)
+            self._set_work_item_result(
+                f"Filed issue #{outcome.number} — {outcome.url}\n"
+                + (
+                    f"`{line}` is on the clipboard for the pull request body."
+                    if copied
+                    else f"Copy `{line}` into the pull request body."
+                ),
+                failed=False,
+            )
+            self.title_field.clear()
+            self.description_field.clear()
+        else:
+            self._last_item = outcome.item
+            self.finish_button.setVisible(outcome.item is not None)
+            self.finish_button.setEnabled(True)
+            self._set_work_item_result(outcome.text, failed=True)
+
+    def _copy(self, text: str) -> bool:
+        """Put `text` on the clipboard, and say whether it landed.
+
+        `clipboard()` answers None when there is no GUI application, which
+        is every headless test run — the text is still recorded so the
+        panel can be asserted against without a clipboard.
+        """
+        self._copied = text
+        clipboard = QGuiApplication.clipboard()
+        if clipboard is None:
+            return False
+        clipboard.setText(text)
+        return True
+
+    def copied_text(self) -> Optional[str]:
+        return self._copied
+
+    def last_work_item(self):
+        return self._last_item
+
+    def work_item_result_text(self) -> str:
+        return self.work_item_result.text()
+
+    def _set_work_item_result(self, message: str, failed: bool = True) -> Optional[str]:
+        self.work_item_result.setText(message)
+        self.work_item_result.setProperty("verdict", "fail" if failed else "pass")
+        self.work_item_result.style().unpolish(self.work_item_result)
+        self.work_item_result.style().polish(self.work_item_result)
+        return message if failed else None
+
+    def stop_and_wait(self) -> None:
+        """Let a filing finish before the panel dies. Destroying a live
+        QThread is a Windows fail-fast (#8), and the sequence is four short
+        network calls, not a build — waiting is the honest option, and
+        cancelling midway is what R8 forbids.
+        """
+        if self._thread is None:
+            return
+        self._thread.quit()
+        self._thread.wait(30000)
+        self._thread = None
+
+    def _on_file_clicked(self) -> None:
+        self.file_work_item()
+
+    def _on_finish_clicked(self) -> None:
+        self.finish_board_entry()
 
     # -- UI plumbing -------------------------------------------------------
 

@@ -670,6 +670,7 @@ class GarageWindow(QMainWindow):
         self.commit_panel.stop_and_wait()
         self.assets_panel.stop_and_wait()
         self.dialog_panel.stop_and_wait()
+        self.worktrees_panel.stop_and_wait()
         super().closeEvent(event)
 
 
