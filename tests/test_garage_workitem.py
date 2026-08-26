@@ -687,6 +687,51 @@ class TestFailures(WorkItemSequenceTestCase):
         self.assertTrue(result.complete)
         self.assertFalse(runner.ran("create"))
 
+    def test_resuming_with_no_binding_fails_rather_than_raising(self):
+        # The `binding is None` guard on the resume path: `refuse_reason`
+        # is skipped whenever `existing` is passed, so this branch is the
+        # only thing standing between an unbound resume call and an
+        # AssertionError crossing the worker thread.
+        runner = FakeRunner()
+        partial = workitem.WorkItem(
+            number=614, url=ISSUE_URL, on_board=False, type_set=False, status_set=False
+        )
+
+        result = workitem.file_work_item(
+            None,
+            "tune speed",
+            "",
+            changes=[],
+            commits=[],
+            existing=partial,
+            run=runner,
+        )
+
+        self.assertIsInstance(result, workitem.WorkItemFailure)
+        self.assertEqual(runner.calls, [])
+
+    def test_resuming_with_a_bare_prefix_title_returns_rather_than_raising(self):
+        # The title is not recomputed on the resume path: `title_for` would
+        # raise on "chore:" alone, and the resumed issue already has its
+        # title, so nothing here should touch it at all.
+        runner = FakeRunner()
+        partial = workitem.WorkItem(
+            number=614, url=ISSUE_URL, on_board=False, type_set=False, status_set=False
+        )
+
+        result = workitem.file_work_item(
+            self.binding,
+            "chore:",
+            "The car turns too late.",
+            changes=[workitem.ChangedDefine("PLAYER_SPEED", "4", "6")],
+            commits=[],
+            existing=partial,
+            run=runner,
+        )
+
+        self.assertIsInstance(result, workitem.WorkItem)
+        self.assertTrue(result.complete)
+
 
 class TestRefusalsBeforeAnyCall(WorkItemSequenceTestCase):
     def test_an_empty_title_never_reaches_gh(self):

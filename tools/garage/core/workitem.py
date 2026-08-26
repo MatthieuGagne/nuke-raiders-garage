@@ -457,8 +457,15 @@ def file_work_item(
             full_title = title_for(title)
         except WorkItemError as exc:
             return WorkItemFailure(step=STEP_CREATE, message=str(exc))
-    else:
-        full_title = title_for(title) if title.strip() else ""
+    # On the resume path (`existing` is not None) there is nothing to
+    # compute here: `item = existing` below is never None, so the create
+    # block that reads `full_title` never runs, and the issue being
+    # resumed already has its title. Computing it anyway would call
+    # `title_for` unguarded — unlike the create path three lines above —
+    # and raise WorkItemError straight out of the function on a title of
+    # just "chore:", crossing the worker thread this runs behind. This is
+    # a deliberate departure from the plan's text, which had this branch
+    # compute (and discard) `full_title` unconditionally.
 
     if binding is None:
         # Reachable only on the resume path, which skips refuse_reason: a
