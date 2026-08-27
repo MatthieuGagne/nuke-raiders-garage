@@ -1719,6 +1719,7 @@ def make_toolchain(tmp_path: Path):
         "java": str(tmp_path / "jdk" / "bin" / "java.exe"),
         "bash": str(git_bin / "bash.exe"),
         "sed": str(git_usr_bin / "sed.exe"),
+        "gh": str(tmp_path / "gh.exe"),
     }
     # Forward slashes, like the value that actually builds: the Makefile
     # expands GBDK_HOME inside a bash recipe, so a backslash in it is a
@@ -1753,6 +1754,7 @@ def run_doctor(which_map, environ, settings, binding=None, binding_error=None):
         environ=environ,
         settings=settings,
         probe=lambda command: "1.2.3",
+        check_exit=lambda command: 0,
     )
 
 
@@ -1773,6 +1775,7 @@ class TestDoctorChecksEverythingR14Names(unittest.TestCase):
                     "gbdk-home",
                     "romusage",
                     "git-unix-tools",
+                    "gh",
                     "java",
                     "emulicious",
                 ],
@@ -1795,7 +1798,7 @@ class TestDoctorChecksEverythingR14Names(unittest.TestCase):
             self.assertEqual(
                 [c.key for c in report.failures], ["classification"]
             )
-            self.assertEqual(report.summary(), "8 of 9 checks passing · failing: classification")
+            self.assertEqual(report.summary(), "9 of 10 checks passing · failing: classification")
 
     def test_every_failure_names_what_it_prevents(self):
         # The general form of AC14: no check may report a failure without
@@ -1807,7 +1810,7 @@ class TestDoctorChecksEverythingR14Names(unittest.TestCase):
                 {}, {"EMULICIOUS_JAR": str(tmp_root(tmp) / "nowhere.jar")}, None
             )
 
-            self.assertEqual(len(report.failures), 9)
+            self.assertEqual(len(report.failures), 10)
             for check in report.failures:
                 self.assertTrue(
                     check.prevents.strip(),
@@ -2033,7 +2036,7 @@ class TestDoctorRomusage(unittest.TestCase):
             self.assertIn("romusage", report.summary())
             # The stub binding names no real repository, so the
             # classification row fails alongside romusage.
-            self.assertIn("7 of 9 checks passing", report.summary())
+            self.assertIn("8 of 10 checks passing", report.summary())
 
     def test_detail_names_the_gbdk_bin_directory_that_ships_it(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2235,6 +2238,86 @@ class TestDoctorEmulator(unittest.TestCase):
                 doctor.resolve_emulicious_jar(None, {}),
                 Path(doctor.DEFAULT_EMULICIOUS_JAR),
             )
+
+
+class TestCheckGh(unittest.TestCase):
+    """R7/AC9: `gh` absent and `gh` unauthenticated are different failures,
+    because they have different repairs.
+    """
+
+    def test_gh_present_and_authenticated_passes(self):
+        result = doctor.check_gh(
+            which=lambda name: "C:/tools/gh.exe",
+            probe=lambda command: "2.96.0",
+            exit_probe=lambda command: 0,
+        )
+
+        self.assertEqual(result.status, doctor.PASS)
+        self.assertEqual(result.key, "gh")
+        self.assertEqual(result.tag, "2.96.0")
+
+    def test_gh_absent_fails_with_the_path_reason(self):
+        result = doctor.check_gh(
+            which=lambda name: None,
+            probe=lambda command: "",
+            exit_probe=lambda command: 0,
+        )
+
+        self.assertEqual(result.status, doctor.FAIL)
+        self.assertIn("not found on PATH", result.detail)
+        self.assertIn("work item", result.prevents)
+
+    def test_gh_present_but_unauthenticated_fails_differently(self):
+        result = doctor.check_gh(
+            which=lambda name: "C:/tools/gh.exe",
+            probe=lambda command: "2.96.0",
+            exit_probe=lambda command: 1,
+        )
+
+        self.assertEqual(result.status, doctor.FAIL)
+        self.assertNotIn("not found on PATH", result.detail)
+        self.assertIn("gh auth login", result.detail)
+
+    def test_a_failed_auth_probe_does_not_claim_to_know_it_is_the_login(self):
+        # `probe_exit` reports a timeout and an OSError with the same
+        # non-zero code a refusal gets, so an offline machine is
+        # indistinguishable from a signed-out one here. Sending that user
+        # to `gh auth login` alone points them at a command that will fail
+        # for the same reason.
+        result = doctor.check_gh(
+            which=lambda name: "C:/tools/gh.exe",
+            probe=lambda command: "2.96.0",
+            exit_probe=lambda command: doctor.EXIT_PROBE_FAILED,
+        )
+
+        self.assertEqual(result.status, doctor.FAIL)
+        self.assertIn("offline", result.detail)
+
+    def test_the_auth_probe_asks_gh_and_nothing_else(self):
+        asked = []
+
+        doctor.check_gh(
+            which=lambda name: "C:/tools/gh.exe",
+            probe=lambda command: "2.96.0",
+            exit_probe=lambda command: asked.append(command) or 0,
+        )
+
+        self.assertEqual(len(asked), 1)
+        self.assertIn("auth", asked[0])
+        self.assertIn("status", asked[0])
+
+    def test_the_auth_probe_is_not_run_when_gh_is_absent(self):
+        # A missing tool cannot be interrogated, and the timeout would be
+        # paid on every doctor run for nothing.
+        asked = []
+
+        doctor.check_gh(
+            which=lambda name: None,
+            probe=lambda command: "",
+            exit_probe=lambda command: asked.append(command) or 0,
+        )
+
+        self.assertEqual(asked, [])
 
 
 class TestDoctorBinding(unittest.TestCase):

@@ -25,8 +25,10 @@ tells the user a string is missing from PATH; `prevents` tells them which
 part of their own loop just stopped working, which is the thing they
 actually need to decide whether to fix it now (AC14).
 
-The seams (`which`, `environ`, `probe_version`) exist so the whole module
-is testable on a machine that has none of these tools -- or all of them.
+The seams (`which`, `environ`, `probe_version`, and `probe_exit` behind
+`run_checks`'s `check_exit` -- the one that makes the `gh` authentication
+check testable without a signed-in `gh`) exist so the whole module is
+testable on a machine that has none of these tools -- or all of them.
 """
 from __future__ import annotations
 
@@ -66,6 +68,12 @@ VERSION_TIMEOUT_S = 5
 # The first dotted-number token of a version banner: "GNU Make 4.4.1",
 # 'openjdk version "25.0.3"', "version 1.3.2, by bbbbbr".
 _VERSION_RE = re.compile(r"\b(\d+(?:\.\d+)+)")
+
+# Returned by probe_exit when the command could not even be started (not
+# found, timed out, refused to launch). 127 is the shell's own convention
+# for "command not found" -- borrowed here so a caller reading the number
+# without the context recognises it.
+EXIT_PROBE_FAILED = 127
 
 
 @dataclass
@@ -151,6 +159,26 @@ def probe_version(command: List[str]) -> str:
 
 VersionProbe = Callable[[List[str]], str]
 Which = Callable[[str], Optional[str]]
+
+
+def probe_exit(command: List[str]) -> int:
+    """The exit code of `command`, and nothing else. Never raises.
+
+    `probe_version` cannot serve here: it reads output and returns a
+    version token, and a tool that answers "not logged in" on stderr while
+    still printing a version would read as healthy. `gh auth status`
+    reports through its exit code, so that is what is read.
+    """
+    try:
+        completed = subprocess.run(
+            command, capture_output=True, text=True, timeout=VERSION_TIMEOUT_S
+        )
+    except (OSError, subprocess.SubprocessError):
+        return EXIT_PROBE_FAILED
+    return completed.returncode
+
+
+ExitProbe = Callable[[List[str]], int]
 
 
 # -- individual checks -------------------------------------------------------
@@ -488,6 +516,68 @@ def check_git_unix_tools(which: Which) -> CheckResult:
     )
 
 
+def check_gh(
+    which: Which, probe: VersionProbe, exit_probe: ExitProbe
+) -> CheckResult:
+    """`gh` present *and* authenticated (R7/AC9).
+
+    Two failures, not one, because they have different repairs: an absent
+    `gh` is an install and an unauthenticated one is `gh auth login`. Both
+    are reported here rather than at the button, so a user learns about
+    them before they have composed a work item they cannot file.
+
+    The second row does not claim more than it knows. `gh auth status`
+    reaches GitHub, and `probe_exit` collapses a timeout and an `OSError`
+    into the same non-zero code as a genuine refusal — so an offline
+    machine reads exactly like a signed-out one. Telling that user to run
+    `gh auth login` alone would send them to a command that fails for the
+    same reason, so the detail names both possibilities and leaves the
+    diagnosis to the person who can see their own network.
+
+    Unlike every other row, this one can go stale under a running Garage --
+    PATH cannot change beneath the process, but `gh auth login` in a
+    terminal can. The doctor panel's refresh is what re-reads it.
+    """
+    path = which("gh")
+    if not path:
+        return CheckResult(
+            key="gh",
+            name="gh — files a work item for tuning work",
+            status=FAIL,
+            detail="not found on PATH",
+            prevents=(
+                "Filing a work item from Garage. A tuning pull request needs "
+                "a linked issue, and without gh the issue has to be opened by "
+                "hand."
+            ),
+            tag="blocked",
+        )
+    if exit_probe([path, "auth", "status"]) != 0:
+        return CheckResult(
+            key="gh",
+            name="gh — files a work item for tuning work",
+            status=FAIL,
+            detail=(
+                f"{path} is installed, but `gh auth status` did not answer "
+                f"successfully — either this machine is offline or `gh` is "
+                f"not signed in. Check the network first, then run "
+                f"`gh auth login`."
+            ),
+            prevents=(
+                "Filing a work item from Garage. Every GitHub call it makes "
+                "would be refused or never answered."
+            ),
+            tag="unavailable",
+        )
+    return CheckResult(
+        key="gh",
+        name="gh — files a work item for tuning work",
+        status=PASS,
+        detail=path,
+        tag=probe([path, "--version"]),
+    )
+
+
 def check_java(which: Which, probe: VersionProbe) -> CheckResult:
     path = which("java")
     if path:
@@ -560,6 +650,7 @@ def run_checks(
     environ=None,
     settings: Optional[dict] = None,
     probe: VersionProbe = probe_version,
+    check_exit: ExitProbe = probe_exit,
 ) -> Report:
     """Every check R14 asks for, in the order the user should read them:
     the binding first (nothing else resolves without it), then the build
@@ -586,6 +677,7 @@ def run_checks(
             check_gbdk_home(environ),
             check_romusage(which, environ, probe),
             check_git_unix_tools(which),
+            check_gh(which, probe, check_exit),
             check_java(which, probe),
             check_emulicious(settings, environ),
         ]
