@@ -18,8 +18,8 @@ installed. PySide6 is the only dependency, and it is what separates the two test
 
 | Command | Covers | Tests | Needs |
 |---|---|---|---|
-| `make test` | `tests/` — `tools/garage/core/`, the drift check, the docs guards | 339 | stdlib only |
-| `make test-garage` | `tests/garage/` — the Qt panels | 225 | PySide6 |
+| `make test` | `tests/` — `tools/garage/core/`, the drift check, the docs guards | 528 | stdlib only |
+| `make test-garage` | `tests/garage/` — the Qt panels | 333 | PySide6 |
 | `make lint` | the `tunables.json` ↔ `src/config.h` drift check on its own | — | stdlib only |
 
 **Pick the target by what you changed.** A change under `tools/garage/core/` is covered by
