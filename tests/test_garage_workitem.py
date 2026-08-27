@@ -522,16 +522,23 @@ class TestGitReadsNeverRaise(unittest.TestCase):
         self.assertEqual(result.returncode, workitem.EXIT_NOT_STARTED)
 
     def test_a_git_that_outlasts_its_timeout_is_a_result_not_an_exception(self):
-        # The production value is injected, not waited out: ten real
-        # seconds in a suite that runs on every change is not a test, it
-        # is a tax. A millisecond cannot outlast even process creation, so
-        # the timeout expires on the first read whatever the machine.
-        with tempfile.TemporaryDirectory() as tmp:
-            root = tmp_root(tmp)
-            repo = make_game_repo(root / "game")
-
-            with mock.patch.object(workitem, "GIT_TIMEOUT_S", 0.001):
-                result = workitem._git(["log", "--format=%h %s"], repo)
+        # Forced, not raced. This first injected a one-millisecond timeout
+        # and let a real `git` outrun it -- a bet that process creation is
+        # always slower than the clock. It held on Windows and lost on a
+        # Linux runner, where the read finished first and the assertion
+        # read `0 == 0` (PR #40). The branch under test is the `except`,
+        # so the exception is what the test supplies; the sibling above
+        # does the same for a `git` that cannot start at all.
+        #
+        # Note the direction that IS safe: `run_capture`'s timeout test
+        # sleeps thirty seconds against a half-second limit, so the
+        # command certainly outlasts it. Betting a command is slower than
+        # a deadline is a race; betting it is faster is not.
+        expired = subprocess.TimeoutExpired(
+            cmd=["git", "log"], timeout=workitem.GIT_TIMEOUT_S
+        )
+        with mock.patch.object(workitem.subprocess, "run", side_effect=expired):
+            result = workitem._git(["log", "--format=%h %s"], Path("."))
 
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(result.returncode, workitem.EXIT_NOT_STARTED)
