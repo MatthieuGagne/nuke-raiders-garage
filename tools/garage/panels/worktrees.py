@@ -429,6 +429,17 @@ class WorktreesPanel(QWidget):
         (R9). This only says the user has taken responsibility for the
         board entry, which is what releases the guard in `file_work_item`.
         """
+        if self.is_filing():
+            # R5 of #41. Clearing `_last_item` mid-finish does not stick:
+            # the finish lands still-partial and `_on_filed` assigns it
+            # straight back, so the user reads that the issue is theirs to
+            # repair and then silently has the guard returned to them. The
+            # button is disabled for the duration as well, but the refusal
+            # lives here because that is where the state is.
+            return self._set_work_item_result(
+                "A work item is being filed. Wait for it to finish before "
+                "leaving the partial one."
+            )
         partial = self._last_item
         if partial is None:
             return self._set_work_item_result("There is no partial work item to leave.")
@@ -451,6 +462,10 @@ class WorktreesPanel(QWidget):
             return self._set_work_item_result("A work item is already being filed.")
         self.file_button.setEnabled(False)
         self.finish_button.setEnabled(False)
+        # Disabled for the same reason as the other two, and it was the
+        # one left out (R5 of #41): it stays visible for as long as a
+        # partial result exists, which includes the whole of a finish.
+        self.dismiss_button.setEnabled(False)
         self._set_work_item_result("Filing…", failed=False)
 
         self._thread = QThread(self)
@@ -472,6 +487,7 @@ class WorktreesPanel(QWidget):
         # session, and `is_filing()` would answer from a stale handle.
         self._release_thread(DONE_TIMEOUT_MS)
         self.file_button.setEnabled(True)
+        self.dismiss_button.setEnabled(True)
         if isinstance(outcome, workitem.WorkItem):
             self._last_item = outcome if not outcome.complete else None
             self.finish_button.setVisible(False)

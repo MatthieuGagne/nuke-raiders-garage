@@ -450,6 +450,19 @@ class TestPartialFilingBlocksTheNextOne(WorkItemPanelTestCase):
         self.wait()
         self.assertEqual(len(self.creates()), 2)
 
+    def test_closes_n_reaches_the_clipboard_when_the_board_entry_failed(self):
+        # R6 of #41. The issue exists, so the one line
+        # `pr-linked-issue.yml` greps for belongs on the clipboard whether
+        # or not the board entry was finished -- a user repairing `Type`
+        # by hand on GitHub must not also have to hand-type this. The
+        # success path asserts it; this path never did.
+        self.assertEqual(self.panel.copied_text(), "Closes #614")
+
+    def test_the_result_still_names_the_board_property_left_unset(self):
+        # Guards the assertion above from passing on a panel that had
+        # quietly started reporting the partial filing as a success.
+        self.assertIn("Type is unset", self.panel.work_item_result_text())
+
 
 class TestFinishingIsGuardedWhileFiling(WorkItemPanelTestCase):
     """#8, through the entry point that had no guard of its own.
@@ -480,6 +493,67 @@ class TestFinishingIsGuardedWhileFiling(WorkItemPanelTestCase):
         self.assertIsNotNone(refusal)
         self.assertIn("already being filed", refusal)
         self.wait()
+
+
+class TestDismissingIsGuardedWhileFinishing(WorkItemPanelTestCase):
+    """R5 of #41: the third button `_start` never disabled.
+
+    `_start` disables `file_button` and `finish_button`, but
+    `dismiss_button` stays live for the whole of a *Finish the board
+    entry*. Dismissing mid-flight clears `_last_item` and tells the user
+    the issue is theirs to repair -- and then the finish lands, still
+    partial, and `_on_filed` assigns `_last_item` straight back. The
+    message the user just read is undone with nothing said, and the guard
+    they deliberately released is back.
+
+    The failure needs the finish to fail *again*: a resume that succeeds
+    completely sets `_last_item` to None anyway, which is why
+    `stalling_resume_runner` -- a stalled resume on top of a runner that
+    keeps refusing `item-edit` -- is the fixture that shows it.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.rebuild_panel(stalling_resume_runner())
+        self.file_and_wait()
+        self.assertIsNotNone(self.panel.last_work_item(), "no partial to resume")
+
+    def start_finish(self):
+        """Begin a resume and return once the worker is really inside it."""
+        self.assertIsNone(self.panel.finish_board_entry())
+        waited = 0
+        while waited < 10000 and not self.runner.entered.is_set():
+            QTest.qWait(20)
+            waited += 20
+        self.assertTrue(self.runner.entered.is_set(), "the resume never started")
+
+    def test_dismissing_while_a_finish_is_in_flight_is_refused(self):
+        self.start_finish()
+
+        refusal = self.panel.dismiss_partial_work_item()
+
+        self.assertIsNotNone(refusal)
+        self.wait()
+
+    def test_the_refusal_says_a_filing_is_in_flight(self):
+        self.start_finish()
+
+        refusal = self.panel.dismiss_partial_work_item()
+
+        self.assertIn("being filed", refusal)
+        self.wait()
+
+    def test_the_dismiss_button_is_disabled_while_a_finish_is_in_flight(self):
+        self.start_finish()
+
+        self.assertFalse(self.panel.dismiss_button.isEnabled())
+        self.wait()
+
+    def test_the_dismiss_button_comes_back_when_the_finish_ends(self):
+        self.start_finish()
+        self.wait()
+
+        self.assertTrue(self.panel.dismiss_button.isEnabled())
 
 
 class TestTheFilingThreadIsReleased(WorkItemPanelTestCase):
