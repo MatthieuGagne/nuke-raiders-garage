@@ -951,5 +951,88 @@ class TestOpenInEditorStyling(DialogPanelTestCase):
             self.panel.open_editor_button.objectName(), "dialog-open-editor")
 
 
+class TestReloadButton(DialogPanelTestCase):
+    """#45: Reload re-reads both files, rebuilds the panel, and clears
+    the clobber refusal #43 added -- without weakening it."""
+
+    def test_the_button_carries_its_object_name(self):
+        self.assertEqual(
+            self.panel.reload_button.objectName(), "dialog-reload")
+
+    def test_reload_clears_the_outside_edit_refusal(self):
+        path = self.repo / "assets" / "dialog" / "npcs.json"
+        path.write_text(path.read_text(encoding="utf-8") + "\n\n",
+                        encoding="utf-8")
+        self.assertFalse(self.panel.save())
+        self.assertIn("npcs.json", self.panel.log_text())
+
+        self.panel.reload_button.click()
+
+        self.assertTrue(self.panel.save())
+
+    def test_reload_rebuilds_the_list_from_the_new_content(self):
+        path = self.repo / "assets" / "dialog" / "npcs.json"
+        changed = json.loads(path.read_text(encoding="utf-8"))
+        changed["npcs"][0]["name"] = "RENAMED"
+        write_json(path, changed)
+
+        self.panel.reload_button.click()
+
+        self.assertIn("RENAMED", self.panel.npc_list.item(0).text())
+
+    def test_reload_rebuilds_the_node_cards_too(self):
+        path = self.repo / "assets" / "dialog" / "npcs.json"
+        changed = json.loads(path.read_text(encoding="utf-8"))
+        changed["npcs"][0]["nodes"][0]["text"] = "Reloaded text."
+        write_json(path, changed)
+
+        self.panel.reload_button.click()
+
+        self.assertEqual(
+            self.panel.node_cards()[0].node["text"], "Reloaded text.")
+
+
+class TestReloadWithNoBinding(unittest.TestCase):
+    """R7: no game repository bound -- there is nothing to reload."""
+
+    def setUp(self):
+        theme.apply(_app)
+        self.error = project.BindingError("game_repo", "nothing is bound")
+        self.panel = DialogPanel(None, self.error)
+
+    def tearDown(self):
+        self.panel.stop_and_wait()
+        self.panel.deleteLater()
+
+    def test_the_button_is_disabled(self):
+        self.assertFalse(self.panel.reload_button.isEnabled())
+
+
+class TestReloadAfterAParseFailure(DialogPanelTestCase):
+    """Reload is the recovery path for a bad file, not only for a
+    clobber refusal -- it must stay enabled when `self.data` is None
+    for that reason, unlike `open_editor_button`."""
+
+    def test_reload_stays_enabled_after_a_parse_failure(self):
+        path = self.repo / "assets" / "dialog" / "npcs.json"
+        path.write_text("{not json", encoding="utf-8")
+        self.panel.refresh()
+        self.assertIsNone(self.panel.data)
+
+        self.assertTrue(self.panel.reload_button.isEnabled())
+
+    def test_reload_recovers_once_the_file_is_fixed(self):
+        path = self.repo / "assets" / "dialog" / "npcs.json"
+        good = path.read_text(encoding="utf-8")
+        path.write_text("{not json", encoding="utf-8")
+        self.panel.refresh()
+        self.assertIsNone(self.panel.data)
+
+        path.write_text(good, encoding="utf-8")
+        self.panel.reload_button.click()
+
+        self.assertIsNotNone(self.panel.data)
+
+
 if __name__ == "__main__":
     unittest.main()

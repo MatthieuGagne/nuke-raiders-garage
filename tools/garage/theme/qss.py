@@ -65,7 +65,7 @@ names / dynamic properties the panels already expose for this purpose:
   `#dialog-node-preview`, `#dialog-link-chip`, `#dialog-refusal`,
   `#dialog-log` -- the dialog panel (`tools/garage/panels/dialog.py`); its
   other object names (`#dialog-panel`, `#dialog-save`, `#dialog-open-editor`,
-  `#dialog-add-node`, `#dialog-add-npc`, `#dialog-rename-npc`,
+  `#dialog-reload`, `#dialog-add-node`, `#dialog-add-npc`, `#dialog-rename-npc`,
   `#dialog-npc-name`, `#dialog-delete-node`, `#dialog-next-combo`,
   `#dialog-choice-label`, `#dialog-add-choice`, `#dialog-remove-choice`)
   are plain widgets styled only by their type selector -- the same as

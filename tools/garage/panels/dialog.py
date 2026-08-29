@@ -357,6 +357,11 @@ class DialogPanel(QWidget):
         self.open_editor_button.clicked.connect(lambda: self.open_in_editor())
         controls.addWidget(self.open_editor_button)
 
+        self.reload_button = QPushButton("Reload from disk")
+        self.reload_button.setObjectName("dialog-reload")
+        self.reload_button.clicked.connect(lambda: self.reload())
+        controls.addWidget(self.reload_button)
+
         self.save_button = QPushButton("Save & Generate")
         self.save_button.setObjectName("dialog-save")
         self.save_button.setProperty("role", "primary")
@@ -426,6 +431,16 @@ class DialogPanel(QWidget):
         if self.data.npcs:
             self.npc_list.setCurrentRow(0)
         self._refresh_refusal()
+
+    def reload(self) -> None:
+        """#45: re-read both files and clear the clobber refusal (R8) --
+        the recovery #43 left as "reopen the panel by hand". Just
+        `refresh()` plus a log line: `refresh()` already does everything
+        a reload needs, since it re-reads the tree and re-stamps it the
+        same way opening the panel does.
+        """
+        self.refresh()
+        self._report("Reloaded the dialog files from disk.")
 
     def _refresh_status(self) -> None:
         if self.data is None:
@@ -620,6 +635,11 @@ class DialogPanel(QWidget):
         while the node is too long, and a button that looks live until it
         is pressed is a worse answer to the same requirement.
         """
+        # Reload's job is recovering from whatever is wrong with the
+        # tree -- a clobber refusal or a file that would not even parse
+        # -- so unlike Save and Open it is gated on the binding alone,
+        # not on `self.data`.
+        self.reload_button.setEnabled(self.binding is not None)
         # R7: with no tree loaded -- no binding, or a file that would not
         # read -- there is nothing to save and nothing to open. Set before
         # the branches below, so both early returns leave it right.
