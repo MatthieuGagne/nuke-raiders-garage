@@ -12,13 +12,14 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from PySide6.QtWidgets import QApplication
 
 from tools.garage import theme
-from tools.garage.core import dialog_model, project
+from tools.garage.core import dialog_model, editor, project
 from tools.garage.panels.dialog import DialogPanel
 
 GAME_REPO_REMOTE_URL = "https://github.com/MatthieuGagne/gmb-nuke-raider.git"
@@ -794,6 +795,147 @@ class TestAgainstRealGameData(unittest.TestCase):
             from_garage, (self.repo / "src" / "dialog_data.c").read_bytes())
         self.assertEqual(
             hub_from_garage, (self.repo / "src" / "hub_data.c").read_bytes())
+
+
+class TestOpenInEditorButton(DialogPanelTestCase):
+    """#43 R1/R6/AC1/AC3: the button saves, then opens assets/dialog/."""
+
+    def test_the_button_is_enabled_with_a_tree_loaded(self):
+        self.assertTrue(self.panel.open_editor_button.isEnabled())
+
+    def test_pressing_it_opens_the_bound_worktrees_dialog_directory(self):
+        with mock.patch.object(editor, "open_directory") as opened:
+            self.panel.open_editor_button.click()
+        opened.assert_called_once_with(
+            self.binding.resolve("assets", "dialog"))
+
+    def test_the_directory_it_opens_holds_both_files(self):
+        with mock.patch.object(editor, "open_directory") as opened:
+            self.panel.open_editor_button.click()
+        directory = opened.call_args.args[0]
+        self.assertEqual(
+            sorted(p.name for p in directory.iterdir()),
+            ["hubs.json", "npcs.json"],
+        )
+
+    def test_an_unsaved_edit_is_on_disk_before_the_editor_opens(self):
+        """AC3, and the ordering R6 asks for: the assertion is made from
+        inside the launch, so a save that happened afterwards would fail
+        it."""
+        card = self.panel.node_cards()[0]
+        card.text_field.setText("Edited in Garage.")
+        seen = {}
+
+        def record(path):
+            seen["text"] = json.loads(
+                (path / "npcs.json").read_text(encoding="utf-8")
+            )["npcs"][0]["nodes"][0]["text"]
+
+        with mock.patch.object(editor, "open_directory", side_effect=record):
+            self.panel.open_editor_button.click()
+
+        self.assertEqual(seen["text"], "Edited in Garage.")
+
+    def test_it_says_what_it_opened(self):
+        with mock.patch.object(editor, "open_directory"):
+            self.panel.open_editor_button.click()
+        self.assertIn(editor.EDITOR_NAME, self.panel.log_text())
+
+
+class TestOpenInEditorRefusals(DialogPanelTestCase):
+    """AC2/AC4/AC6: nothing is opened, and nothing is written, on a
+    refusal."""
+
+    def test_an_over_long_node_stops_the_editor_and_the_write(self):
+        before = (self.repo / "assets" / "dialog" / "npcs.json").read_bytes()
+        self.panel.node_cards()[1].text_field.setText("A" * 70)
+
+        with mock.patch.object(editor, "open_directory") as opened:
+            self.panel.open_editor_button.click()
+
+        opened.assert_not_called()
+        self.assertEqual(
+            (self.repo / "assets" / "dialog" / "npcs.json").read_bytes(),
+            before,
+        )
+
+    def test_the_same_refusal_the_save_button_would_show_is_shown(self):
+        self.panel.node_cards()[1].text_field.setText("A" * 70)
+        with mock.patch.object(editor, "open_directory"):
+            self.panel.open_editor_button.click()
+        self.assertIn("STEEVE", self.panel.refusal_text())
+        self.assertIn("[1]", self.panel.refusal_text())
+
+    def test_an_absent_code_on_path_is_stated_in_the_panel(self):
+        """AC2, driven through the real core module: only the two seams
+        are replaced, so the message the panel shows is the one
+        `editor.open_directory` really raises."""
+        with mock.patch.object(editor, "_find_editor", return_value=None):
+            with mock.patch.object(editor, "_spawn") as spawn:
+                self.panel.open_editor_button.click()
+        spawn.assert_not_called()
+        log = self.panel.log_text()
+        self.assertIn("VS Code", log)
+        self.assertIn("PATH", log)
+
+    def test_an_outside_edit_stops_the_button_and_names_the_file(self):
+        """AC6 through the button: the clobber refusal gates the editor
+        the same way the limits do."""
+        path = self.repo / "assets" / "dialog" / "npcs.json"
+        path.write_text(path.read_text(encoding="utf-8") + "\n\n",
+                        encoding="utf-8")
+        outside = path.read_bytes()
+        self.panel.node_cards()[0].text_field.setText("Garage wins?")
+
+        with mock.patch.object(editor, "open_directory") as opened:
+            self.panel.open_editor_button.click()
+
+        opened.assert_not_called()
+        self.assertEqual(path.read_bytes(), outside)
+        self.assertIn("npcs.json", self.panel.log_text())
+
+    def test_the_save_button_refuses_the_outside_edit_too(self):
+        path = self.repo / "assets" / "dialog" / "hubs.json"
+        path.write_text(path.read_text(encoding="utf-8") + "\n\n",
+                        encoding="utf-8")
+        self.assertFalse(self.panel.save())
+        self.assertIn("hubs.json", self.panel.log_text())
+
+
+class TestOpenInEditorWithNoBinding(unittest.TestCase):
+    """AC5/R7: no game repository bound. Not skipped -- this is the CI
+    case."""
+
+    def setUp(self):
+        theme.apply(_app)
+        self.error = project.BindingError("game_repo", "nothing is bound")
+        self.panel = DialogPanel(None, self.error)
+
+    def tearDown(self):
+        self.panel.stop_and_wait()
+        self.panel.deleteLater()
+
+    def test_the_button_is_disabled(self):
+        self.assertFalse(self.panel.open_editor_button.isEnabled())
+
+    def test_the_panel_says_a_repository_must_be_bound(self):
+        self.assertIn("nothing is bound", self.panel.status_text())
+
+    def test_calling_it_directly_opens_nothing_and_says_why(self):
+        with mock.patch.object(editor, "open_directory") as opened:
+            self.assertFalse(self.panel.open_in_editor())
+        opened.assert_not_called()
+        self.assertIn("bound", self.panel.log_text())
+
+
+class TestOpenInEditorStyling(DialogPanelTestCase):
+    """R10: the button is named for the stylesheet, and styles nothing
+    itself. The blanket guards live in tests/garage/test_panels.py; this
+    pins the object name they select on."""
+
+    def test_the_button_carries_its_object_name(self):
+        self.assertEqual(
+            self.panel.open_editor_button.objectName(), "dialog-open-editor")
 
 
 if __name__ == "__main__":

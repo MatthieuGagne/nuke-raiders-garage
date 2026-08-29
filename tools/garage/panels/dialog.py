@@ -39,7 +39,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from tools.garage.core import dialog_model
+from tools.garage.core import dialog_model, editor
 from tools.garage.core.project import Binding, BindingError
 from tools.garage.panels.runner import RunController
 
@@ -352,6 +352,11 @@ class DialogPanel(QWidget):
 
         controls.addStretch(1)
 
+        self.open_editor_button = QPushButton("Open in VS Code")
+        self.open_editor_button.setObjectName("dialog-open-editor")
+        self.open_editor_button.clicked.connect(lambda: self.open_in_editor())
+        controls.addWidget(self.open_editor_button)
+
         self.save_button = QPushButton("Save & Generate")
         self.save_button.setObjectName("dialog-save")
         self.save_button.setProperty("role", "primary")
@@ -605,16 +610,24 @@ class DialogPanel(QWidget):
         return self.refusal_label.text()
 
     def _refresh_refusal(self) -> Optional[str]:
-        """Recompute AC8's refusal, gate the Save button on it, and return
-        the message (or None) so a caller that already needs it -- `save`,
-        below -- is not asking `dialog_model.refusal` a second time for
-        the same answer.
+        """Recompute AC8's refusal, gate the Save and Open buttons on it,
+        and return the message (or None) so a caller that already needs
+        it -- `save`, below -- is not asking `dialog_model.refusal` a
+        second time for the same answer.
 
         Called on every keystroke (through the card, below) rather than
         only at save: the prototype's Dialog screen shows "save blocked"
         while the node is too long, and a button that looks live until it
         is pressed is a worse answer to the same requirement.
         """
+        # R7: with no tree loaded -- no binding, or a file that would not
+        # read -- there is nothing to save and nothing to open. Set before
+        # the branches below, so both early returns leave it right.
+        #
+        # Not gated on the refusal, unlike Save: AC4 asks that pressing it
+        # while a node is over the limit *shows* that refusal, which a
+        # disabled button cannot do.
+        self.open_editor_button.setEnabled(self.data is not None)
         if self.data is None:
             self.refusal_label.hide()
             self.save_button.setEnabled(False)
@@ -674,6 +687,39 @@ class DialogPanel(QWidget):
         self.save_button.setEnabled(False)
         if not self._runs.start([command], self.binding.active_worktree.path):
             self.save_button.setEnabled(True)
+
+    def open_in_editor(self) -> bool:
+        """Save the tree, then open `assets/dialog/` in VS Code (#43
+        R1/R6). Returns False when nothing was opened.
+
+        Saving first is the point rather than a convenience: the panel's
+        in-memory tree and the file are the same content in two places,
+        and opening the file while they disagree shows the user stale
+        JSON to edit against. `save()` is called whole -- generator
+        included -- so every refusal it already enforces (the limits, a
+        run in progress, an outside edit) stops the editor too, with
+        nothing written and nothing opened.
+
+        Every rule about *how* an editor is found and started lives in
+        `tools.garage.core.editor` and is tested with no display and no
+        editor; what is here is the order things happen in.
+        """
+        if self.binding is None or self.data is None:
+            self._report(
+                "No game repository is bound, so there is no dialog "
+                "directory to open."
+            )
+            return False
+        if not self.save():
+            return False
+        directory = dialog_model.dialog_dir(self.binding)
+        try:
+            editor.open_directory(directory)
+        except editor.EditorError as exc:
+            self._report(exc.message)
+            return False
+        self._report(f"Opened '{directory}' in {editor.EDITOR_NAME}.")
+        return True
 
     def _on_run_finished(self, results) -> None:
         for result in results:

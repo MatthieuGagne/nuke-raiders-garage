@@ -64,16 +64,17 @@ names / dynamic properties the panels already expose for this purpose:
   `#dialog-node-id`, `#dialog-node-text`, `#dialog-node-count`,
   `#dialog-node-preview`, `#dialog-link-chip`, `#dialog-refusal`,
   `#dialog-log` -- the dialog panel (`tools/garage/panels/dialog.py`); its
-  other object names (`#dialog-panel`, `#dialog-save`, `#dialog-add-node`,
-  `#dialog-add-npc`, `#dialog-rename-npc`, `#dialog-npc-name`,
-  `#dialog-delete-node`, `#dialog-next-combo`, `#dialog-choice-label`,
-  `#dialog-add-choice`, `#dialog-remove-choice`) are plain widgets styled
-  only by their type selector -- the same as `#assets-open` and
-  `#assets-convert` in `assets.py`, neither of which gets a docstring
-  entry either. Named here only so a reader knows where to look, not
-  because a rule exists for them. `[over="true"]` on a card and on its
-  count is the over-the-limit treatment the prototype's `.node.over`
-  declares; the count also spells the numbers out (`70/63`), so colour is
+  other object names (`#dialog-panel`, `#dialog-save`, `#dialog-open-editor`,
+  `#dialog-add-node`, `#dialog-add-npc`, `#dialog-rename-npc`,
+  `#dialog-npc-name`, `#dialog-delete-node`, `#dialog-next-combo`,
+  `#dialog-choice-label`, `#dialog-add-choice`, `#dialog-remove-choice`)
+  are plain widgets styled only by their type selector -- the same as
+  `#assets-open` and `#assets-convert` in `assets.py`, neither of which
+  gets a docstring entry either. Named here only so a reader knows where
+  to look, not because a rule exists for them. `[over="true"]` on a card
+  and on its count is the over-the-limit treatment the prototype's
+  `.node.over` declares; the count also spells the numbers out
+  (`70/63`), so colour is
   never the only signal. `#dialog-node-preview` is the Game Boy dialog
   box, painted in the four `gb-*` shades.
 """
