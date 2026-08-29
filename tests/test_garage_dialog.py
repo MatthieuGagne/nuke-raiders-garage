@@ -878,5 +878,114 @@ class TestGeneratorCommand(DialogModelTestCase):
                 )
 
 
+class TestDialogDir(DialogModelTestCase):
+    """R2: the directory the button opens is resolved through the
+    binding, never joined by a caller."""
+
+    def test_it_is_the_bound_worktrees_assets_dialog(self):
+        self.assertEqual(
+            dialog_model.dialog_dir(self.binding),
+            self.binding.resolve("assets", "dialog"),
+        )
+
+    def test_it_holds_both_dialog_files(self):
+        directory = dialog_model.dialog_dir(self.binding)
+        names = sorted(p.name for p in directory.iterdir())
+        self.assertEqual(names, ["hubs.json", "npcs.json"])
+
+
+class TestLoadStamps(DialogModelTestCase):
+    """R8: what the files looked like when Garage read them."""
+
+    def test_load_records_a_stamp_for_each_file(self):
+        data = self.reload()
+        self.assertTrue(data.npcs_stamp.exists)
+        self.assertTrue(data.hubs_stamp.exists)
+
+    def test_an_untouched_pair_is_not_a_refusal(self):
+        data = self.reload()
+        self.assertIsNone(dialog_model.clobber_refusal(data))
+
+
+class TestClobberRefusal(DialogModelTestCase):
+    """R8/AC6: a file changed outside Garage is not overwritten.
+
+    Every fixture edit below changes the file's *size*, so the refusal
+    never rests on mtime resolution -- a same-size rewrite within one
+    filesystem tick is what `assets.Stamp` carries an mtime for, and is
+    covered in tests/test_garage_assets.py rather than raced here.
+    """
+
+    def test_a_changed_npcs_file_refuses_and_names_it(self):
+        data = self.reload()
+        path = self.repo / "assets" / "dialog" / "npcs.json"
+        path.write_text(path.read_text(encoding="utf-8") + "\n\n",
+                        encoding="utf-8")
+
+        message = dialog_model.clobber_refusal(data)
+        self.assertIsNotNone(message)
+        self.assertIn("npcs.json", message)
+
+    def test_a_changed_hubs_file_refuses_and_names_it(self):
+        data = self.reload()
+        path = self.repo / "assets" / "dialog" / "hubs.json"
+        path.write_text(path.read_text(encoding="utf-8") + "\n\n",
+                        encoding="utf-8")
+
+        message = dialog_model.clobber_refusal(data)
+        self.assertIsNotNone(message)
+        self.assertIn("hubs.json", message)
+
+    def test_save_refuses_rather_than_overwriting(self):
+        data = self.reload()
+        path = self.repo / "assets" / "dialog" / "npcs.json"
+        outside = path.read_text(encoding="utf-8") + "\n\n"
+        path.write_text(outside, encoding="utf-8")
+        data.npcs[0]["nodes"][0]["text"] = "Garage wins?"
+
+        with self.assertRaises(dialog_model.DialogError) as caught:
+            dialog_model.save(data)
+
+        self.assertIn("npcs.json", caught.exception.message)
+        self.assertEqual(path.read_text(encoding="utf-8"), outside)
+
+    def test_a_refused_save_writes_neither_file(self):
+        data = self.reload()
+        hubs = self.repo / "assets" / "dialog" / "hubs.json"
+        npcs = self.repo / "assets" / "dialog" / "npcs.json"
+        hubs.write_text(hubs.read_text(encoding="utf-8") + "\n\n",
+                        encoding="utf-8")
+        before = npcs.read_bytes()
+        data.npcs[0]["nodes"][0]["text"] = "Garage wins?"
+
+        with self.assertRaises(dialog_model.DialogError):
+            dialog_model.save(data)
+
+        self.assertEqual(npcs.read_bytes(), before)
+
+    def test_two_saves_in_a_row_are_allowed(self):
+        """The stamps follow Garage's own write; without that, the second
+        save would refuse against the first one's output."""
+        data = self.reload()
+        data.npcs[0]["nodes"][0]["text"] = "First."
+        dialog_model.save(data)
+        data.npcs[0]["nodes"][0]["text"] = "Second."
+        dialog_model.save(data)
+
+        written = json.loads(
+            (self.repo / "assets" / "dialog" / "npcs.json").read_text(
+                encoding="utf-8"))
+        self.assertEqual(written["npcs"][0]["nodes"][0]["text"], "Second.")
+
+    def test_data_built_without_stamps_still_saves(self):
+        """A `DialogData` a caller assembled by hand has no baseline, so
+        there is nothing to compare and nothing to refuse -- it must not
+        be treated as "changed"."""
+        data = self.reload()
+        data.npcs_stamp = None
+        data.hubs_stamp = None
+        dialog_model.save(data)
+
+
 if __name__ == "__main__":
     unittest.main()

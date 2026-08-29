@@ -34,6 +34,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional, Union
 
+from tools.garage.core import assets
 from tools.garage.core.make_runner import Command
 
 # ── The Game Boy's limits ────────────────────────────────────────────────
@@ -57,8 +58,15 @@ SENTINELS = (END, SHOP)
 
 # ── Where things live in the game repository ─────────────────────────────
 
-NPCS_RELATIVE = ("assets", "dialog", "npcs.json")
-HUBS_RELATIVE = ("assets", "dialog", "hubs.json")
+# The directory both files live in. Named once and joined onto, rather
+# than spelled twice: #43's button opens the directory itself, and a
+# second spelling is a second thing to keep in step. NPCS_ARG/HUBS_ARG
+# below are a *second*, deliberate spelling of this same path -- posix
+# strings the Makefile-matching argv needs (see `generator_command`) --
+# not an oversight to "fix" by rederiving them from this tuple.
+DIALOG_DIR_RELATIVE = ("assets", "dialog")
+NPCS_RELATIVE = DIALOG_DIR_RELATIVE + ("npcs.json",)
+HUBS_RELATIVE = DIALOG_DIR_RELATIVE + ("hubs.json",)
 GENERATOR_RELATIVE = ("tools", "dialog_to_c.py")
 # Posix-spelled and relative to the worktree, because that is how the
 # game repository's Makefile spells them -- see `generator_command`.
@@ -69,6 +77,17 @@ DIALOG_OUT_RELATIVE = "src/dialog_data.c"
 HUB_OUT_RELATIVE = "src/hub_data.c"
 
 _MAX_NPCS_RE = re.compile(r"#define\s+MAX_NPCS\s+(\d+)")
+
+
+def dialog_dir(binding) -> Path:
+    """`assets/dialog/` of the active worktree (R2 -- resolved through
+    the binding, never joined by a caller).
+
+    Both dialog files live here, and it is what #43's button hands to the
+    editor: a folder rather than a file, so `hubs.json` -- which the panel
+    does not surface at all -- is reachable too.
+    """
+    return binding.resolve(*DIALOG_DIR_RELATIVE)
 
 
 class DialogError(Exception):
@@ -96,6 +115,12 @@ class DialogData:
     hubs: List[dict] = field(default_factory=list)
     npcs_path: Optional[Path] = None
     hubs_path: Optional[Path] = None
+    # What each file looked like when `load` read it (R8). None means "no
+    # baseline was taken" -- a DialogData a caller assembled by hand --
+    # and never "unchanged": `clobber_refusal` skips a None rather than
+    # inventing a comparison it cannot make.
+    npcs_stamp: Optional[assets.Stamp] = None
+    hubs_stamp: Optional[assets.Stamp] = None
 
 
 def _read_json(path: Path, what: str) -> dict:
@@ -127,6 +152,10 @@ def load(binding) -> DialogData:
         hubs=hubs_doc.get("hubs", []),
         npcs_path=npcs_path,
         hubs_path=hubs_path,
+        # Stamped after the read, not before: the file Garage is holding
+        # is the one it just parsed.
+        npcs_stamp=assets.stamp(npcs_path),
+        hubs_stamp=assets.stamp(hubs_path),
     )
 
 
@@ -142,12 +171,57 @@ def _write_json(path: Path, document: dict) -> None:
         raise DialogError(f"'{path}' could not be written: {exc}.") from exc
 
 
+def clobber_refusal(data: DialogData) -> Optional[str]:
+    """The sentence to show instead of saving, when a file changed on
+    disk after Garage read it (R8), or None when the save may go ahead.
+
+    Garage invites the user to edit these files in an external editor
+    (#43), so "open, edit outside, come back, press Save" is an ordinary
+    sequence rather than a race -- and without this check it silently
+    discards the editor's work. Same class of defect, and same mechanism,
+    as the asset panel's mid-run edit (#11): `assets.Stamp` compares size
+    *and* mtime, so a rewrite of the same byte count is still a change.
+
+    The refusal names the file, and does not re-read the tree: reloading
+    is a separate spec (#43, Out of Scope).
+    """
+    for path, before in (
+        (data.npcs_path, data.npcs_stamp),
+        (data.hubs_path, data.hubs_stamp),
+    ):
+        if before is None or path is None:
+            continue
+        if assets.has_changed(before, assets.stamp(path)):
+            return (
+                f"Save blocked — '{path.name}' changed on disk after Garage "
+                f"read it, and saving now would overwrite that edit. Reopen "
+                f"the dialog panel to load the file as it stands; the edits "
+                f"made here since are lost."
+            )
+    return None
+
+
 def save(data: DialogData) -> None:
     """Write both files back (AC2). The caller checks `refusal` first --
     see Task 4; this function writes what it is given.
+
+    It does check one thing itself: `clobber_refusal` (R8). That refusal
+    is about the file rather than the tree, every caller must obey it,
+    and the cost of missing it is somebody's lost work -- so it is raised
+    here, before a byte is written, rather than trusted to each caller.
     """
+    blocked = clobber_refusal(data)
+    if blocked is not None:
+        raise DialogError(blocked)
     _write_json(data.npcs_path, {"npcs": data.npcs})
     _write_json(data.hubs_path, {"hubs": data.hubs})
+    # Re-baselined against Garage's own write, or the next save would be
+    # refused by this one's output. Only for a file that had a baseline:
+    # `None` means the caller never wanted one.
+    if data.npcs_stamp is not None:
+        data.npcs_stamp = assets.stamp(data.npcs_path)
+    if data.hubs_stamp is not None:
+        data.hubs_stamp = assets.stamp(data.hubs_path)
 
 
 # ── The limits, as the panel asks about them ─────────────────────────────
