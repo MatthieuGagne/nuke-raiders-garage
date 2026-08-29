@@ -352,7 +352,7 @@ class DialogPanel(QWidget):
 
         controls.addStretch(1)
 
-        self.open_editor_button = QPushButton("Open in VS Code")
+        self.open_editor_button = QPushButton(f"Open in {editor.EDITOR_NAME}")
         self.open_editor_button.setObjectName("dialog-open-editor")
         self.open_editor_button.clicked.connect(lambda: self.open_in_editor())
         controls.addWidget(self.open_editor_button)

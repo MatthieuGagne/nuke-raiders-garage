@@ -60,7 +60,10 @@ SENTINELS = (END, SHOP)
 
 # The directory both files live in. Named once and joined onto, rather
 # than spelled twice: #43's button opens the directory itself, and a
-# second spelling is a second thing to keep in step.
+# second spelling is a second thing to keep in step. NPCS_ARG/HUBS_ARG
+# below are a *second*, deliberate spelling of this same path -- posix
+# strings the Makefile-matching argv needs (see `generator_command`) --
+# not an oversight to "fix" by rederiving them from this tuple.
 DIALOG_DIR_RELATIVE = ("assets", "dialog")
 NPCS_RELATIVE = DIALOG_DIR_RELATIVE + ("npcs.json",)
 HUBS_RELATIVE = DIALOG_DIR_RELATIVE + ("hubs.json",)
@@ -116,8 +119,8 @@ class DialogData:
     # baseline was taken" -- a DialogData a caller assembled by hand --
     # and never "unchanged": `clobber_refusal` skips a None rather than
     # inventing a comparison it cannot make.
-    npcs_stamp: Optional["assets.Stamp"] = None
-    hubs_stamp: Optional["assets.Stamp"] = None
+    npcs_stamp: Optional[assets.Stamp] = None
+    hubs_stamp: Optional[assets.Stamp] = None
 
 
 def _read_json(path: Path, what: str) -> dict:

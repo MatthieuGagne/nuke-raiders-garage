@@ -841,6 +841,19 @@ class TestOpenInEditorButton(DialogPanelTestCase):
             self.panel.open_editor_button.click()
         self.assertIn(editor.EDITOR_NAME, self.panel.log_text())
 
+    def test_the_real_open_directory_chain_spawns_the_resolved_editor(self):
+        """The panel resolves `dialog_dir`, hands it to the real
+        `editor.open_directory`, which resolves PATH via `_find_editor` and
+        starts it via `_spawn` -- asserted as one chain, with only those two
+        named seams replaced, rather than mocking `open_directory` itself
+        wholesale as every other test in this class does."""
+        with mock.patch.object(editor, "_find_editor",
+                               return_value="C:/vs/code.CMD"):
+            with mock.patch.object(editor, "_spawn") as spawn:
+                self.panel.open_editor_button.click()
+        spawn.assert_called_once_with(
+            ["C:/vs/code.CMD", str(self.binding.resolve("assets", "dialog"))])
+
 
 class TestOpenInEditorRefusals(DialogPanelTestCase):
     """AC2/AC4/AC6: nothing is opened, and nothing is written, on a

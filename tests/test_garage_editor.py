@@ -132,8 +132,9 @@ class TestTheExceptionIsScoped(unittest.TestCase):
         import ast
 
         core_dir = REPO_ROOT / "tools" / "garage" / "core"
+        editor_path = core_dir / "editor.py"
         for path in sorted(core_dir.rglob("*.py")):
-            if path.name == "editor.py":
+            if path == editor_path:
                 continue
             tree = ast.parse(path.read_text(encoding="utf-8"))
             docstrings = set()
