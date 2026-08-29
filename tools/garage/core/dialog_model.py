@@ -182,8 +182,9 @@ def clobber_refusal(data: DialogData) -> Optional[str]:
     as the asset panel's mid-run edit (#11): `assets.Stamp` compares size
     *and* mtime, so a rewrite of the same byte count is still a change.
 
-    The refusal names the file, and does not re-read the tree: reloading
-    is a separate spec (#43, Out of Scope).
+    The refusal names the file and does not re-read the tree itself --
+    that is the dialog panel's Reload button (#45), which calls `load`
+    again and replaces this `DialogData` outright.
     """
     for path, before in (
         (data.npcs_path, data.npcs_stamp),
