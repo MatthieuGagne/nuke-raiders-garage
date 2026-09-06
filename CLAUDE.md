@@ -11,6 +11,8 @@ the game repository's `CLAUDE.md` —
 https://github.com/MatthieuGagne/gmb-nuke-raider/blob/master/CLAUDE.md, the "Workflow" section —
 and govern **both** repositories. Where the two disagree, the game repository wins.
 
+Worktrees: every worktree is an Orca worktree — create and remove via the `orca` CLI (`orca-cli` skill). Never `git worktree add`, never `EnterWorktree`, never `.claude/worktrees/`; Orca worktrees live under `~\orca\workspaces\<repo>\<name>`.
+
 ## Building, running & testing
 
 Python 3.13, standard-library `unittest`, no build step. `pytest` is not used here and is not
